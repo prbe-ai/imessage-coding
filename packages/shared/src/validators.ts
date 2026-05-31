@@ -41,6 +41,14 @@ function isOptString(v: unknown): v is string | undefined {
   return v === undefined || typeof v === 'string';
 }
 
+function isOptRecord(v: unknown): v is Record<string, unknown> | undefined {
+  return v === undefined || (isRecord(v) && !Array.isArray(v));
+}
+
+function isOptArray(v: unknown): v is unknown[] | undefined {
+  return v === undefined || Array.isArray(v);
+}
+
 // --- specific enum guards ----------------------------------------------------
 
 export const isAfkState = (v: unknown): v is AfkState => isEnumValue(AfkState, v);
@@ -96,8 +104,9 @@ export function isInboundMessage(v: unknown): v is InboundMessage {
     isString(v['from']) &&
     isString(v['text']) &&
     isMessageChannel(v['channel']) &&
-    isOptString(v['conversationState']) &&
-    isOptString(v['recentHistory']) &&
+    isOptString(v['conversationId']) &&
+    isOptRecord(v['conversationState']) &&
+    isOptArray(v['recentHistory']) &&
     isOptString(v['reactionTo']) &&
     isString(v['messageId'])
   );

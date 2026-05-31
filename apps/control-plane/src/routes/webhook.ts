@@ -15,6 +15,7 @@ import { Hono } from 'hono';
 import {
   AGENTPHONE_SIGNATURE_HEADER,
   AGENTPHONE_TIMESTAMP_HEADER,
+  AGENTPHONE_WEBHOOK_ID_HEADER,
 } from '@imsg/transport';
 import { orchestrate } from '../orchestrator/index.ts';
 import { getTransport } from '../transport.ts';
@@ -35,6 +36,14 @@ webhookRoute.post('/api/agentphone/webhook', async (c) => {
     c.req.header(AGENTPHONE_TIMESTAMP_HEADER) ??
     c.req.header(AGENTPHONE_TIMESTAMP_HEADER.toLowerCase()) ??
     '';
+  // Per-delivery id (X-Webhook-ID) — the stable per-message handle used as
+  // messageId. Captured here so it travels into parseInbound. NOTE: nothing
+  // dedupes on it yet, so provider retries re-run orchestrate (see TODO: add a
+  // durable processed-webhook store keyed on this id).
+  const webhookId =
+    c.req.header(AGENTPHONE_WEBHOOK_ID_HEADER) ??
+    c.req.header(AGENTPHONE_WEBHOOK_ID_HEADER.toLowerCase()) ??
+    '';
 
   // verifyWebhook THROWS (fail-closed) if the secret is unconfigured.
   let valid: boolean;
@@ -50,10 +59,16 @@ webhookRoute.post('/api/agentphone/webhook', async (c) => {
 
   let inbound;
   try {
-    inbound = transport.parseInbound(rawBody);
+    inbound = transport.parseInbound(rawBody, webhookId);
   } catch (err) {
     console.error('[webhook] parse failed', err);
     return c.json({ error: 'unparseable_body' }, 400);
+  }
+
+  // Non-actionable event (e.g. agent.call_ended) — acknowledge without
+  // orchestrating so the provider doesn't retry, but don't run an empty turn.
+  if (inbound === null) {
+    return c.json({ ok: true, handled: false });
   }
 
   // Orchestrate asynchronously-safe but awaited: errors are swallowed into a

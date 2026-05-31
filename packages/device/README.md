@@ -7,8 +7,7 @@ answer, or steer by text. Destructive operations stay **fail-closed**.
 
 Productized from the validated Phase-0 spike (`plugins/imsg-spike`); the
 localhost `:8799` control surface is replaced by calls to the cloud control
-plane. Reuses the `prbe-cc-tap-plugin` outbox/backoff/creds/sanitize/killswitch
-patterns.
+plane. Uses a durable outbox/backoff/creds/sanitize/killswitch design.
 
 ## What it does
 
@@ -33,7 +32,7 @@ patterns.
 One-liner (embeds a single-use pairing token from the dashboard):
 
 ```bash
-curl -fsSL https://message.prbe.ai/install.sh | TOKEN=<pairing-token> sh
+curl -fsSL https://msg.example.com/install.sh | TOKEN=<pairing-token> sh
 ```
 
 `install.sh` resolves bun's absolute path, stages the plugin into a local
@@ -60,7 +59,7 @@ All mutable state lives under `IMSG_DEVICE_DIR` (default
 
 | Var | Default | Purpose |
 | --- | --- | --- |
-| `IMSG_CONTROL_PLANE_URL` | `https://message.prbe.ai` | control plane base URL |
+| `IMSG_CONTROL_PLANE_URL` | `http://localhost:8080` | control plane base URL |
 | `IMSG_DEVICE_DIR` | `~/.claude/plugins/imsg-device` | mutable state dir |
 | `IMSG_DEVICE_TOKEN` | — | override the device token (CI/testing) |
 | `IMSG_SESSION_ID` | random uuid | session id for the channel server |

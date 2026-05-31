@@ -3,8 +3,7 @@
   "name": "imsg",
   "description": "iMessage-driven remote control + steering for Claude Code sessions.",
   "owner": {
-    "name": "Probe",
-    "url": "https://prbe.ai"
+    "name": "imessage-coding"
   },
   "plugins": [
     {
@@ -12,8 +11,7 @@
       "description": "Drive Claude Code from iMessage. While you're away from the keyboard, permission prompts, questions, and plans are relayed to your phone; reply to approve, deny, answer, or steer. Destructive operations stay fail-closed.",
       "source": ".",
       "category": "productivity",
-      "tags": ["imessage", "remote", "claude-code", "afk", "channels"],
-      "homepage": "https://message.prbe.ai"
+      "tags": ["imessage", "remote", "claude-code", "afk", "channels"]
     }
   ]
 }

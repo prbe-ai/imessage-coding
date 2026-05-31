@@ -12,7 +12,7 @@ export interface ControlPlaneEnv {
   databaseUrl: string;
   /** Port the HTTP server binds. */
   port: number;
-  /** Public base URL the device + install.sh point at (e.g. https://message.prbe.ai). */
+  /** Public base URL the device + install.sh point at (e.g. https://msg.example.com). */
   webhookBaseUrl: string;
 
   /** Server-side pepper mixed into device_token hashing. Never shipped to a device. */
@@ -53,7 +53,9 @@ const DEFAULT_PORT = 8080;
 // model id against OpenAI. Prod sets LLM_API_BASE to the flycast proxy (fly.toml).
 const DEFAULT_LLM_API_BASE = 'http://localhost:4000/v1';
 const DEFAULT_LLM_MODEL = 'gemini-3.5-flash';
-const DEFAULT_WEBHOOK_BASE_URL = 'https://message.prbe.ai';
+// Local-dev default. Prod sets WEBHOOK_BASE_URL to the public control-plane
+// origin (fly.toml [env]); never hardcode a specific deployment's host here.
+const DEFAULT_WEBHOOK_BASE_URL = 'http://localhost:8080';
 
 let cached: ControlPlaneEnv | undefined;
 

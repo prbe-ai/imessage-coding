@@ -28,14 +28,14 @@ export const dynamic = "force-dynamic";
 /** Public origin that serves the install script at `/install.sh`.
  *
  *  This is the dashboard's own public web origin (`NEXT_PUBLIC_APP_URL`,
- *  e.g. https://message.prbe.ai) — NOT the control plane (`CONTROL_PLANE_URL`,
+ *  e.g. https://msg.example.com) — NOT the control plane (`CONTROL_PLANE_URL`,
  *  the Fly API host), which does not serve static assets. The build copies
  *  packages/device/install.sh into public/install.sh so this origin serves it.
- *  Falls back to the documented production host. Server-side only. */
+ *  Falls back to the dashboard's local-dev origin. Server-side only. */
 function installBaseUrl(): string {
   return (
     process.env.NEXT_PUBLIC_APP_URL ||
-    "https://message.prbe.ai"
+    "http://localhost:3000"
   ).replace(/\/+$/, "");
 }
 

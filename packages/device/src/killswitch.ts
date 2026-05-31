@@ -11,8 +11,8 @@
  *   2. Remote poll: GET /api/device/state carries an `enabled` flag the control
  *      plane can flip. Cached for KILLSWITCH_TTL_MS. On fetch failure it FAILS
  *      OPEN (keeps operating) — losing reachability already stops egress, so
- *      failing closed would just amplify a transient hiccup. Mirrors the
- *      prbe-cc-tap-plugin killswitch exactly: graceful pause, not fail-secure.
+ *      failing closed would just amplify a transient hiccup. Graceful pause,
+ *      not fail-secure.
  *
  * CRITICAL invariant: this module must NEVER influence permission verdicts.
  * A killswitch that fails open must not, by any path, turn a "deny" into an

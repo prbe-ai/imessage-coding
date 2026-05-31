@@ -43,7 +43,7 @@
   --radius-xl: calc(var(--radius) + 4px);
   --radius-2xl: calc(var(--radius) + 8px);
 
-  /* PRBE semantic surface tokens (warm neutral, light only) */
+  /* Semantic status tokens (warm neutral, light only) */
   --color-surface: #faf9f5;
   --color-surface-container: #efeeea;
   --color-surface-container-low: #f5f4f0;
@@ -58,10 +58,10 @@
   --color-on-primary-container: #858382;
   --color-secondary-accent: #a33e00;
   --color-secondary-container: #fe6500;
-  --color-prbe-error: #ef4444;
-  --color-prbe-success: #4ade80;
-  --color-prbe-warning: #fe6500;
-  --color-prbe-info: #60a5fa;
+  --color-status-error: #ef4444;
+  --color-status-success: #4ade80;
+  --color-status-warning: #fe6500;
+  --color-status-info: #60a5fa;
 }
 
 :root {

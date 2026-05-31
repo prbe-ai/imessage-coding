@@ -9,7 +9,7 @@
  * GOOGLE_CLIENT_SECRET must be set when you run the CLI.
  *
  *   DATABASE_URL=postgresql://…/imessage_coding \
- *   BETTER_AUTH_SECRET=… BETTER_AUTH_URL=https://message.prbe.ai \
+ *   BETTER_AUTH_SECRET=… BETTER_AUTH_URL=https://msg.example.com \
  *   GOOGLE_CLIENT_ID=… GOOGLE_CLIENT_SECRET=… \
  *   bunx @better-auth/cli@latest migrate --config src/lib/idp/auth-cli.ts
  *

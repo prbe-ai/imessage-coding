@@ -1,7 +1,7 @@
 /**
  * @imsg/device — configuration: paths, env, control-plane URL.
  *
- * Mirrors prbe-cc-tap-plugin/tap/config.py: every path derives from a single
+ * Every path derives from a single
  * IMSG_DEVICE_DIR (env override) or ~/.claude/plugins/imsg-device/, so the
  * install script, the channel server, the hook, and the CLI all agree on
  * where state lives WITHOUT coordinating. The plugin root (CLAUDE_PLUGIN_ROOT)
@@ -13,8 +13,9 @@ import { DeviceApiRoute } from '@imsg/shared';
 
 export const PLUGIN_NAME = 'imsg-device';
 
-/** Public base URL of the cloud control plane the device talks to. */
-const DEFAULT_CONTROL_PLANE_URL = 'https://message.prbe.ai';
+/** Public base URL of the cloud control plane the device talks to. Local-dev
+ *  default; set IMSG_CONTROL_PLANE_URL to your deployed control-plane host. */
+const DEFAULT_CONTROL_PLANE_URL = 'http://localhost:8080';
 
 /** Long-poll timeout for GET /api/device/decisions, kept under the server's ~25s. */
 export const DECISIONS_LONG_POLL_TIMEOUT_MS = 30_000;

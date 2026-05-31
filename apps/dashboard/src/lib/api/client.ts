@@ -2,8 +2,8 @@
  * Same-origin BFF client for the dashboard's own route handlers under
  * `/api/*`. Every call uses `credentials: "include"` so the Better Auth
  * session cookie reaches the server-side handler (which resolves the
- * account and scopes the query). Mirrors prbe-dashboard's credentials:
- * "include" rule.
+ * account and scopes the query). Same-origin requests use the
+ * `credentials: "include"` convention so the cookie is always sent.
  */
 
 export class ApiError extends Error {

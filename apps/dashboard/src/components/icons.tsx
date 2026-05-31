@@ -1,24 +1,32 @@
-/* Probe brand mark + lockup. Same glyph as prbe-dashboard so the two
- * surfaces read as one product. `currentColor` lets the mark invert against
- * dark canvases. */
+/* Neutral product mark — a simple geometric glyph with no brand identity.
+ * `currentColor` lets the mark invert against light or dark surfaces. */
 
-export function ProbeMark({ className }: { className?: string }) {
+export function BrandMark({ className }: { className?: string }) {
   return (
-    <svg viewBox="0 0 256 256" aria-hidden="true" className={className}>
-      <path d="M56.79,118l64,36-64,36v-72Z" fill="currentColor" opacity="0.18" />
-      <path d="M77.21,94l78,48-78,48v-96Z" fill="currentColor" opacity="0.4" />
-      <path d="M99.21,66l100,62-100,62v-124Z" fill="currentColor" />
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="4" width="18" height="14" rx="3" />
+      <path d="M8 21l4-3 4 3" />
     </svg>
   );
 }
 
-export function ProbeBrand({ className }: { className?: string }) {
+/* Mark-only brand lockup (no wordmark). Keeps the onboarding/sign-in layout
+ * hooks (`.onb-brand` / `.onb-mark`) while shipping no product name. */
+export function Brand({ className }: { className?: string }) {
   return (
     <div className={`onb-brand${className ? ` ${className}` : ""}`}>
       <div className="onb-mark">
-        <ProbeMark />
+        <BrandMark />
       </div>
-      <div className="onb-wm">Probe</div>
     </div>
   );
 }

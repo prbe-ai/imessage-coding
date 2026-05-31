@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * Onboarding chrome — a single centered column on the cream marketing canvas,
- * mirroring prbe-dashboard's `OnboardingShell`. Small Probe mark top-left, an
+ * Onboarding chrome — a single centered column on the cream marketing canvas.
+ * Small product mark top-left, an
  * optional `rightTop` slot (the account menu) top-right, and the step content
  * (header + body + nav buttons) vertically + horizontally centered.
  *
@@ -12,7 +12,7 @@
 import { type ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 
-import { ProbeMark } from "@/components/icons";
+import { BrandMark } from "@/components/icons";
 
 export type OnboardingShellProps = {
   /** Stable key per logical step. When it changes, the content re-mounts and
@@ -20,7 +20,7 @@ export type OnboardingShellProps = {
   stepKey: string;
   /** Header content — typically `<StepVisual icon={...} title="…" />`. */
   leftVisual?: ReactNode;
-  /** Override for the top-left mark. Defaults to the Probe glyph; pass `null`
+  /** Override for the top-left mark. Defaults to the product mark; pass `null`
    *  to suppress entirely. */
   leftTop?: ReactNode;
   /** Top-right slot — typically the signed-in user's account menu. */
@@ -45,7 +45,7 @@ export function OnboardingShell({
   const topLeft =
     leftTop === undefined ? (
       <span className="onb-centered-toplogo" aria-hidden="true">
-        <ProbeMark />
+        <BrandMark />
       </span>
     ) : (
       leftTop

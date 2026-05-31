@@ -1,7 +1,7 @@
 /**
  * @imsg/device — HTTP client + classification + backoff.
  *
- * Ports prbe-cc-tap-plugin/tap/httpclient.py: a Classify enum
+ * A Classify enum
  * (Success / Poison / Halt / Retry) and exponential backoff with jitter,
  * capped at 300s. Uses the runtime `fetch` (Bun/Node 18+); zero extra deps.
  *

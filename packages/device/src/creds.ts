@@ -2,8 +2,8 @@
  * @imsg/device — device_token credential storage.
  *
  * Bearer device_token resolution + persistence, with macOS Keychain as the
- * primary store and a 0600 file as the fallback (mirrors prbe-cc-tap-plugin's
- * keychain+file creds pattern, which itself only had the file path on Python).
+ * primary store and a 0600 file as the fallback (keychain + file creds
+ * pattern).
  *
  * Read order:  env IMSG_DEVICE_TOKEN  >  keychain  >  ${deviceDir}/.token
  * Write:       keychain (best-effort) AND the 0600 file (always), so a keychain

@@ -175,7 +175,7 @@ chains the status line, pre-allows the `reply` tool, and pairs the device.
   fly launch --no-deploy     # first time (or `fly apps create`)
   fly secrets set DATABASE_URL=... AGENTPHONE_API_KEY=... AGENTPHONE_AGENT_ID=... \
                   AGENTPHONE_WEBHOOK_SECRET=... LLM_API_KEY=... \
-                  DEVICE_TOKEN_PEPPER=... WEBHOOK_BASE_URL=https://message.prbe.ai
+                  DEVICE_TOKEN_PEPPER=... WEBHOOK_BASE_URL=https://msg.example.com
   fly deploy
   ```
 

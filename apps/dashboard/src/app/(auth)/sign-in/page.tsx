@@ -11,14 +11,14 @@
  *      /home based on whether a number is linked).
  *   3. An already-signed-in visitor is sent straight to the root router.
  *
- * UI: a single centered stack on the cream canvas — Probe lockup, a tagline,
- * then the Google button. Mirrors prbe-dashboard's sign-in chrome.
+ * UI: a single centered stack on the cream canvas — the product mark, a
+ * tagline, then the Google button.
  */
 
 import { Suspense, useEffect, useState } from "react";
 
 import { authClient, signIn } from "@/lib/idp/better-auth-client";
-import { ProbeBrand } from "@/components/icons";
+import { Brand } from "@/components/icons";
 
 function SignInInner() {
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +57,7 @@ function SignInInner() {
   return (
     <div className="signin-page">
       <div className="signin-stack">
-        <ProbeBrand className="signin-brand" />
+        <Brand className="signin-brand" />
         <div className="signin-options">
           <h1 className="signin-options-title">Sign in</h1>
           <p className="signin-tagline">

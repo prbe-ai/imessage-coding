@@ -4,8 +4,8 @@
  * The spike posted to localhost and never persisted; productized, attention
  * events POST to the cloud control plane and MUST survive transient network
  * failure. We use a JSONL file (one queued POST per line) instead of SQLite to
- * stay dependency-free — the prbe-cc-tap-plugin contract explicitly allows
- * "SQLite-OR-file outbox". Concurrency is single-writer in practice (one
+ * stay dependency-free (a SQLite-or-file outbox both satisfy the durability
+ * contract). Concurrency is single-writer in practice (one
  * channel server per session), and writes are append-only + atomic-rewrite on
  * drain, so a crash loses at most the in-flight rewrite, not the whole queue.
  *

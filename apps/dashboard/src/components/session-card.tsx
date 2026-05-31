@@ -21,9 +21,9 @@ import { formatRelativeTime } from "@/lib/utils";
 
 /** Tailwind classes for a session-state badge — `bg-{semantic}/20 text-{semantic}`. */
 const STATE_BADGE: Record<SessionState, string> = {
-  [SessionState.ACTIVE]: "bg-prbe-success/20 text-prbe-success",
-  [SessionState.WAITING]: "bg-prbe-warning/20 text-prbe-warning",
-  [SessionState.IDLE]: "bg-prbe-info/20 text-prbe-info",
+  [SessionState.ACTIVE]: "bg-status-success/20 text-status-success",
+  [SessionState.WAITING]: "bg-status-warning/20 text-status-warning",
+  [SessionState.IDLE]: "bg-status-info/20 text-status-info",
   [SessionState.ENDED]: "bg-outline-variant/30 text-outline",
 };
 

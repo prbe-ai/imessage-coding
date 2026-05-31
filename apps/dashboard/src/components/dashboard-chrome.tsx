@@ -1,15 +1,15 @@
 "use client";
 
 /**
- * Signed-in chrome: a sticky top bar with the Probe wordmark (left), a small
- * Home / Integrations nav, and the account menu (right). Light, warm-neutral,
- * matches DESIGN.md's TopBar (h-16, sticky, bottom border, bg-surface).
+ * Signed-in chrome: a sticky top bar with the product mark (left), a small
+ * Home / Integrations nav, and the account menu (right). Light, warm-neutral
+ * TopBar (h-16, sticky, bottom border, bg-surface).
  */
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-import { ProbeMark } from "@/components/icons";
+import { BrandMark } from "@/components/icons";
 import { AccountMenu } from "@/components/account-menu";
 import { cn } from "@/lib/utils";
 
@@ -31,12 +31,13 @@ export function DashboardChrome({
       <header className="sticky top-0 z-30 h-16 border-b border-outline-variant/40 bg-surface/95 backdrop-blur">
         <div className="mx-auto flex h-full max-w-3xl items-center justify-between px-6">
           <div className="flex items-center gap-6">
-            <Link href="/home" className="flex items-center gap-1.5">
+            <Link
+              href="/home"
+              aria-label="Home"
+              className="flex items-center gap-1.5"
+            >
               <span className="inline-flex size-7 text-ink">
-                <ProbeMark />
-              </span>
-              <span className="text-lg font-extrabold tracking-tighter">
-                Probe
+                <BrandMark />
               </span>
             </Link>
             <nav className="flex items-center gap-4">

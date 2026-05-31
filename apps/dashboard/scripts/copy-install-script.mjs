@@ -1,6 +1,6 @@
 // Build-time step: copy the device installer (packages/device/install.sh) into
 // apps/dashboard/public/install.sh so the dashboard — the public web origin
-// (message.prbe.ai) — serves it statically at GET /install.sh.
+// — serves it statically at GET /install.sh.
 //
 // This is what the Integrations page's one-liner points at:
 //   curl -fsSL ${NEXT_PUBLIC_APP_URL}/install.sh | TOKEN=<pairing-token> sh

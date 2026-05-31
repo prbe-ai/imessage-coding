@@ -2,7 +2,7 @@
 # =============================================================================
 # imsg-device installer — one-liner for the imessage-coding device plugin.
 #
-#   curl -fsSL https://message.prbe.ai/install.sh | TOKEN=<pairing-token> sh
+#   curl -fsSL https://msg.example.com/install.sh | TOKEN=<pairing-token> sh
 #
 # What it does, in order:
 #   1. Resolve bun's ABSOLUTE path (command -v bun) — required so the plugin's
@@ -20,7 +20,7 @@
 #
 # Env:
 #   TOKEN                    single-use pairing token (required to pair)
-#   IMSG_CONTROL_PLANE_URL   control-plane base URL (default https://message.prbe.ai)
+#   IMSG_CONTROL_PLANE_URL   control-plane base URL (default http://localhost:8080)
 #   IMSG_DEVICE_SRC          source dir to install FROM. REQUIRED when this script
 #                            is piped to `sh` (curl | sh), where there is no
 #                            on-disk script path to infer the source from. When
@@ -31,7 +31,7 @@
 # =============================================================================
 set -eu
 
-CONTROL_PLANE_URL="${IMSG_CONTROL_PLANE_URL:-https://message.prbe.ai}"
+CONTROL_PLANE_URL="${IMSG_CONTROL_PLANE_URL:-http://localhost:8080}"
 PLUGIN_NAME="imsg-device"
 MARKETPLACE_NAME="imsg"
 CLAUDE_DIR="${HOME}/.claude"

@@ -142,7 +142,7 @@ export default function IntegrationsPage() {
           </div>
         </section>
 
-        <section className="rounded-lg border border-prbe-info/30 bg-prbe-info/5 p-4">
+        <section className="rounded-lg border border-status-info/30 bg-status-info/5 p-4">
           <h2 className="text-sm font-semibold text-on-surface">
             What happens next
           </h2>

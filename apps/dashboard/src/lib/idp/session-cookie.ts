@@ -1,7 +1,7 @@
 /**
  * The app session cookie name.
  *
- * Mirrors prbe-dashboard's `probe_session` pattern: an HttpOnly cookie that
+ * A standard HttpOnly session-cookie pattern: a cookie that
  * carries the authenticated session. Here the dashboard and control plane
  * share one Neon database, so the dashboard reads the Better Auth session
  * directly server-side (see src/lib/server-session.ts) rather than minting a

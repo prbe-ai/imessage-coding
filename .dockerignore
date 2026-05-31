@@ -1,0 +1,12 @@
+# Keep build contexts lean and reproducible: never ship local node_modules (Bun
+# reinstalls per-stage from the lockfile), git metadata, or — critically — local
+# secret files into an image layer.
+node_modules
+**/node_modules
+.git
+.gitignore
+.env
+.env.*
+**/*.log
+.DS_Store
+tasks

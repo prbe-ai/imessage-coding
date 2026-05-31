@@ -30,6 +30,15 @@ COPY packages/shared    packages/shared
 COPY packages/transport packages/transport
 COPY apps/control-plane  apps/control-plane
 
+# Bun does NOT hoist workspace direct-deps to the root node_modules: `hono`, `pg`,
+# and the `@imsg/*` workspace links live under each package's OWN node_modules. A
+# clean (git) build context carries no node_modules, so the source COPYs above
+# bring none — copy the installed per-package trees from the deps stage. These MUST
+# come AFTER the source COPYs so they are not shadowed by the (node_modules-less)
+# source copy. Without this the runtime crashes: "Cannot find package 'hono'".
+COPY --from=deps /app/apps/control-plane/node_modules ./apps/control-plane/node_modules
+COPY --from=deps /app/packages/transport/node_modules ./packages/transport/node_modules
+
 EXPOSE 8080
 ENV PORT=8080
 

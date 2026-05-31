@@ -2,8 +2,8 @@
 # =============================================================================
 # sync-fly-secrets.sh — push the LiteLLM proxy's SECRET env vars to its Fly app.
 #
-# Source of truth: the repo-root `.env` (gitignored — the single env contract
-# documented in .env.example). This script copies ONLY the secret-class keys the
+# Source of truth: the repo-root `.env.litellm` (gitignored — see
+# .env.litellm.example). This script copies ONLY the secret-class keys the
 # LiteLLM proxy reads into `fly secrets` for app `imsg-litellm`.
 #
 # The proxy is a SEPARATE Fly app from the control-plane, with its OWN secrets:
@@ -33,8 +33,8 @@
 #   --stage           With --apply: stage secrets WITHOUT restarting now; they
 #                     apply on the next `fly deploy`.
 #   --app NAME        Override the Fly app (default: read from fly.toml).
-#   --env-file PATH   Override the env file (default: repo-root .env; also via
-#                     the IMSG_ENV_FILE environment variable).
+#   --env-file PATH   Override the env file (default: repo-root .env.litellm; also
+#                     via the IMSG_ENV_FILE environment variable).
 #   --offline         Skip the remote `fly secrets list` presence/orphan check.
 #   -h, --help        Show this help and exit.
 #
@@ -72,7 +72,7 @@ APPLY=false
 STAGE=false
 OFFLINE=false
 APP=""
-ENV_FILE="${IMSG_ENV_FILE:-$REPO_ROOT/.env}"
+ENV_FILE="${IMSG_ENV_FILE:-$REPO_ROOT/.env.litellm}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -93,7 +93,7 @@ $STAGE && ! $APPLY && die "--stage only makes sense with --apply"
 
 # --- preconditions -----------------------------------------------------------
 [ -f "$FLY_TOML" ] || die "fly.toml not found at $FLY_TOML"
-[ -f "$ENV_FILE" ] || die "env file not found at $ENV_FILE (copy .env.example -> .env, or pass --env-file)"
+[ -f "$ENV_FILE" ] || die "env file not found at $ENV_FILE (copy .env.litellm.example -> .env.litellm, or pass --env-file)"
 
 # App name: explicit flag wins, else read `app = "..."` from fly.toml.
 if [ -z "$APP" ]; then

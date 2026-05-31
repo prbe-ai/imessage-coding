@@ -38,12 +38,12 @@ export async function POST(req: Request): Promise<Response> {
 
   const res = sessionId
     ? await query(
-        `UPDATE sessions SET grant = $1
+        `UPDATE sessions SET "grant" = $1
           WHERE account_id = $2 AND id = $3 AND state <> $4`,
         [grant, ctx.accountId, sessionId, SessionState.ENDED],
       )
     : await query(
-        `UPDATE sessions SET grant = $1
+        `UPDATE sessions SET "grant" = $1
           WHERE account_id = $2 AND state <> $3`,
         [grant, ctx.accountId, SessionState.ENDED],
       );

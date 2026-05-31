@@ -96,8 +96,8 @@ CREATE TABLE IF NOT EXISTS sessions (
                    CHECK (state IN ('active', 'waiting', 'idle', 'ended')),
   afk            TEXT        NOT NULL DEFAULT 'off'
                    CHECK (afk IN ('on', 'off')),
-  grant          TEXT        NOT NULL DEFAULT 'off'
-                   CHECK (grant IN ('off', 'edits', 'full')),
+  "grant"        TEXT        NOT NULL DEFAULT 'off'
+                   CHECK ("grant" IN ('off', 'edits', 'full')),
   last_event_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
@@ -146,7 +146,7 @@ CREATE TABLE IF NOT EXISTS decisions (
   attention_id  UUID        NOT NULL REFERENCES attention_events(id) ON DELETE CASCADE,
   behavior      TEXT        CHECK (behavior IN ('allow', 'deny')),
   answer_text   TEXT,
-  grant         TEXT        CHECK (grant IN ('off', 'edits', 'full')),
+  "grant"       TEXT        CHECK ("grant" IN ('off', 'edits', 'full')),
   source        TEXT        NOT NULL
                   CHECK (source IN ('phone', 'dashboard', 'keyboard', 'timeout')),
   resolved_at   TIMESTAMPTZ NOT NULL DEFAULT now()

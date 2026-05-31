@@ -348,7 +348,7 @@ export async function updateSessionState(args: {
   const row = await queryOne<SessionRow>(
     `UPDATE sessions
         SET afk           = COALESCE($4, afk),
-            grant         = COALESCE($5, grant),
+            "grant"       = COALESCE($5, "grant"),
             last_event_at = now()
       WHERE id = $1 AND device_id = $2 AND account_id = $3
      RETURNING *`,
@@ -373,7 +373,7 @@ export async function updateSessionStateForDevice(args: {
   const rows = await query<SessionRow>(
     `UPDATE sessions
         SET afk           = COALESCE($3, afk),
-            grant         = COALESCE($4, grant),
+            "grant"       = COALESCE($4, "grant"),
             last_event_at = now()
       WHERE device_id = $1 AND account_id = $2 AND state <> $5
      RETURNING *`,
@@ -562,7 +562,7 @@ export async function resolveAttention(args: {
 
     const optionalGrant = args.grant ?? null;
     const decRes = await client.query<DecisionRow>(
-      `INSERT INTO decisions (attention_id, behavior, answer_text, grant, source)
+      `INSERT INTO decisions (attention_id, behavior, answer_text, "grant", source)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
       [
@@ -579,7 +579,7 @@ export async function resolveAttention(args: {
     if (optionalGrant !== null) {
       await client.query(
         `UPDATE sessions s
-            SET grant = $1, last_event_at = now()
+            SET "grant" = $1, last_event_at = now()
            FROM attention_events ae
           WHERE ae.id = $2 AND ae.session_id = s.id AND s.account_id = $3`,
         [optionalGrant, args.attentionId, args.accountId],

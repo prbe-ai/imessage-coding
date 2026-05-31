@@ -25,7 +25,7 @@ export async function GET(req: Request): Promise<Response> {
   }
 
   const res = await query<SessionDbRow>(
-    `SELECT id, device_id, cwd, agent, last_event_at, state, afk, grant
+    `SELECT id, device_id, cwd, agent, last_event_at, state, afk, "grant"
        FROM sessions
       WHERE account_id = $1 AND state <> $2
       ORDER BY last_event_at DESC`,

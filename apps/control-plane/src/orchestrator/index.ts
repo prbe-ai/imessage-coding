@@ -284,7 +284,7 @@ export async function orchestrate(
  * (24 bytes -> 32 chars). Match the phrase first, then fall back to a bare token
  * (autocorrect/quoting tolerant). Returns undefined if no token-shaped run.
  */
-function extractOnboardingToken(text: string): string | undefined {
+export function extractOnboardingToken(text: string): string | undefined {
   const phrase = /this is\s+([A-Za-z0-9_-]{24,})/i.exec(text);
   if (phrase?.[1]) return phrase[1];
   const bare = text.trim();
@@ -359,7 +359,7 @@ async function sendOutbound(
 }
 
 /** Validate a parsed LLM object into an LlmAction (or undefined if malformed). */
-function validateAction(obj: Record<string, unknown> | undefined): LlmAction | undefined {
+export function validateAction(obj: Record<string, unknown> | undefined): LlmAction | undefined {
   if (!obj) return undefined;
   const type = obj['type'];
   if (typeof type !== 'string') return undefined;

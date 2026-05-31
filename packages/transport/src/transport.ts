@@ -38,6 +38,16 @@ export interface Transport {
     timestamp: string,
   ): boolean;
 
-  /** Map a raw verified webhook body into the normalized InboundMessage. */
-  parseInbound(rawBody: Buffer | string): InboundMessage;
+  /**
+   * Map a raw verified webhook body into the normalized InboundMessage, or
+   * `null` when the delivery is not an actionable message (e.g. a call-ended or
+   * other non-message event) and the caller should simply acknowledge it.
+   *
+   * `webhookId` is the provider's per-delivery id (AgentPhone's `X-Webhook-ID`
+   * header) — the stable per-message handle used as `messageId`.
+   */
+  parseInbound(
+    rawBody: Buffer | string,
+    webhookId?: string,
+  ): InboundMessage | null;
 }

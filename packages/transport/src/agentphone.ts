@@ -25,6 +25,7 @@ import {
   TransportEvent,
   type InboundMessage,
   type OutboundMessage,
+  type RecentMessage,
 } from '@imsg/shared';
 import type { SendResult, Transport } from './transport.ts';
 
@@ -37,10 +38,22 @@ const DEFAULT_API_BASE = 'https://api.agentphone.ai';
  */
 const WEBHOOK_MAX_SKEW_SECONDS = 300;
 
-/** Header AgentPhone sends the HMAC signature in. */ /* VERIFY against live API */
-export const AGENTPHONE_SIGNATURE_HEADER = 'x-agentphone-signature';
-/** Header AgentPhone sends the signed timestamp in. */ /* VERIFY against live API */
-export const AGENTPHONE_TIMESTAMP_HEADER = 'x-agentphone-timestamp';
+// Webhook header + envelope shape verified against the live docs (2026-05-31):
+// https://docs.agentphone.ai/documentation/guides/webhooks
+// AgentPhone signs each delivery as
+//   sha256=<hex(HMAC-SHA256(secret, `${timestamp}.${rawBody}`))>
+// and sends the signature/timestamp/id in the X-Webhook-* headers below.
+
+/** Header carrying the `sha256=<hex>` HMAC signature. */
+export const AGENTPHONE_SIGNATURE_HEADER = 'x-webhook-signature';
+/** Header carrying the signed Unix-epoch timestamp (seconds). */
+export const AGENTPHONE_TIMESTAMP_HEADER = 'x-webhook-timestamp';
+/**
+ * Header carrying the unique per-delivery id. It is the idempotency key
+ * (stable across retries) and our only per-message handle — inbound messages
+ * have no body-level id.
+ */
+export const AGENTPHONE_WEBHOOK_ID_HEADER = 'x-webhook-id';
 
 export interface AgentPhoneConfig {
   apiKey?: string;
@@ -50,29 +63,39 @@ export interface AgentPhoneConfig {
 }
 
 /**
- * Raw AgentPhone webhook envelope. /* VERIFY against live API *\/
- * Shape inferred from docs: a typed event wrapping a message payload.
+ * AgentPhone webhook envelope. `channel`, `conversationState`, and
+ * `recentHistory` are TOP-LEVEL; the message text and sender live under `data`.
  */
 interface AgentPhoneWebhookEnvelope {
-  /* VERIFY against live API */ type?: string; // e.g. "agent.message" | "agent.reaction"
-  /* VERIFY against live API */ event?: string; // some providers use `event` not `type`
-  data?: AgentPhoneMessagePayload;
-  message?: AgentPhoneMessagePayload; // alt nesting
+  event?: string; // "agent.message" | "agent.reaction" | "agent.call_ended"
+  channel?: string; // "sms" | "mms" | "imessage" | "voice"
+  agentId?: string;
+  data?: AgentPhoneEventData;
+  conversationState?: Record<string, unknown>;
+  recentHistory?: RecentMessage[];
 }
 
-interface AgentPhoneMessagePayload {
-  /* VERIFY against live API */ id?: string;
-  /* VERIFY against live API */ message_id?: string;
-  /* VERIFY against live API */ from_number?: string;
-  /* VERIFY against live API */ from?: string;
-  /* VERIFY against live API */ body?: string;
-  /* VERIFY against live API */ text?: string;
-  /* VERIFY against live API */ channel?: string; // "imessage" | "sms"
-  /* VERIFY against live API */ conversation_state?: string;
-  /* VERIFY against live API */ recent_history?: string;
-  /* VERIFY against live API */ reply_to_message_id?: string;
-  /* VERIFY against live API */ reaction_to?: string; // for tapbacks
-  /* VERIFY against live API */ reaction?: string; // tapback emoji/value
+/**
+ * The `data` object. Fields are the union of the message-event shape
+ * (sms/mms/imessage) and the reaction-event shape; all optional because which
+ * set is present depends on `event`.
+ */
+interface AgentPhoneEventData {
+  // agent.message
+  conversationId?: string;
+  numberId?: string;
+  from?: string;
+  to?: string;
+  message?: string;
+  mediaUrl?: string | null;
+  direction?: string;
+  receivedAt?: string;
+  // agent.reaction (iMessage tapbacks)
+  reactionType?: string; // love | like | dislike | laugh | emphasize | question
+  messageId?: string; // the AGENT-sent message the tapback targets
+  messageBody?: string;
+  fromNumber?: string;
+  createdAt?: string;
 }
 
 export class AgentPhoneTransport implements Transport {
@@ -186,73 +209,99 @@ export class AgentPhoneTransport implements Transport {
       ? (signature.split('=', 2)[1] ?? '')
       : signature;
 
-    const hasTimestamp = typeof timestamp === 'string' && timestamp.length > 0;
-
-    if (hasTimestamp) {
-      // TIMESTAMP-BOUND variant is REQUIRED once a timestamp is present.
-      // Fail-closed if it isn't a usable numeric epoch.
-      const tsSeconds = Number(timestamp);
-      if (!Number.isFinite(tsSeconds)) return false;
-      // Reject stale/future signatures (replay window).
-      const nowSeconds = Date.now() / 1000;
-      if (Math.abs(nowSeconds - tsSeconds) > WEBHOOK_MAX_SKEW_SECONDS) {
-        return false;
-      }
-      const tsPrefix = Buffer.from(`${timestamp}.`, 'utf8');
-      const withTimestamp = hmac(Buffer.concat([tsPrefix, rawBytes]));
-      return constantTimeEquals(provided, withTimestamp);
+    // AgentPhone always signs `${timestamp}.${rawBody}` and sends the epoch in
+    // X-Webhook-Timestamp. A missing/empty timestamp means we cannot bind the
+    // signature to a moment in time, so we FAIL CLOSED. There is deliberately no
+    // body-only path: it would accept captured signatures forever (no replay
+    // window) on the one boundary an attacker could use to drive a coding agent.
+    if (typeof timestamp !== 'string' || timestamp.length === 0) {
+      return false;
     }
-
-    /* VERIFY against live API: signed payload format. When the provider sends NO
-       timestamp header, fall back to the body-only HMAC. This fallback carries
-       no replay protection, so it stays behind this note until the live signing
-       format (and whether a timestamp is always present) is confirmed. */
-    const bodyOnly = hmac(rawBytes);
-    return constantTimeEquals(provided, bodyOnly);
+    // Fail-closed if the timestamp isn't a usable numeric epoch.
+    const tsSeconds = Number(timestamp);
+    if (!Number.isFinite(tsSeconds)) return false;
+    // Reject stale/future signatures (replay window).
+    const nowSeconds = Date.now() / 1000;
+    if (Math.abs(nowSeconds - tsSeconds) > WEBHOOK_MAX_SKEW_SECONDS) {
+      return false;
+    }
+    const tsPrefix = Buffer.from(`${timestamp}.`, 'utf8');
+    const expected = hmac(Buffer.concat([tsPrefix, rawBytes]));
+    return constantTimeEquals(provided, expected);
   }
 
-  parseInbound(rawBody: Buffer | string): InboundMessage {
-    const text = Buffer.isBuffer(rawBody)
-      ? rawBody.toString('utf8')
-      : rawBody;
-    const env = JSON.parse(text) as AgentPhoneWebhookEnvelope;
+  /**
+   * Map a verified AgentPhone webhook body into the normalized InboundMessage,
+   * or `null` when the event is not an actionable message/reaction (the caller
+   * should then no-op with a 200, not orchestrate).
+   *
+   * `webhookId` is the value of the `X-Webhook-ID` header. AgentPhone gives
+   * inbound messages no body-level id, so this per-delivery id is our stable
+   * per-message handle. It is stable across the provider's retries, so it is the
+   * natural idempotency key — though nothing dedupes on it yet (see callers).
+   */
+  parseInbound(
+    rawBody: Buffer | string,
+    webhookId?: string,
+  ): InboundMessage | null {
+    const text = Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : rawBody;
+    const parsed: unknown = JSON.parse(text);
+    // JSON.parse accepts primitives/arrays ("null", "42", "[]", '"x"') without
+    // throwing. Reject anything that isn't a plain object so the caller 400s
+    // instead of building a degenerate, empty InboundMessage.
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(
+        'AgentPhoneTransport.parseInbound: webhook body is not a JSON object',
+      );
+    }
+    const env = parsed as AgentPhoneWebhookEnvelope;
 
-    /* VERIFY against live API: where the event type lives. */
-    const eventType = env.type ?? env.event ?? TransportEvent.AGENT_MESSAGE;
-    const payload: AgentPhoneMessagePayload = env.data ?? env.message ?? {};
-
+    const eventType = env.event ?? TransportEvent.AGENT_MESSAGE;
     const isReaction = eventType === TransportEvent.AGENT_REACTION;
+    const isMessage = eventType === TransportEvent.AGENT_MESSAGE;
+    // Only message + reaction events produce an actionable inbound. Other events
+    // (e.g. `agent.call_ended`) carry no user text; returning null lets the
+    // caller acknowledge with a 200 instead of orchestrating an empty message.
+    if (!isReaction && !isMessage) {
+      return null;
+    }
+    const data = env.data ?? {};
 
-    /* VERIFY against live API: which channel string the provider sends. */
-    const channel =
-      payload.channel === MessageChannel.SMS
+    // Channel is TOP-LEVEL (not under data). Map the known values; anything
+    // unrecognized falls back to iMessage, the primary channel.
+    const channel: MessageChannel =
+      env.channel === MessageChannel.SMS
         ? MessageChannel.SMS
-        : MessageChannel.IMESSAGE;
+        : env.channel === MessageChannel.MMS
+          ? MessageChannel.MMS
+          : env.channel === MessageChannel.VOICE
+            ? MessageChannel.VOICE
+            : MessageChannel.IMESSAGE;
 
     const inbound: InboundMessage = {
-      from: payload.from_number ?? payload.from ?? '',
-      // For a reaction, the meaningful text is the reaction value (e.g. a
-      // tapback emoji); for a message it's the body.
-      text: isReaction
-        ? (payload.reaction ?? payload.body ?? payload.text ?? '')
-        : (payload.body ?? payload.text ?? ''),
+      // Reactions carry the sender under `fromNumber`; messages under `from`.
+      from: isReaction ? (data.fromNumber ?? '') : (data.from ?? ''),
+      // For a reaction the meaningful text is the reaction type (e.g. "like");
+      // for a message it's the body.
+      text: isReaction ? (data.reactionType ?? '') : (data.message ?? ''),
       channel,
-      messageId: payload.id ?? payload.message_id ?? '',
+      messageId: webhookId ?? '',
     };
 
-    if (payload.conversation_state !== undefined) {
-      inbound.conversationState = payload.conversation_state;
+    if (data.conversationId !== undefined) {
+      inbound.conversationId = data.conversationId;
     }
-    if (payload.recent_history !== undefined) {
-      inbound.recentHistory = payload.recent_history;
+    if (env.conversationState !== undefined) {
+      inbound.conversationState = env.conversationState;
     }
-    // A reaction points at the message it reacts to; a normal reply may carry
-    // reply_to_message_id which we also surface as reactionTo's sibling.
-    const reactionTarget = isReaction
-      ? (payload.reaction_to ?? payload.reply_to_message_id)
-      : payload.reply_to_message_id;
-    if (reactionTarget !== undefined) {
-      inbound.reactionTo = reactionTarget;
+    if (env.recentHistory !== undefined) {
+      inbound.recentHistory = env.recentHistory;
+    }
+    // A reaction binds to the exact agent message it targets (`data.messageId`).
+    // This is the deterministic handle the safety gate uses to bind a tapback to
+    // a specific pending prompt.
+    if (isReaction && data.messageId !== undefined) {
+      inbound.reactionTo = data.messageId;
     }
 
     return inbound;

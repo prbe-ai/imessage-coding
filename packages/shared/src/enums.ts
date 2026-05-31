@@ -130,6 +130,8 @@ export type AgentKind = (typeof AgentKind)[keyof typeof AgentKind];
 export const MessageChannel = {
   IMESSAGE: 'imessage',
   SMS: 'sms',
+  MMS: 'mms',
+  VOICE: 'voice',
 } as const;
 export type MessageChannel = (typeof MessageChannel)[keyof typeof MessageChannel];
 

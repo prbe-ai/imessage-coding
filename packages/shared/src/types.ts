@@ -78,6 +78,14 @@ export interface SessionInfo {
   grant: GrantLevel;
 }
 
+/** One prior message AgentPhone includes for conversational context. */
+export interface RecentMessage {
+  content?: string;
+  direction?: string;
+  channel?: string;
+  at?: string;
+}
+
 /**
  * Inbound message webhook shape from the messaging provider (agentphone).
  * NOTE: exact provider field names are mapped inside @imsg/transport's
@@ -88,13 +96,20 @@ export interface InboundMessage {
   from: string;
   text: string;
   channel: MessageChannel;
-  /** Opaque provider conversation/thread state, if any. */
-  conversationState?: string;
+  /** Conversation/thread id grouping every message with this sender. */
+  conversationId?: string;
+  /** Provider conversation metadata (top-level `conversationState`), if any. */
+  conversationState?: Record<string, unknown>;
   /** Recent message history the provider includes for context, if any. */
-  recentHistory?: string;
-  /** If this is a reaction/tapback, the provider id of the target message. */
+  recentHistory?: RecentMessage[];
+  /** If this is a reaction/tapback, the id of the agent message it targets. */
   reactionTo?: string;
-  /** Provider message id. */
+  /**
+   * Per-delivery id (AgentPhone's `X-Webhook-ID`). Unique per inbound message
+   * and stable across the provider's retries — the natural idempotency key,
+   * though nothing dedupes on it yet. Inbound messages carry no body-level id,
+   * so this is the only per-message handle.
+   */
   messageId: string;
 }
 

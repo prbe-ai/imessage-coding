@@ -10,5 +10,6 @@ export {
   AgentPhoneTransport,
   AGENTPHONE_SIGNATURE_HEADER,
   AGENTPHONE_TIMESTAMP_HEADER,
+  AGENTPHONE_WEBHOOK_ID_HEADER,
   type AgentPhoneConfig,
 } from './agentphone.ts';

@@ -24,8 +24,10 @@ primary_region = "sjc"
   LLM_API_BASE = "http://imsg-litellm.flycast/v1"
   LLM_MODEL = "gemini-3.5-flash"
   # PUBLIC origin of THIS control plane (the device + install.sh point at it).
-  # Replace with your own deployed host before launching.
-  WEBHOOK_BASE_URL = "https://your-control-plane.example.com"
+  # Intentionally NOT set here: a hardcoded host would re-brand this OSS repo.
+  # Each deployment supplies its own via `fly secrets set WEBHOOK_BASE_URL=...`
+  # (e.g. https://api.messaging.prbe.ai). Unset => env.ts falls back to
+  # http://localhost:8080 for local dev (DEFAULT_WEBHOOK_BASE_URL).
 
 [http_service]
   internal_port = 8080

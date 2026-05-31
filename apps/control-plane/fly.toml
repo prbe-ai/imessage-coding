@@ -1,0 +1,58 @@
+# =============================================================================
+# Fly.io deployment for @imsg/control-plane.
+#
+# Build context is the MONOREPO ROOT so the Dockerfile can resolve the Bun
+# workspace. Deploy from the repo root with:
+#   fly deploy -c apps/control-plane/fly.toml --dockerfile apps/control-plane/Dockerfile
+#
+# Secrets (set via `fly secrets set ...`, NEVER committed):
+#   DATABASE_URL, DEVICE_TOKEN_PEPPER,
+#   AGENTPHONE_API_KEY, AGENTPHONE_AGENT_ID, AGENTPHONE_WEBHOOK_SECRET,
+#   LLM_API_KEY
+# =============================================================================
+app = "imsg-control-plane"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  AGENTPHONE_API_BASE = "https://api.agentphone.ai"
+  LLM_API_BASE = "https://api.openai.com/v1"
+  LLM_MODEL = "gpt-4o-mini"
+  WEBHOOK_BASE_URL = "https://message.prbe.ai"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  # Keep at least one machine warm so the LISTEN/NOTIFY client stays connected
+  # and long-polls are not cold-started.
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    # Long-polls hold a connection ~25s; allow plenty of concurrent waiters.
+    soft_limit = 200
+    hard_limit = 250
+
+# Liveness/readiness probes against the health endpoints.
+[[http_service.checks]]
+  method = "get"
+  path = "/healthz"
+  interval = "15s"
+  timeout = "5s"
+  grace_period = "10s"
+
+[[http_service.checks]]
+  method = "get"
+  path = "/readyz"
+  interval = "30s"
+  timeout = "8s"
+  grace_period = "20s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

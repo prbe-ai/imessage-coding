@@ -1,0 +1,3 @@
+# Generated at build time by scripts/copy-install-script.mjs from the canonical
+# source packages/device/install.sh. Not committed so it never drifts stale.
+/public/install.sh

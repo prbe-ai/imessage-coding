@@ -1,0 +1,110 @@
+/**
+ * @imsg/shared — shared types (the wire/data contract).
+ *
+ * These shapes are imported by every package. Field names are load-bearing —
+ * the device plugin, control plane, transport, and dashboard all serialize to
+ * and from these exact keys.
+ */
+import type {
+  AfkState,
+  AgentKind,
+  AttentionKind,
+  DecisionBehavior,
+  DecisionSource,
+  GrantLevel,
+  MessageChannel,
+  SessionState,
+} from './enums.ts';
+
+/**
+ * A point where the agent needs the user's attention (permission prompt,
+ * question, plan to approve, idle nudge, or turn-complete signal).
+ * Emitted by the device plugin, stored account-scoped by the control plane.
+ */
+export interface AttentionEvent {
+  id: string;
+  deviceId: string;
+  sessionId: string;
+  kind: AttentionKind;
+  /** Tool that triggered a permission prompt (e.g. "Bash", "Write"). */
+  toolName?: string;
+  /** Human-readable description of what's being asked. */
+  description?: string;
+  /** Truncated preview of the tool input / question body. */
+  inputPreview?: string;
+  /** Channels protocol request_id for a permission prompt (verdict target). */
+  requestId?: string;
+  /** Correlation id tagged on a question/plan relayed via the reply tool. */
+  qid?: string;
+  /**
+   * Provider message id of the OUTBOUND phone notification that fronted this
+   * attention (set when the control plane notified the phone). Tapbacks/inline
+   * replies that carry this id bind deterministically to THIS attention — the
+   * canonical, server-issued binding target (vs. the device-side requestId/qid).
+   */
+  notifyMessageId?: string;
+  /** ISO-8601 timestamp. */
+  createdAt: string;
+}
+
+/**
+ * The resolution of an AttentionEvent. A permission yields `behavior`
+ * (+ optional `grant` escalation); a question/plan yields `answerText`.
+ * `source` records how it was resolved (phone reply, dashboard, local
+ * keyboard, or a timeout fallback — which is always fail-closed, never allow).
+ */
+export interface Decision {
+  attentionId: string;
+  behavior?: DecisionBehavior;
+  answerText?: string;
+  grant?: GrantLevel;
+  /** ISO-8601 timestamp. */
+  resolvedAt: string;
+  source: DecisionSource;
+}
+
+/**
+ * Live view of a Claude Code session as tracked by the control plane.
+ */
+export interface SessionInfo {
+  id: string;
+  deviceId: string;
+  cwd?: string;
+  agent: AgentKind;
+  /** ISO-8601 timestamp of the most recent event on this session. */
+  lastEventAt: string;
+  state: SessionState;
+  afk: AfkState;
+  grant: GrantLevel;
+}
+
+/**
+ * Inbound message webhook shape from the messaging provider (agentphone).
+ * NOTE: exact provider field names are mapped inside @imsg/transport's
+ * parseInbound(); this is the normalized internal shape.
+ */
+export interface InboundMessage {
+  /** Sender phone number (E.164). */
+  from: string;
+  text: string;
+  channel: MessageChannel;
+  /** Opaque provider conversation/thread state, if any. */
+  conversationState?: string;
+  /** Recent message history the provider includes for context, if any. */
+  recentHistory?: string;
+  /** If this is a reaction/tapback, the provider id of the target message. */
+  reactionTo?: string;
+  /** Provider message id. */
+  messageId: string;
+}
+
+/**
+ * Outbound message to send via the transport.
+ */
+export interface OutboundMessage {
+  /** Recipient phone number (E.164). */
+  to: string;
+  text: string;
+  /** Provider message id to thread/reply against. */
+  replyToMessageId?: string;
+}

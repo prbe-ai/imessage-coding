@@ -1,0 +1,204 @@
+-- =============================================================================
+-- imessage-coding — Neon Postgres schema
+--
+-- Stateless app tier: ALL state lives here. Everything is account-scoped.
+-- The control plane wakes long-polls via a LISTEN/NOTIFY trigger on decisions.
+--
+-- Better Auth owns its own tables (better_auth_*); the dashboard creates and
+-- migrates those via the Better Auth CLI. We reference them only loosely
+-- (accounts mirror the authenticated user) and do NOT manage them here.
+-- =============================================================================
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto; -- gen_random_uuid()
+
+-- -----------------------------------------------------------------------------
+-- accounts — the tenant boundary. One row per paying/onboarded user.
+-- (Better Auth user/session/account tables live separately as better_auth_*.)
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS accounts (
+  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  email       TEXT        NOT NULL UNIQUE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- -----------------------------------------------------------------------------
+-- devices — a paired machine running the Claude Code plugin.
+-- device_token_hash is a peppered hash; the raw token is returned to the
+-- device exactly once at pair time and never stored.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS devices (
+  id                 UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id         UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  device_token_hash  TEXT        NOT NULL UNIQUE,
+  os                 TEXT,
+  hostname           TEXT,
+  paired_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  revoked_at         TIMESTAMPTZ,
+  -- Remote killswitch: a non-null disabled_at disables the device WITHOUT
+  -- destroying its credential (reversible, unlike revoked_at). The device's
+  -- GET /api/device/state reports enabled = (revoked_at IS NULL AND disabled_at IS NULL).
+  disabled_at        TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_devices_account ON devices(account_id);
+
+-- -----------------------------------------------------------------------------
+-- pairing_tokens — single-use, short-TTL tokens embedded in install.sh and
+-- exchanged for a device_token at /api/device/pair.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS pairing_tokens (
+  token_hash  TEXT        PRIMARY KEY,
+  account_id  UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  expires_at  TIMESTAMPTZ NOT NULL,
+  used_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_pairing_tokens_account ON pairing_tokens(account_id);
+
+-- -----------------------------------------------------------------------------
+-- onboarding_tokens — single-use, session-bound, rate-limited tokens minted
+-- during dashboard onboarding. The user texts the token in; we match it to
+-- derive their phone number, then verify. `attempts` enforces rate limiting.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS onboarding_tokens (
+  token_hash      TEXT        PRIMARY KEY,
+  account_id      UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  sso_session_id  TEXT        NOT NULL,
+  expires_at      TIMESTAMPTZ NOT NULL,
+  used_at         TIMESTAMPTZ,
+  attempts        INTEGER     NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_onboarding_tokens_account ON onboarding_tokens(account_id);
+
+-- -----------------------------------------------------------------------------
+-- conversations — a verified phone number ↔ account binding. The control plane
+-- resolves an inbound message's `from` number to a conversation → account.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS conversations (
+  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id    UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  phone_number  TEXT        NOT NULL,
+  verified_at   TIMESTAMPTZ,
+  UNIQUE (phone_number)
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_account ON conversations(account_id);
+
+-- -----------------------------------------------------------------------------
+-- sessions — a live Claude Code session on a device.
+-- state ∈ active|waiting|idle|ended ; afk ∈ on|off ; grant ∈ off|edits|full
+-- (string-checked here to match @imsg/shared const-objects).
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sessions (
+  id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  device_id      UUID        NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  account_id     UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  cwd            TEXT,
+  agent          TEXT        NOT NULL DEFAULT 'claude-code',
+  state          TEXT        NOT NULL DEFAULT 'active'
+                   CHECK (state IN ('active', 'waiting', 'idle', 'ended')),
+  afk            TEXT        NOT NULL DEFAULT 'off'
+                   CHECK (afk IN ('on', 'off')),
+  grant          TEXT        NOT NULL DEFAULT 'off'
+                   CHECK (grant IN ('off', 'edits', 'full')),
+  last_event_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_device  ON sessions(device_id);
+
+-- -----------------------------------------------------------------------------
+-- attention_events — points where the agent needs the user's attention.
+-- kind ∈ permission|question|plan|idle|turn_complete
+-- request_id (permission verdict target) and qid (question/plan correlation).
+-- `resolved` flips true once a decision lands.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS attention_events (
+  id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  device_id      UUID        NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  session_id     UUID        NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  account_id     UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  kind           TEXT        NOT NULL
+                   CHECK (kind IN ('permission', 'question', 'plan', 'idle', 'turn_complete')),
+  tool_name      TEXT,
+  description    TEXT,
+  input_preview  TEXT,
+  request_id     TEXT,
+  qid            TEXT,
+  -- Provider message id of the OUTBOUND phone notification that fronted this
+  -- attention. A tapback/inline reply carrying this id binds deterministically
+  -- to THIS attention (server-issued, vs. the device-side request_id/qid).
+  notify_message_id TEXT,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved       BOOLEAN     NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS idx_attention_account            ON attention_events(account_id);
+CREATE INDEX IF NOT EXISTS idx_attention_session            ON attention_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_attention_session_unresolved ON attention_events(session_id) WHERE resolved = false;
+CREATE INDEX IF NOT EXISTS idx_attention_request_id         ON attention_events(request_id);
+CREATE INDEX IF NOT EXISTS idx_attention_qid                ON attention_events(qid);
+CREATE INDEX IF NOT EXISTS idx_attention_notify_message_id  ON attention_events(notify_message_id);
+
+-- -----------------------------------------------------------------------------
+-- decisions — the resolution of an attention_event.
+-- behavior ∈ allow|deny (permissions) ; grant ∈ off|edits|full (escalation)
+-- source ∈ phone|dashboard|keyboard|timeout (timeout is always fail-closed).
+-- An INSERT here NOTIFYs 'decision_ready' to wake the device long-poll.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS decisions (
+  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  attention_id  UUID        NOT NULL REFERENCES attention_events(id) ON DELETE CASCADE,
+  behavior      TEXT        CHECK (behavior IN ('allow', 'deny')),
+  answer_text   TEXT,
+  grant         TEXT        CHECK (grant IN ('off', 'edits', 'full')),
+  source        TEXT        NOT NULL
+                  CHECK (source IN ('phone', 'dashboard', 'keyboard', 'timeout')),
+  resolved_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_attention ON decisions(attention_id);
+
+-- -----------------------------------------------------------------------------
+-- message_log — durable record of inbound/outbound messages, account-scoped.
+-- direction ∈ inbound|outbound. Used to build thread history for the orchestrator.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS message_log (
+  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id  UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  direction   TEXT        NOT NULL CHECK (direction IN ('inbound', 'outbound')),
+  body        TEXT        NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_message_log_account_created ON message_log(account_id, created_at DESC);
+
+-- =============================================================================
+-- LISTEN/NOTIFY: wake a waiting control-plane long-poll when a decision lands.
+--
+-- The device API's GET /api/device/decisions long-poll runs LISTEN
+-- 'decision_ready'. On every decisions INSERT this trigger NOTIFYs with a JSON
+-- payload carrying the attention_id (and the session it belongs to) so the
+-- waiter can re-query only the relevant session's resolved decisions.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION notify_decision_ready() RETURNS trigger AS $$
+DECLARE
+  v_session_id UUID;
+  v_account_id UUID;
+BEGIN
+  SELECT ae.session_id, ae.account_id
+    INTO v_session_id, v_account_id
+    FROM attention_events ae
+   WHERE ae.id = NEW.attention_id;
+
+  PERFORM pg_notify(
+    'decision_ready',
+    json_build_object(
+      'decision_id',  NEW.id,
+      'attention_id', NEW.attention_id,
+      'session_id',   v_session_id,
+      'account_id',   v_account_id
+    )::text
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_decision_ready ON decisions;
+CREATE TRIGGER trg_decision_ready
+  AFTER INSERT ON decisions
+  FOR EACH ROW
+  EXECUTE FUNCTION notify_decision_ready();

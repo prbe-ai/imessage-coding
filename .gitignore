@@ -1,0 +1,31 @@
+# dependencies
+node_modules/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# next.js
+.next/
+out/
+
+# build output
+dist/
+build/
+*.tsbuildinfo
+
+# logs
+*.log
+logs/
+npm-debug.log*
+bun-debug.log*
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
+
+# misc
+coverage/
+.turbo/

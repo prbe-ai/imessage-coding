@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/intercept.ts" }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          { "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/intercept.ts" }
+        ]
+      }
+    ]
+  }
+}

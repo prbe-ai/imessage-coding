@@ -1,0 +1,7 @@
+{
+  "name": "imsg-device",
+  "description": "Drive Claude Code from iMessage: AFK-aware permission relay + chat bridge. When you're away, permission prompts and questions go to your phone; approve, deny, or answer by text — destructive ops stay fail-closed.",
+  "version": "0.1.0",
+  "author": { "name": "Probe", "url": "https://prbe.ai" },
+  "homepage": "https://message.prbe.ai"
+}

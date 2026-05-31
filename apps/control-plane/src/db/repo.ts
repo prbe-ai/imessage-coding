@@ -520,13 +520,17 @@ export async function getAttentionForAccount(args: {
 export async function setAttentionNotifyMessageId(
   attentionId: string,
   messageId: string,
+  accountId: string,
 ): Promise<boolean> {
+  // Account-scoped: the assistant's send_message tool passes an LLM-provided
+  // attentionId, so the write MUST be constrained to the caller's account — a
+  // hallucinated/foreign id matches 0 rows rather than touching another tenant.
   const rows = await query<{ id: string }>(
     `UPDATE attention_events
         SET notify_message_id = $2
-      WHERE id = $1
+      WHERE id = $1 AND account_id = $3
       RETURNING id`,
-    [attentionId, messageId],
+    [attentionId, messageId, accountId],
   );
   return rows.length > 0;
 }
@@ -677,6 +681,71 @@ export async function recentMessages(args: {
     body: r.body,
     createdAt: new Date(r.created_at).toISOString(),
   }));
+}
+
+// --- session messages (free-text steering INTO a running session) -------------
+
+/** A free-text steer queued for delivery into a session. */
+export interface SessionMessage {
+  id: string;
+  body: string;
+}
+
+interface SessionMessageRow {
+  id: string;
+  body: string;
+}
+
+/**
+ * Queue a free-text steer for a session. Tenant-scoped: the row is inserted ONLY
+ * if the session exists, belongs to `accountId`, and is not ended — so a model
+ * can never steer another account's (or a dead) session. Fires NOTIFY
+ * 'session_message' to wake the device's event stream. Returns the new id, or
+ * undefined if no matching live session.
+ */
+export async function insertSessionMessage(args: {
+  sessionId: string;
+  accountId: string;
+  body: string;
+}): Promise<{ id: string } | undefined> {
+  const rows = await query<{ id: string }>(
+    `INSERT INTO session_messages (session_id, account_id, body)
+       SELECT s.id, s.account_id, $3
+         FROM sessions s
+        WHERE s.id = $1 AND s.account_id = $2 AND s.state <> 'ended'
+     RETURNING id`,
+    [args.sessionId, args.accountId, args.body],
+  );
+  return rows[0];
+}
+
+/**
+ * Undelivered steers for a device's session (oldest first). Scoped so a device
+ * can only drain its own session's messages.
+ */
+export async function listUndeliveredSessionMessages(args: {
+  sessionId: string;
+  deviceId: string;
+  accountId: string;
+}): Promise<SessionMessage[]> {
+  const rows = await query<SessionMessageRow>(
+    `SELECT sm.id, sm.body
+       FROM session_messages sm
+       JOIN sessions s ON s.id = sm.session_id
+      WHERE sm.session_id = $1
+        AND s.device_id   = $2
+        AND s.account_id  = $3
+        AND sm.delivered_at IS NULL
+      ORDER BY sm.created_at ASC`,
+    [args.sessionId, args.deviceId, args.accountId],
+  );
+  return rows.map((r) => ({ id: r.id, body: r.body }));
+}
+
+/** Mark steers delivered (after the device has injected them into the session). */
+export async function markSessionMessagesDelivered(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await query(`UPDATE session_messages SET delivered_at = now() WHERE id = ANY($1::uuid[])`, [ids]);
 }
 
 export type { AccountRow };

@@ -46,14 +46,13 @@ import {
   isGrantLevel,
 } from '@imsg/shared';
 import {
-  DECISIONS_LONG_POLL_TIMEOUT_MS,
   HEARTBEAT_INTERVAL_MS,
   deviceApiUrl,
   deviceIdFile,
   logDir,
 } from './config.ts';
 import { loadToken } from './creds.ts';
-import { Classification, getJson, parseJson, postJson } from './httpclient.ts';
+import { Classification, postJson } from './httpclient.ts';
 import { HaltError, drain, enqueue } from './outbox.ts';
 import { egressEnabled } from './killswitch.ts';
 import { sanitizeOptional, sanitizeText } from './sanitize.ts';
@@ -270,44 +269,111 @@ interface DecisionsResponse {
   since?: string;
 }
 
-async function longPollDecisions(): Promise<void> {
+// Idempotency for steers: the server marks a steer delivered after the SSE write,
+// but a failed mark (DB blip) could re-deliver it on reconnect. Dedupe by message
+// id so a steer is injected at most once. Bounded to avoid unbounded growth.
+const appliedSteers = new Set<string>();
+const APPLIED_STEERS_CAP = 500;
+
+/** A free-text steer → inject into THIS session as a <channel> message (once). */
+async function applySteer(m: { id: string; body: string }): Promise<void> {
+  if (appliedSteers.has(m.id)) {
+    log('steer_dup_skipped', { id: m.id });
+    return;
+  }
+  await mcp.notification({
+    method: ChannelMethod.CHANNEL,
+    params: { content: m.body, meta: { source_kind: 'imsg_steer', message_id: m.id } },
+  });
+  appliedSteers.add(m.id);
+  if (appliedSteers.size > APPLIED_STEERS_CAP) {
+    const oldest = appliedSteers.values().next().value; // Set keeps insertion order
+    if (oldest !== undefined) appliedSteers.delete(oldest);
+  }
+  log('steer_pushed', { id: m.id, len: m.body.length });
+}
+
+/** Parse one SSE frame's `event:` + concatenated `data:` lines (ignore comments/id). */
+function parseSSEFrame(frame: string): { event: string; data: string } {
+  let event = 'message';
+  const data: string[] = [];
+  for (const raw of frame.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+  }
+  return { event, data: data.join('\n') };
+}
+
+/**
+ * Subscribe to the control plane's SSE event stream and REACT to pushed state
+ * changes — no polling. Decisions are applied exactly as before (fail-closed),
+ * and free-text steers are injected into the session. Reconnects with a `since`
+ * cursor so nothing is missed across drops; the server's 'ping' keeps it warm.
+ */
+async function subscribeEvents(): Promise<void> {
   let since = new Date(0).toISOString();
-  // The loop runs for the life of the channel server. Each GET blocks up to the
-  // server's ~25s (we cap our client at 30s) then returns 200 with whatever
-  // resolved; on no token / disabled / error we back off briefly and retry.
   for (;;) {
     const token = loadToken();
     if (!token) {
       await sleep(5_000);
       continue;
     }
-    const url =
-      deviceApiUrl(DeviceApiRoute.DECISIONS) +
-      `?sessionId=${encodeURIComponent(SESSION_ID)}&since=${encodeURIComponent(since)}`;
-    const resp = await getJson(url, { bearer: token, timeoutMs: DECISIONS_LONG_POLL_TIMEOUT_MS });
-
-    if (resp.classification === Classification.HALT) {
-      log('decisions_halt', { reason: '401' });
-      await sleep(30_000);
-      continue;
-    }
-    if (resp.classification !== Classification.SUCCESS) {
-      await sleep(5_000);
-      continue;
-    }
-    const body = parseJson<DecisionsResponse>(resp);
-    if (!body) {
-      continue; // empty long-poll timeout; immediately re-poll
-    }
-    const requestIds = new Map<string, string>(Object.entries(body.requestIds ?? {}));
-    for (const d of body.decisions ?? []) {
-      try {
-        await applyDecision(d, requestIds);
-      } catch (err) {
-        log('apply_decision_error', { error: err instanceof Error ? err.message : String(err) });
+    try {
+      const url =
+        deviceApiUrl(DeviceApiRoute.EVENTS) +
+        `?sessionId=${encodeURIComponent(SESSION_ID)}&since=${encodeURIComponent(since)}`;
+      const resp = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' },
+      });
+      if (resp.status === 401) {
+        log('events_halt', { reason: '401 device token revoked' });
+        await sleep(30_000);
+        continue;
       }
+      if (!resp.ok || !resp.body) {
+        await sleep(5_000);
+        continue;
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep: number;
+        while ((sep = buf.indexOf('\n\n')) >= 0) {
+          const frame = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          if (!frame.trim()) continue;
+          const { event, data } = parseSSEFrame(frame);
+          if (!data) continue;
+          try {
+            if (event === 'decisions') {
+              const body = JSON.parse(data) as DecisionsResponse;
+              const requestIds = new Map<string, string>(Object.entries(body.requestIds ?? {}));
+              for (const d of body.decisions ?? []) await applyDecision(d, requestIds);
+              if (body.since) since = body.since;
+            } else if (event === 'session_messages') {
+              const body = JSON.parse(data) as { messages?: Array<{ id: string; body: string }> };
+              for (const m of body.messages ?? []) await applySteer(m);
+            }
+            // 'ping' (keepalive) + unknown events: ignore.
+          } catch (err) {
+            log('event_apply_error', {
+              event,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+      // Stream ended (server cycle / network) — reconnect promptly with the cursor.
+    } catch (err) {
+      log('events_error', { error: err instanceof Error ? err.message : String(err) });
+      await sleep(5_000);
     }
-    if (body.since) since = body.since;
   }
 }
 
@@ -345,5 +411,5 @@ log('connected', { session: SESSION_ID, device: DEVICE_ID, control: deviceApiUrl
 
 // Fire the background loops; they own their own retry/backoff and never throw
 // out (errors are logged + retried) so the MCP stdio loop stays alive.
-void longPollDecisions();
+void subscribeEvents();
 void heartbeatLoop();

@@ -1,0 +1,44 @@
+# =============================================================================
+# Fly.io deployment for the imessage-coding LiteLLM proxy (imsg-litellm).
+#
+# PRIVATE-ONLY app (no public IP). The control-plane reaches it over Fly's
+# private network via flycast: http://imsg-litellm.flycast/v1
+#
+# Build context is THIS directory (apps/litellm/) — the image is the upstream
+# litellm-database + our config.yaml; it does NOT need the Bun workspace.
+# Deploy (first time, no public IPs), then allocate the private flycast IP:
+#   fly apps create imsg-litellm
+#   fly secrets set LITELLM_MASTER_KEY=... LITELLM_SALT_KEY=... DATABASE_URL=... GEMINI_API_KEY=...  -a imsg-litellm
+#   fly deploy -c fly.toml --no-public-ips
+#   fly ips allocate-v6 --private -a imsg-litellm
+#   fly ips list -a imsg-litellm   # confirm: ONLY the private flycast v6, no public IPs
+# =============================================================================
+app = "imsg-litellm"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 4000
+  # No public TLS cert on a flycast (private) address — terminate plain HTTP
+  # inside the 6PN. The control-plane calls http://imsg-litellm.flycast/v1.
+  force_https = false
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  # Keep one machine warm: a stopped machine adds cold-start latency to the
+  # user's first text. (flycast WOULD auto-wake it, but we want the human path hot.)
+  min_machines_running = 1
+
+# Liveness: /health/liveliness is a cheap static check. Do NOT use /health —
+# that one actively pings the model on every probe.
+[[http_service.checks]]
+  method = "get"
+  path = "/health/liveliness"
+  interval = "15s"
+  timeout = "5s"
+  grace_period = "30s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

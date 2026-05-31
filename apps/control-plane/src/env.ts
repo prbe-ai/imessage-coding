@@ -48,7 +48,10 @@ function require_(name: string): string {
 }
 
 const DEFAULT_PORT = 8080;
-const DEFAULT_LLM_API_BASE = 'https://api.openai.com/v1';
+// Local-dev default: a LiteLLM proxy on localhost. A forgotten override fails as
+// "proxy not running" (connection refused) rather than silently 404-ing a gemini
+// model id against OpenAI. Prod sets LLM_API_BASE to the flycast proxy (fly.toml).
+const DEFAULT_LLM_API_BASE = 'http://localhost:4000/v1';
 const DEFAULT_LLM_MODEL = 'gemini-3.5-flash';
 const DEFAULT_WEBHOOK_BASE_URL = 'https://message.prbe.ai';
 

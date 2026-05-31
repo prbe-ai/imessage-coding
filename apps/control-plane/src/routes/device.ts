@@ -46,16 +46,23 @@ import {
   getSessionForDevice,
   insertAttentionEvent,
   listDecisionsForSession,
+  listUndeliveredSessionMessages,
+  markSessionMessagesDelivered,
   touchSession,
   updateSessionState,
   updateSessionStateForDevice,
   upsertSession,
 } from '../db/repo.ts';
-import { ensureListener, waitForDecision } from '../db/listener.ts';
+import { ensureListener, waitForDecision, waitForSessionEvent } from '../db/listener.ts';
+import { streamSSE } from 'hono/streaming';
 import { getTransport } from '../transport.ts';
+import { runAgentEventTurn } from '../orchestrator/index.ts';
 
 /** Long-poll ceiling (ms). Below typical 30s proxy/client timeouts. */
 const LONG_POLL_MS = 25_000;
+
+/** SSE keepalive cadence (ms) — ping under proxy idle timeouts. */
+const SSE_HEARTBEAT_MS = 25_000;
 
 /** Attention kinds that, when AFK, get routed to the phone via the orchestrator. */
 const PHONE_ROUTED_KINDS: ReadonlySet<AttentionKind> = new Set([
@@ -99,6 +106,7 @@ deviceRoutes.post(DeviceApiRoute.PAIR, async (c) => {
 // --- everything below requires a device_token --------------------------------
 deviceRoutes.use(`${DeviceApiRoute.ATTENTION}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.DECISIONS}`, requireDevice);
+deviceRoutes.use(`${DeviceApiRoute.EVENTS}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.HEARTBEAT}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.STATE}`, requireDevice);
 
@@ -174,44 +182,13 @@ async function maybeRouteToPhone(
   });
   if (!session || session.afk !== AfkState.ON) return;
 
-  // We don't have the conversation's phone number on the device path directly;
-  // the orchestrator owns phone resolution. We send a notification by composing
-  // a short prompt and letting the transport address the account's number.
-  await notifyPhone(auth.accountId, event);
-}
-
-/** Compose + send a concise phone notification for a routed attention event. */
-async function notifyPhone(accountId: string, event: AttentionEvent): Promise<void> {
-  // Lazy import avoids a cycle and keeps the route lean.
-  const { findVerifiedPhoneForAccount, logMessage, setAttentionNotifyMessageId } =
-    await import('../db/repo.ts');
-  const to = await findVerifiedPhoneForAccount(accountId);
-  if (!to) return;
-
-  const text = composeNotification(event);
-  await logMessage({ accountId, direction: 'outbound', body: text });
-  try {
-    const { id } = await getTransport().send({ to, text });
-    // DETERMINISTIC TAPBACK BINDING (Contract): persist the outbound provider
-    // message id so a tapback/inline reply to THIS notification binds to THIS
-    // attention (see orchestrator/safety.ts deterministicTarget).
-    if (id) {
-      await setAttentionNotifyMessageId(event.id, id);
-    }
-  } catch (err) {
-    console.error('[device/attention] phone notify failed', err);
-  }
-}
-
-function composeNotification(event: AttentionEvent): string {
-  const head =
-    event.kind === AttentionKind.PERMISSION
-      ? `Permission needed${event.toolName ? ` (${event.toolName})` : ''}`
-      : event.kind === AttentionKind.PLAN
-        ? 'Plan ready for review'
-        : 'Question';
-  const detail = event.description || event.inputPreview || '';
-  return detail ? `${head}: ${detail}` : head;
+  // AFK + phone-routable: spin up an assistant TURN to decide how to surface this
+  // to the user. The assistant owns phone resolution + notification framing (with
+  // a static-notification fallback inside the turn). Fire-and-forget so the
+  // device's POST is not held on an LLM turn; the turn handles its own errors.
+  void runAgentEventTurn(event, auth.accountId, getTransport()).catch((err) => {
+    console.error('[device/attention] agent-event turn failed', err);
+  });
 }
 
 // --- DECISIONS (LONG-POLL) ----------------------------------------------------
@@ -262,6 +239,86 @@ deviceRoutes.get(DeviceApiRoute.DECISIONS, async (c) => {
     since,
   });
   return c.json(fresh);
+});
+
+// --- EVENTS (SSE push: decisions + session-message steers) --------------------
+// Replaces the device's decision polling: the plugin opens ONE long-lived stream
+// and reacts to pushed events (driven by LISTEN/NOTIFY). On (re)connect we replay
+// anything since the device's cursor, then stream live — at-least-once, fail-closed.
+deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
+  const auth = device(c);
+  const sessionId = c.req.query('sessionId');
+  const since0 = c.req.query('since');
+  if (!sessionId) {
+    return c.json({ error: 'missing_session_id' }, 400);
+  }
+  const session = await getSessionForDevice({
+    sessionId,
+    deviceId: auth.deviceId,
+    accountId: auth.accountId,
+  });
+  if (!session) {
+    return c.json({ error: 'unknown_session' }, 404);
+  }
+  await ensureListener();
+
+  return streamSSE(c, async (stream) => {
+    let since = since0; // decisions cursor (ISO resolved_at); advances as we emit
+    let aborted = false;
+    stream.onAbort(() => {
+      aborted = true;
+    });
+
+    // Emit pending decisions (since cursor) + undelivered steers, then mark
+    // steers delivered. The device's applyDecision stays the verdict arbiter.
+    const flush = async (): Promise<void> => {
+      const dec = await listDecisionsForSession({
+        sessionId,
+        deviceId: auth.deviceId,
+        accountId: auth.accountId,
+        since,
+      });
+      if (dec.decisions.length > 0) {
+        await stream.writeSSE({
+          event: 'decisions',
+          data: JSON.stringify({
+            decisions: dec.decisions,
+            requestIds: dec.requestIds,
+            since: dec.since,
+          }),
+        });
+        if (dec.since) since = dec.since;
+      }
+      const msgs = await listUndeliveredSessionMessages({
+        sessionId,
+        deviceId: auth.deviceId,
+        accountId: auth.accountId,
+      });
+      if (msgs.length > 0) {
+        await stream.writeSSE({ event: 'session_messages', data: JSON.stringify({ messages: msgs }) });
+        await markSessionMessagesDelivered(msgs.map((m) => m.id));
+      }
+    };
+
+    // Catch-up on connect, then stream live. waitForSessionEvent wakes on a
+    // decision OR a steer for this session; on timeout we ping to stay alive.
+    await flush();
+    while (!aborted && !c.req.raw.signal.aborted) {
+      const woken = await waitForSessionEvent(sessionId, SSE_HEARTBEAT_MS, c.req.raw.signal);
+      if (aborted || c.req.raw.signal.aborted) break;
+      // Honor a mid-stream device revoke/disable: the stream authed once at connect,
+      // but the killswitch must still cut delivery (the old long-poll re-authed on
+      // every poll). Breaking forces a reconnect back through requireDevice.
+      const ds = await getDeviceState({ deviceId: auth.deviceId, accountId: auth.accountId });
+      if (!ds.enabled) break;
+      // Re-query EVERY iteration (not only on wake): a NOTIFY firing in the window
+      // between flush() returning and the next waiter registering would otherwise
+      // be stranded until an unrelated NOTIFY. The timeout path bounds worst-case
+      // delivery latency to one heartbeat (matches the old long-poll's behavior).
+      await flush();
+      if (!woken) await stream.writeSSE({ event: 'ping', data: '{}' });
+    }
+  });
 });
 
 // --- HEARTBEAT ----------------------------------------------------------------

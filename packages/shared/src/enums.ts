@@ -82,6 +82,8 @@ export const DeviceApiRoute = {
   PAIR: '/api/device/pair',
   ATTENTION: '/api/device/attention',
   DECISIONS: '/api/device/decisions',
+  /** SSE event stream (decisions + session-message steers) — replaces polling. */
+  EVENTS: '/api/device/events',
   HEARTBEAT: '/api/device/heartbeat',
   STATE: '/api/device/state',
 } as const;

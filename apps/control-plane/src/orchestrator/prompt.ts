@@ -1,89 +1,179 @@
 /**
- * Orchestrator prompt construction + the LLM action schema.
+ * Prompt + tool schemas for the conversational assistant turn.
  *
- * The LLM's ONLY job is to decide intent: which pending attention an inbound
- * reply targets, and what action to take (answer a question, approve/reject a
- * plan, deny a permission, allow a NON-destructive permission, steer with free
- * text, or ask for clarification). It is explicitly told it CANNOT allow a
- * destructive operation — that path is enforced deterministically in code,
- * outside the model, regardless of what it returns.
+ * The assistant is the MIDDLEMAN between the user and their Claude Code agents.
+ * A turn is triggered by an event — a user text, or a coding-agent attention —
+ * and the assistant uses tools to act and `send_message` to talk to the user.
+ *
+ * SAFETY: the system prompt re-states the hard contract in plain language, but
+ * the binding gate is enforced in code (safety.ts + the index.ts dispatcher),
+ * never on the model's say-so. The LLM can never allow a destructive op by
+ * inference nor mint a FULL grant.
  */
 import {
-  DecisionBehavior,
-  GrantLevel,
   type AttentionEvent,
   type InboundMessage,
   type SessionInfo,
 } from '@imsg/shared';
-import type { LlmMessage } from './llm.ts';
+import type { ChatMessage, ToolDef } from './llm.ts';
 
-/** The action the LLM proposes. Validated by the orchestrator before use. */
+/**
+ * Action labels — retained as stable identifiers for history action-notes and
+ * log/debug output. (The live action surface is the tool list below.)
+ */
 export const LlmActionType = {
-  /** Answer a pending question/plan attention with free text. */
   ANSWER: 'answer',
-  /** Approve a pending plan (ExitPlanMode) attention. */
   APPROVE_PLAN: 'approve_plan',
-  /** Deny a pending permission (always safe — fail-closed direction). */
   DENY: 'deny',
-  /** Allow a pending permission. ONLY honored by code if non-destructive OR a
-   *  deterministic binding exists — never on the model's say-so for Bash/etc. */
   ALLOW: 'allow',
-  /** Free-text steering message pushed into the session (no decision). */
   STEER: 'steer',
-  /** Ambiguous / cannot safely act — send a clarifying question to the user. */
-  CLARIFY: 'clarify',
+  SEND: 'send_message',
 } as const;
 export type LlmActionType = (typeof LlmActionType)[keyof typeof LlmActionType];
 
-/** Structured action returned by the LLM (after validation). */
-export interface LlmAction {
-  type: LlmActionType;
-  /** Pending attention event id the action targets, if any. */
-  targetAttentionId?: string;
-  /** Text to send to the user (clarify) or into the session (answer/steer). */
-  text?: string;
-  /** For approve_plan: an optional grant escalation (edits|full). */
-  grant?: GrantLevel;
-}
+/** What kicked off this turn. */
+export type TurnTrigger =
+  | { kind: 'user_message'; inbound: InboundMessage }
+  | { kind: 'agent_event'; attention: AttentionEvent };
 
-const GRANT_VALUES = Object.values(GrantLevel).join(', ');
-const BEHAVIOR_VALUES = Object.values(DecisionBehavior).join(', ');
-const ACTION_VALUES = Object.values(LlmActionType).join(', ');
+/** Tool-availability mode: agent-event turns may only notify (not resolve). */
+export type TurnMode = 'user_message' | 'agent_event';
 
-/** The system prompt: locks in the safety contract in plain language. */
+const EDIT_TOOLS_DESC = 'Edit/Write/MultiEdit/NotebookEdit';
+
+/** The system prompt: persona, turn semantics, and the hard safety contract. */
 export function systemPrompt(): string {
   return [
-    'You are the orchestrator for an iMessage-driven Claude Code remote-control.',
-    'A developer is away from their keyboard (AFK). Their coding agent paused at',
-    'one or more "attention" points (a permission prompt, a question, a plan to',
-    'approve, an idle nudge, or a turn-complete). The developer just sent a reply',
-    'by text. Decide what that reply means and pick exactly one action.',
+    "You are the user's personal AI assistant, reachable over iMessage. You are",
+    'the MIDDLEMAN between the user and their Claude Code coding agents running on',
+    'their machines.',
+    '',
+    'A TURN begins when EITHER the user texts you, OR one of their agents needs',
+    'attention (a permission prompt, a question, or a plan to approve). During a',
+    'turn you may call tools to act on the agents and use `send_message` to talk',
+    'to the user — you may send several messages and take several actions. End the',
+    'turn by simply making no further tool calls once you have done what is needed.',
+    'Be concise and natural, like texting. Use `send_message` for ALL communication',
+    'with the user (your prose is not delivered otherwise).',
+    '',
+    'You are given a snapshot of the live coding sessions, the pending attention',
+    'events (what each agent is waiting on — each has an id), and the recent thread.',
     '',
     'HARD SAFETY RULES (never violate):',
-    `- You may NEVER allow a DESTRUCTIVE operation by inference. Destructive =`,
-    `  any permission whose tool is NOT a pure file edit (e.g. Bash, network,`,
-    `  deletion). For those you may only ever return "${LlmActionType.DENY}" or`,
-    `  "${LlmActionType.CLARIFY}". The system enforces destructive allows`,
-    '  deterministically OUTSIDE of you; returning "allow" for a destructive tool',
-    '  will be ignored and downgraded to a clarification.',
-    '- If MORE THAN ONE attention is pending and the reply does not clearly bind',
-    `  to exactly one, return "${LlmActionType.CLARIFY}" and ask which. Never guess.`,
-    '- When uncertain, prefer CLARIFY or DENY. Fail closed.',
-    '',
-    'Allowed actions (field "type"):',
-    `  ${ACTION_VALUES}`,
-    `- answer: answer a pending question/plan; set targetAttentionId + text.`,
-    `- approve_plan: approve a pending plan; set targetAttentionId; optional grant`,
-    `  in {${GRANT_VALUES}} if the user explicitly grants standing approval.`,
-    `- deny: reject a pending permission/plan; set targetAttentionId.`,
-    `- allow: allow a pending NON-destructive (file-edit) permission; set`,
-    `  targetAttentionId. (behavior values: ${BEHAVIOR_VALUES}.)`,
-    `- steer: push the reply text into the session as guidance; set text.`,
-    `- clarify: ask the user a question; set text. Use when ambiguous.`,
-    '',
-    'Respond with a SINGLE JSON object and nothing else:',
-    '{ "type": <action>, "targetAttentionId"?: <uuid>, "text"?: <string>, "grant"?: <grant> }',
+    `- NEVER allow a DESTRUCTIVE operation by inference. Destructive = any permission`,
+    `  whose tool is NOT a pure file edit (${EDIT_TOOLS_DESC}) — e.g. Bash, network,`,
+    '  or deletion. For those you may only deny, or ask the user to reply DIRECTLY to',
+    '  that exact request. The system enforces this outside you: allow_permission on a',
+    '  destructive tool without a direct binding is refused.',
+    '- If more than one attention is pending and the intent does not clearly map to',
+    '  exactly one, ask which — never guess.',
+    '- When uncertain, prefer asking or denying. Fail closed.',
+    '- On an AGENT-needs-attention turn, your job is to NOTIFY the user and let them',
+    '  decide; do not resolve it yourself.',
   ].join('\n');
+}
+
+/** Tool schemas advertised to the model, scoped to the turn mode. */
+export function assistantTools(mode: TurnMode): ToolDef[] {
+  const sendMessage: ToolDef = {
+    type: 'function',
+    function: {
+      name: 'send_message',
+      description:
+        'Send an iMessage to the user. Call multiple times to send multiple ' +
+        'messages. If the message is about a specific pending attention so the ' +
+        'user can tap-back / reply to act on it, pass its id as aboutAttentionId.',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'The message to send.' },
+          aboutAttentionId: {
+            type: 'string',
+            description:
+              'Optional id of the pending attention this message is about, so a ' +
+              'tap-back/reply binds to it.',
+          },
+        },
+        required: ['text'],
+      },
+    },
+  };
+
+  // Agent-event turns are notify-only (human stays in the loop on resolution).
+  if (mode === 'agent_event') return [sendMessage];
+
+  const attentionIdParam = {
+    attentionId: { type: 'string', description: 'Id of the pending attention.' },
+  };
+
+  return [
+    sendMessage,
+    {
+      type: 'function',
+      function: {
+        name: 'answer_attention',
+        description: "Answer a pending question or plan with free text (the agent's prompt).",
+        parameters: {
+          type: 'object',
+          properties: { ...attentionIdParam, text: { type: 'string', description: 'The answer.' } },
+          required: ['attentionId', 'text'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'approve_plan',
+        description:
+          'Approve a pending plan. Optionally grant standing approval for FILE EDITS ' +
+          "only via grant='edits' (full auto-allow is never available to you).",
+        parameters: {
+          type: 'object',
+          properties: {
+            ...attentionIdParam,
+            grant: { type: 'string', enum: ['edits'], description: "Optional: 'edits' standing grant." },
+          },
+          required: ['attentionId'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'deny_attention',
+        description: 'Deny / reject a pending permission or plan. Always safe.',
+        parameters: { type: 'object', properties: { ...attentionIdParam }, required: ['attentionId'] },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'allow_permission',
+        description:
+          `Allow a pending NON-destructive (${EDIT_TOOLS_DESC}) permission. For ` +
+          'destructive tools this is refused unless the user replied directly to that request.',
+        parameters: { type: 'object', properties: { ...attentionIdParam }, required: ['attentionId'] },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'steer_session',
+        description:
+          'Send a free-text instruction INTO a running coding-agent session ' +
+          '(e.g. "also add tests", "use Postgres not SQLite"). Use a sessionId from ' +
+          'the LIVE SESSIONS list; the text is injected as a message to that agent.',
+        parameters: {
+          type: 'object',
+          properties: {
+            sessionId: { type: 'string', description: 'Id of the live session to steer.' },
+            text: { type: 'string', description: 'The instruction to inject into the session.' },
+          },
+          required: ['sessionId', 'text'],
+        },
+      },
+    },
+  ];
 }
 
 function describeAttention(e: AttentionEvent): string {
@@ -91,8 +181,6 @@ function describeAttention(e: AttentionEvent): string {
   if (e.toolName) parts.push(`tool=${e.toolName}`);
   if (e.description) parts.push(`desc=${truncate(e.description, 200)}`);
   if (e.inputPreview) parts.push(`input=${truncate(e.inputPreview, 200)}`);
-  if (e.requestId) parts.push(`requestId=${e.requestId}`);
-  if (e.qid) parts.push(`qid=${e.qid}`);
   return `- ${parts.join(' ')}`;
 }
 
@@ -100,70 +188,65 @@ function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
 }
 
-/** Build the user-turn context the LLM reasons over. */
-export function userPrompt(args: {
-  inbound: InboundMessage;
+/** Render the live snapshot + trigger as the first user message of the turn. */
+function turnContext(args: {
+  trigger: TurnTrigger;
   pending: ReadonlyArray<AttentionEvent>;
   sessions: ReadonlyArray<SessionInfo>;
   history: ReadonlyArray<{ direction: string; body: string }>;
 }): string {
-  const { inbound, pending, sessions, history } = args;
-
+  const { trigger, pending, sessions, history } = args;
   const lines: string[] = [];
 
-  lines.push('PENDING ATTENTION (what the agent is waiting on):');
-  if (pending.length === 0) {
-    lines.push('  (none — there is nothing to resolve; likely a steer or chat.)');
-  } else {
-    for (const e of pending) lines.push(`  ${describeAttention(e)}`);
-  }
+  lines.push('PENDING ATTENTION (what the agents are waiting on):');
+  if (pending.length === 0) lines.push('  (none)');
+  else for (const e of pending) lines.push(`  ${describeAttention(e)}`);
 
-  lines.push('');
-  lines.push('LIVE SESSIONS:');
-  if (sessions.length === 0) {
-    lines.push('  (none)');
-  } else {
+  lines.push('', 'LIVE SESSIONS:');
+  if (sessions.length === 0) lines.push('  (none)');
+  else
     for (const s of sessions) {
       lines.push(
         `  - id=${s.id} state=${s.state} afk=${s.afk} grant=${s.grant}` +
           (s.cwd ? ` cwd=${truncate(s.cwd, 80)}` : ''),
       );
     }
-  }
 
-  lines.push('');
-  lines.push('RECENT THREAD (most recent last):');
+  lines.push('', 'RECENT THREAD (most recent last):');
   const ordered = [...history].reverse();
-  if (ordered.length === 0) {
-    lines.push('  (no prior messages)');
-  } else {
+  if (ordered.length === 0) lines.push('  (no prior messages)');
+  else
     for (const m of ordered) {
-      lines.push(`  ${m.direction === 'outbound' ? 'agent' : 'user'}: ${truncate(m.body, 240)}`);
+      lines.push(`  ${m.direction === 'outbound' ? 'assistant' : 'user'}: ${truncate(m.body, 240)}`);
     }
-  }
 
   lines.push('');
-  lines.push('THE USER JUST SENT:');
-  lines.push(`  "${inbound.text}"`);
-  if (inbound.reactionTo) {
-    lines.push(`  (this is a tapback/inline reply bound to message ${inbound.reactionTo})`);
+  if (trigger.kind === 'user_message') {
+    lines.push('THE USER JUST SENT:', `  "${trigger.inbound.text}"`);
+    if (trigger.inbound.reactionTo) {
+      lines.push(
+        `  (this is a tap-back / inline reply bound to message ${trigger.inbound.reactionTo})`,
+      );
+    }
+  } else {
+    lines.push(
+      'AN AGENT JUST NEEDS ATTENTION — decide whether/how to notify the user:',
+      `  ${describeAttention(trigger.attention)}`,
+    );
   }
-
-  lines.push('');
-  lines.push('Return the JSON action now.');
 
   return lines.join('\n');
 }
 
-/** Assemble the full message list for llmComplete. */
-export function buildMessages(args: {
-  inbound: InboundMessage;
+/** Assemble the seed transcript (system + the turn context user message). */
+export function buildTurnMessages(args: {
+  trigger: TurnTrigger;
   pending: ReadonlyArray<AttentionEvent>;
   sessions: ReadonlyArray<SessionInfo>;
   history: ReadonlyArray<{ direction: string; body: string }>;
-}): LlmMessage[] {
+}): ChatMessage[] {
   return [
     { role: 'system', content: systemPrompt() },
-    { role: 'user', content: userPrompt(args) },
+    { role: 'user', content: turnContext(args) },
   ];
 }

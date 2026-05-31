@@ -166,6 +166,27 @@ CREATE TABLE IF NOT EXISTS message_log (
 );
 CREATE INDEX IF NOT EXISTS idx_message_log_account_created ON message_log(account_id, created_at DESC);
 
+-- -----------------------------------------------------------------------------
+-- session_messages — free-text steering pushed INTO a running coding-agent
+-- session by the assistant ("also add tests"). Distinct from decisions (which
+-- resolve a pending attention): a steer has no attention to resolve. The device
+-- drains undelivered rows over its event stream and injects them into the
+-- session as <channel> messages; delivered_at marks consumption.
+-- An INSERT here NOTIFYs 'session_message' to wake the device's event stream.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS session_messages (
+  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id    UUID        NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  account_id    UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  body          TEXT        NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  delivered_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_session_messages_undelivered
+  ON session_messages(session_id) WHERE delivered_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_session_messages_session_created
+  ON session_messages(session_id, created_at);
+
 -- =============================================================================
 -- LISTEN/NOTIFY: wake a waiting control-plane long-poll when a decision lands.
 --
@@ -202,3 +223,28 @@ CREATE TRIGGER trg_decision_ready
   AFTER INSERT ON decisions
   FOR EACH ROW
   EXECUTE FUNCTION notify_decision_ready();
+
+-- =============================================================================
+-- LISTEN/NOTIFY: wake the device's event stream when a free-text steer lands.
+-- Payload carries the session_id so the stream re-queries only that session's
+-- undelivered session_messages.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION notify_session_message() RETURNS trigger AS $$
+BEGIN
+  PERFORM pg_notify(
+    'session_message',
+    json_build_object(
+      'message_id', NEW.id,
+      'session_id', NEW.session_id,
+      'account_id', NEW.account_id
+    )::text
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_session_message ON session_messages;
+CREATE TRIGGER trg_session_message
+  AFTER INSERT ON session_messages
+  FOR EACH ROW
+  EXECUTE FUNCTION notify_session_message();

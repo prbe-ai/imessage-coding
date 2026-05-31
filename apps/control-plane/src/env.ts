@@ -49,7 +49,7 @@ function require_(name: string): string {
 
 const DEFAULT_PORT = 8080;
 const DEFAULT_LLM_API_BASE = 'https://api.openai.com/v1';
-const DEFAULT_LLM_MODEL = 'gpt-4o-mini';
+const DEFAULT_LLM_MODEL = 'gemini-3.5-flash';
 const DEFAULT_WEBHOOK_BASE_URL = 'https://message.prbe.ai';
 
 let cached: ControlPlaneEnv | undefined;

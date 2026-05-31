@@ -19,8 +19,9 @@ primary_region = "sjc"
 [env]
   PORT = "8080"
   AGENTPHONE_API_BASE = "https://api.agentphone.ai"
+  # Override LLM_API_BASE via `fly secrets set` to your LiteLLM proxy (/v1).
   LLM_API_BASE = "https://api.openai.com/v1"
-  LLM_MODEL = "gpt-4o-mini"
+  LLM_MODEL = "gemini-3.5-flash"
   WEBHOOK_BASE_URL = "https://message.prbe.ai"
 
 [http_service]

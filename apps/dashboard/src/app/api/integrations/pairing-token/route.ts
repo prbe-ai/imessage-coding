@@ -39,19 +39,6 @@ function installBaseUrl(): string {
   ).replace(/\/+$/, "");
 }
 
-/** Control-plane base URL the device pairs against (POST /api/device/pair).
- *
- *  Injected into the install one-liner so a piped `curl | sh` install pairs
- *  against the real control plane instead of install.sh's `localhost:8080`
- *  default (the piped script can't infer it). Mirrors ENV.controlPlaneUrl()'s
- *  default. Server-side only. */
-function controlPlaneBaseUrl(): string {
-  return (process.env.CONTROL_PLANE_URL || "http://localhost:8080").replace(
-    /\/+$/,
-    "",
-  );
-}
-
 export async function POST(req: Request): Promise<Response> {
   const ctx = await requireAccount(req);
   if (!ctx) {
@@ -74,14 +61,12 @@ export async function POST(req: Request): Promise<Response> {
     [hashToken(raw), ctx.accountId, expiresAt],
   );
 
-  // The piped installer needs two things it can't infer: where to fetch the
-  // plugin tarball from (IMSG_INSTALL_BASE = this dashboard origin) and which
-  // control plane to pair against (IMSG_CONTROL_PLANE_URL). Pass both through.
+  // Canonical one-liner. The served install.sh bakes its own origin
+  // (IMSG_INSTALL_BASE) at build time, and the control-plane URL is baked into
+  // the plugin tarball (build-config.json), so neither needs to ride in the
+  // command — just the pairing token.
   const base = installBaseUrl();
-  const cpUrl = controlPlaneBaseUrl();
-  const installCommand =
-    `curl -fsSL ${base}/install.sh | ` +
-    `IMSG_INSTALL_BASE=${base} IMSG_CONTROL_PLANE_URL=${cpUrl} TOKEN=${raw} sh`;
+  const installCommand = `curl -fsSL ${base}/install.sh | TOKEN=${raw} sh`;
 
   const body: PairingTokenResponse = { token: raw, expiresAt, installCommand };
   return NextResponse.json(body, { status: 200 });

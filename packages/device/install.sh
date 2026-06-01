@@ -19,18 +19,19 @@
 #      never gets a permission prompt for relaying to the phone.
 #   7. Exchange the single-use pairing TOKEN immediately for a device_token.
 #
-# Env:
+# Env (all OPTIONAL — the served script bakes its own defaults; the canonical
+# one-liner is just `curl -fsSL .../install.sh | TOKEN=<token> sh`):
 #   TOKEN                    single-use pairing token (required to pair)
-#   IMSG_CONTROL_PLANE_URL   control-plane base URL (default http://localhost:8080).
-#                            The minted install one-liner sets this to the real
-#                            control-plane host so piped installs don't pair
-#                            against localhost.
-#   IMSG_INSTALL_BASE        dashboard origin that served this script (e.g.
-#                            https://msg.example.com). When piped (curl | sh) with
-#                            no IMSG_DEVICE_SRC, the plugin is fetched from
-#                            ${IMSG_INSTALL_BASE}/imsg-device.tar.gz — this is what
-#                            makes the one-liner self-contained. The minted
-#                            install one-liner sets it automatically.
+#   IMSG_CONTROL_PLANE_URL   override the control-plane base URL. Not needed for a
+#                            normal install: the URL is baked into the plugin
+#                            (build-config.json) so pairing AND the runtime read
+#                            it without any env. Set only to point at a different
+#                            control plane (e.g. local dev).
+#   IMSG_INSTALL_BASE        override the origin the plugin tarball is fetched
+#                            from. Not needed normally: the build bakes the
+#                            dashboard origin into the SERVED copy of this script
+#                            (the default assignment near the top). Set only to
+#                            fetch the tarball from a different host.
 #   IMSG_DEVICE_SRC          source dir to install FROM. When run as a local file,
 #                            defaults to the script's own dir; set it to install
 #                            from a checkout instead of downloading the tarball.
@@ -40,7 +41,12 @@
 # =============================================================================
 set -eu
 
-CONTROL_PLANE_URL="${IMSG_CONTROL_PLANE_URL:-http://localhost:8080}"
+# Origin that serves this script + the plugin tarball. copy-install-script.mjs
+# bakes the dashboard origin into the SERVED copy by replacing the placeholder
+# token below, so the piped one-liner needn't pass IMSG_INSTALL_BASE. An explicit
+# env value still wins. The source tree keeps the placeholder verbatim — that's
+# fine: local-file installs infer the source from $0 and never read this.
+IMSG_INSTALL_BASE="${IMSG_INSTALL_BASE:-__IMSG_INSTALL_BASE__}"
 PLUGIN_NAME="imsg-device"
 MARKETPLACE_NAME="imsg"
 CLAUDE_DIR="${HOME}/.claude"
@@ -270,9 +276,18 @@ say "wrap-chained statusLine + pre-allowed $REPLY_PERMISSION (backup: $BACKUP)"
 # --- 7. pair --------------------------------------------------------------
 if [ -n "${TOKEN:-}" ]; then
   say "pairing device with the control plane"
-  IMSG_CONTROL_PLANE_URL="$CONTROL_PLANE_URL" IMSG_DEVICE_DIR="$DEVICE_DIR" \
-    "$BUN" "${PLUGIN_DIR}/bin/imsg.ts" pair "$TOKEN" \
-    || die "pairing failed — request a fresh token from the dashboard and re-run"
+  # Pass IMSG_CONTROL_PLANE_URL through ONLY if the operator set it explicitly;
+  # otherwise let the CLI read the control-plane URL baked into the plugin
+  # (build-config.json) instead of forcing a localhost default.
+  if [ -n "${IMSG_CONTROL_PLANE_URL:-}" ]; then
+    IMSG_CONTROL_PLANE_URL="$IMSG_CONTROL_PLANE_URL" IMSG_DEVICE_DIR="$DEVICE_DIR" \
+      "$BUN" "${PLUGIN_DIR}/bin/imsg.ts" pair "$TOKEN" \
+      || die "pairing failed — request a fresh token from the dashboard and re-run"
+  else
+    IMSG_DEVICE_DIR="$DEVICE_DIR" \
+      "$BUN" "${PLUGIN_DIR}/bin/imsg.ts" pair "$TOKEN" \
+      || die "pairing failed — request a fresh token from the dashboard and re-run"
+  fi
 else
   say "no TOKEN provided — pair later with:"
   say "  $BUN ${PLUGIN_DIR}/bin/imsg.ts pair <pairing-token>"

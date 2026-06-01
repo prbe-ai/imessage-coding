@@ -20,7 +20,6 @@
 
 import { execFileSync } from "node:child_process";
 import {
-  copyFileSync,
   cpSync,
   mkdirSync,
   mkdtempSync,
@@ -42,8 +41,26 @@ const dest = resolve(destDir, "install.sh");
 const tarball = resolve(destDir, "imsg-device.tar.gz");
 
 mkdirSync(destDir, { recursive: true });
-copyFileSync(src, dest);
-console.log(`[copy-install-script] ${src} -> ${dest}`);
+// Bake the dashboard origin into the SERVED install.sh: install.sh defaults
+// IMSG_INSTALL_BASE to the `__IMSG_INSTALL_BASE__` placeholder, which we replace
+// here with this dashboard's public origin. That's where the piped installer
+// fetches the plugin tarball from, so the one-liner doesn't have to pass it.
+// Empty when NEXT_PUBLIC_APP_URL is unset (then a piped install must pass
+// IMSG_INSTALL_BASE, same as before). The source tree keeps the placeholder.
+const installOrigin = (process.env.NEXT_PUBLIC_APP_URL || "").replace(/\/+$/, "");
+const rawInstall = readFileSync(src, "utf8");
+if (!rawInstall.includes("__IMSG_INSTALL_BASE__")) {
+  // Fail loudly: a renamed/removed placeholder would silently ship an installer
+  // that defaults IMSG_INSTALL_BASE to localhost — exactly the bug we're fixing.
+  throw new Error(
+    "install.sh is missing the __IMSG_INSTALL_BASE__ placeholder — cannot bake the install origin",
+  );
+}
+const installScript = rawInstall.replaceAll("__IMSG_INSTALL_BASE__", installOrigin);
+writeFileSync(dest, installScript);
+console.log(
+  `[copy-install-script] ${src} -> ${dest} (IMSG_INSTALL_BASE=${installOrigin || "(unset)"})`,
+);
 
 // Pack the plugin into a SELF-CONTAINED tarball. The plugin depends on the
 // workspace package @imsg/shared, which a standalone `bun install` (run by the

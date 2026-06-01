@@ -136,8 +136,11 @@ bun run auth:migrate
 **Device plugin** (on the machine where you use Claude Code):
 
 ```sh
-# Easiest: the dashboard's Integrations page prints a one-liner:
-curl -fsSL <WEBHOOK_BASE_URL>/install.sh | TOKEN=<pairing-token> sh
+# Easiest: copy the exact one-liner from the dashboard's Integrations page. It
+# embeds the pairing token plus IMSG_INSTALL_BASE (dashboard origin, to fetch the
+# plugin tarball) and IMSG_CONTROL_PLANE_URL (which control plane to pair against):
+curl -fsSL <dashboard-origin>/install.sh \
+  | IMSG_INSTALL_BASE=<dashboard-origin> IMSG_CONTROL_PLANE_URL=<control-plane> TOKEN=<pairing-token> sh
 # Or, from a checkout (local dev):
 cd packages/device
 bun run bin/imsg.ts pair <pairing-token>

@@ -1,3 +1,4 @@
 # Generated at build time by scripts/copy-install-script.mjs from the canonical
-# source packages/device/install.sh. Not committed so it never drifts stale.
+# source packages/device/. Not committed so they never drift stale.
 /public/install.sh
+/public/imsg-device.tar.gz

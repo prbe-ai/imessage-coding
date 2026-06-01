@@ -29,14 +29,25 @@ plane. Uses a durable outbox/backoff/creds/sanitize/killswitch design.
 
 ## Install
 
-One-liner (embeds a single-use pairing token from the dashboard):
+One-liner — copy it from the dashboard's Integrations page. It embeds a
+single-use pairing token plus the two URLs the piped installer can't infer:
+`IMSG_INSTALL_BASE` (where to download the plugin) and `IMSG_CONTROL_PLANE_URL`
+(which control plane to pair against):
 
 ```bash
-curl -fsSL https://msg.example.com/install.sh | TOKEN=<pairing-token> sh
+curl -fsSL https://msg.example.com/install.sh \
+  | IMSG_INSTALL_BASE=https://msg.example.com \
+    IMSG_CONTROL_PLANE_URL=https://api.msg.example.com \
+    TOKEN=<pairing-token> sh
 ```
 
-`install.sh` resolves bun's absolute path, stages the plugin into a local
-marketplace, `bun install`s deps, registers + `claude plugin enable
+To install from a local checkout instead, run `packages/device/install.sh`
+directly (it infers the source from its own path) or set `IMSG_DEVICE_SRC`.
+
+`install.sh` resolves bun's absolute path, obtains the plugin source (downloads
+`imsg-device.tar.gz` from `IMSG_INSTALL_BASE` when piped; uses the on-disk
+source when run as a file), stages it into a local marketplace, `bun install`s
+deps, registers + `claude plugin enable
 imsg-device@imsg`, rewrites the bare `bun` command to the absolute path in
 `.mcp.json` + `hooks/hooks.json`, wrap-chains the statusLine into
 `~/.claude/settings.json` (backing up first), pre-allows the `mcp__imsg-device__reply`

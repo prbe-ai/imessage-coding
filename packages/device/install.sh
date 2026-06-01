@@ -20,11 +20,19 @@
 #
 # Env:
 #   TOKEN                    single-use pairing token (required to pair)
-#   IMSG_CONTROL_PLANE_URL   control-plane base URL (default http://localhost:8080)
-#   IMSG_DEVICE_SRC          source dir to install FROM. REQUIRED when this script
-#                            is piped to `sh` (curl | sh), where there is no
-#                            on-disk script path to infer the source from. When
-#                            run as a local file, defaults to the script's dir.
+#   IMSG_CONTROL_PLANE_URL   control-plane base URL (default http://localhost:8080).
+#                            The minted install one-liner sets this to the real
+#                            control-plane host so piped installs don't pair
+#                            against localhost.
+#   IMSG_INSTALL_BASE        dashboard origin that served this script (e.g.
+#                            https://msg.example.com). When piped (curl | sh) with
+#                            no IMSG_DEVICE_SRC, the plugin is fetched from
+#                            ${IMSG_INSTALL_BASE}/imsg-device.tar.gz — this is what
+#                            makes the one-liner self-contained. The minted
+#                            install one-liner sets it automatically.
+#   IMSG_DEVICE_SRC          source dir to install FROM. When run as a local file,
+#                            defaults to the script's own dir; set it to install
+#                            from a checkout instead of downloading the tarball.
 #
 # Runs under both bash and a POSIX `sh` (the documented `| sh` invocation), so it
 # avoids bashisms (no `set -o pipefail`, no ${BASH_SOURCE[@]}).
@@ -51,20 +59,38 @@ BUN="$(command -v bun || true)"
 BUN="$(cd "$(dirname "$BUN")" && pwd)/$(basename "$BUN")"
 say "using bun: $BUN"
 
-# Source dir: where the packaged plugin lives.
-#  - Explicit IMSG_DEVICE_SRC always wins.
-#  - Otherwise, infer from this script's own path — but ONLY when invoked as a
-#    real file. Under `curl ... | sh`, there is no script file ($0 is the shell
-#    name like "sh"/"dash", and BASH_SOURCE is unset), so we MUST be told the
-#    source dir. We never fall back to the cwd (that would silently stage the
-#    wrong tree).
+# Source dir: where the packaged plugin lives. Resolved in priority order:
+#  1. Explicit IMSG_DEVICE_SRC — install from a local checkout.
+#  2. This script's own dir — but ONLY when invoked as a real on-disk file.
+#     Under `curl ... | sh`, $0 is the shell name ("sh"/"dash"), not a path, and
+#     BASH_SOURCE is unset, so this branch can't fire for a piped install.
+#  3. Piped with no local source: download the plugin tarball from the dashboard
+#     origin (IMSG_INSTALL_BASE) into a temp dir. This is what makes the
+#     advertised `curl ... | sh` one-liner self-contained — without it a pipe
+#     has only the script, never the plugin code.
+# We never fall back to the cwd (that would silently stage the wrong tree).
 SRC="${IMSG_DEVICE_SRC:-}"
 if [ -z "$SRC" ]; then
-  # $0 is a usable path only when it resolves to an existing file (not piped).
   if [ -f "$0" ]; then
     SRC="$(cd "$(dirname "$0")" && pwd)"
+  elif [ -n "${IMSG_INSTALL_BASE:-}" ]; then
+    command -v curl >/dev/null 2>&1 || die "curl not found — needed to download the plugin"
+    command -v tar  >/dev/null 2>&1 || die "tar not found — needed to unpack the plugin"
+    TARBALL_URL="${IMSG_INSTALL_BASE%/}/imsg-device.tar.gz"
+    SRC="$(mktemp -d)"
+    TARBALL_TMP="$(mktemp)"
+    say "fetching plugin from $TARBALL_URL"
+    # Download to a file, THEN extract — not `curl | tar`. A POSIX `sh` has no
+    # pipefail, and an empty/failed curl body makes tar exit 0 on some platforms,
+    # so a piped download failure would be silently masked. Separating the two
+    # steps fails closed with a precise error.
+    curl -fsSL "$TARBALL_URL" -o "$TARBALL_TMP" \
+      || die "could not download the plugin from $TARBALL_URL"
+    ( cd "$SRC" && tar -xzf "$TARBALL_TMP" ) \
+      || die "could not unpack the plugin tarball from $TARBALL_URL"
+    rm -f "$TARBALL_TMP"
   else
-    die "running from a pipe (curl | sh) — set IMSG_DEVICE_SRC to the plugin source dir"
+    die "running from a pipe (curl | sh) without IMSG_INSTALL_BASE — re-copy the install command from the dashboard, or set IMSG_DEVICE_SRC to a local checkout of packages/device"
   fi
 fi
 [ -f "$SRC/.claude-plugin/plugin.json" ] || die "no plugin.json under $SRC — set IMSG_DEVICE_SRC"

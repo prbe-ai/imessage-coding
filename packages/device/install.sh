@@ -8,7 +8,8 @@
 #   1. Resolve bun's ABSOLUTE path (command -v bun) — required so the plugin's
 #      MCP server + hooks run with a fully-qualified interpreter regardless of
 #      the user's PATH when Claude Code spawns them.
-#   2. Stage the plugin into a local marketplace dir and `bun install` its deps.
+#   2. Stage the plugin into an imsg-device/ subdir of a local marketplace,
+#      generate the catalog (plugin source ./imsg-device), and `bun install`.
 #   3. Register the marketplace + `claude plugin enable imsg-device@imsg`.
 #   4. Rewrite the shipped bare `bun` command in .mcp.json + hooks.json to the
 #      resolved absolute path.
@@ -48,6 +49,11 @@ SETTINGS="${CLAUDE_DIR}/settings.json"
 DEVICE_DIR="${IMSG_DEVICE_DIR:-${CLAUDE_DIR}/plugins/${PLUGIN_NAME}}"
 # Where we stage the plugin code as a local single-plugin marketplace.
 MARKETPLACE_DIR="${CLAUDE_DIR}/plugins/marketplaces/${MARKETPLACE_NAME}"
+# Claude Code requires a marketplace plugin `source` to be a SUBDIRECTORY
+# ("./imsg-device"); a root source (".") is rejected as an unsupported source
+# type. So the plugin code lives in this subdir and a generated catalog at the
+# marketplace root points at it.
+PLUGIN_DIR="${MARKETPLACE_DIR}/${PLUGIN_NAME}"
 
 say() { printf '[imsg-install] %s\n' "$*"; }
 die() { printf '[imsg-install] error: %s\n' "$*" >&2; exit 1; }
@@ -95,15 +101,68 @@ if [ -z "$SRC" ]; then
 fi
 [ -f "$SRC/.claude-plugin/plugin.json" ] || die "no plugin.json under $SRC — set IMSG_DEVICE_SRC"
 
-# --- 2. stage the plugin + install deps -------------------------------------
-say "staging plugin into $MARKETPLACE_DIR"
-mkdir -p "$MARKETPLACE_DIR" "$DEVICE_DIR"
+# --- 2. stage the plugin (in a subdir) + generate the catalog + install deps -
+# Lay out the marketplace the way Claude Code expects:
+#   $MARKETPLACE_DIR/.claude-plugin/marketplace.json   (catalog; source ./imsg-device)
+#   $MARKETPLACE_DIR/imsg-device/<the plugin>          (staged here, NOT at root)
+# A re-install must re-stage cleanly, so wipe any prior plugin subdir first.
+say "staging plugin into $PLUGIN_DIR"
+rm -rf "$PLUGIN_DIR"
+mkdir -p "$PLUGIN_DIR" "$MARKETPLACE_DIR/.claude-plugin" "$DEVICE_DIR"
 # Copy code (excluding any local state / node_modules from the source tree).
 ( cd "$SRC" && tar --exclude=node_modules --exclude=logs --exclude='.token' -cf - . ) \
-  | ( cd "$MARKETPLACE_DIR" && tar -xf - )
+  | ( cd "$PLUGIN_DIR" && tar -xf - )
+
+# Build the root catalog from the plugin's bundled marketplace.json, rewriting
+# the plugin `source` from "." to the "./imsg-device" subdir CC accepts, then
+# drop the inner copy (the root catalog is authoritative).
+INNER_MKT="$PLUGIN_DIR/.claude-plugin/marketplace.json"
+[ -f "$INNER_MKT" ] || die "no marketplace.json under $PLUGIN_DIR/.claude-plugin — bad plugin package"
+PLUGIN_SUBDIR="$PLUGIN_NAME" "$BUN" -e '
+  const fs = require("fs");
+  const m = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const sub = "./" + process.env.PLUGIN_SUBDIR;
+  for (const p of (m.plugins || [])) {
+    if (p && (p.source === undefined || p.source === "." || p.source === "./")) p.source = sub;
+  }
+  fs.writeFileSync(process.argv[2], JSON.stringify(m, null, 2) + "\n");
+' "$INNER_MKT" "$MARKETPLACE_DIR/.claude-plugin/marketplace.json"
+rm -f "$INNER_MKT"
+
+# Ensure @imsg/shared is vendored + resolvable. The dashboard tarball ships it
+# pre-vendored (vendor/shared + a `file:` dep). A raw monorepo checkout still
+# carries `workspace:*`, which a standalone `bun install` (run outside the
+# workspace root we just staged into) can't resolve — so vendor it from the
+# sibling packages/shared. No-op for the tarball (already a `file:` dep).
+NEEDS_VENDOR="$("$BUN" -e '
+  const fs = require("fs");
+  let p = {};
+  try { p = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
+  const v = (p.dependencies || {})["@imsg/shared"] || "";
+  process.stdout.write(v.indexOf("workspace:") === 0 ? "1" : "0");
+' "$PLUGIN_DIR/package.json")"
+if [ "$NEEDS_VENDOR" = "1" ]; then
+  if [ ! -f "$PLUGIN_DIR/vendor/shared/package.json" ]; then
+    if [ -f "$SRC/../shared/package.json" ]; then
+      mkdir -p "$PLUGIN_DIR/vendor/shared"
+      ( cd "$SRC/../shared" && tar --exclude=node_modules --exclude=logs -cf - . ) \
+        | ( cd "$PLUGIN_DIR/vendor/shared" && tar -xf - )
+    else
+      die "@imsg/shared (workspace dep) not found to vendor — install via the dashboard one-liner, or run from a full monorepo checkout"
+    fi
+  fi
+  "$BUN" -e '
+    const fs = require("fs");
+    const f = process.argv[1];
+    const p = JSON.parse(fs.readFileSync(f, "utf8"));
+    p.dependencies["@imsg/shared"] = "file:./vendor/shared";
+    fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");
+  ' "$PLUGIN_DIR/package.json"
+  say "vendored @imsg/shared from the checkout (workspace dep -> file:)"
+fi
 
 say "installing dependencies with bun"
-( cd "$MARKETPLACE_DIR" && "$BUN" install --production ) || die "bun install failed"
+( cd "$PLUGIN_DIR" && "$BUN" install --production ) || die "bun install failed"
 
 # --- 3. rewrite bare 'bun' -> absolute path in MCP + hooks -------------------
 # Claude Code expands ${CLAUDE_PLUGIN_ROOT}; we only need the interpreter to be
@@ -132,14 +191,16 @@ rewrite_bun() {
     fs.writeFileSync(f, JSON.stringify(walk(j), null, 2) + "\n");
   ' "$file"
 }
-rewrite_bun "$MARKETPLACE_DIR/.mcp.json"
-rewrite_bun "$MARKETPLACE_DIR/hooks/hooks.json"
+rewrite_bun "$PLUGIN_DIR/.mcp.json"
+rewrite_bun "$PLUGIN_DIR/hooks/hooks.json"
 say "rewrote bun command to absolute path in .mcp.json + hooks.json"
 
 # --- 4. register marketplace + enable plugin --------------------------------
 CLAUDE_BIN="$(command -v claude || true)"
 if [ -n "$CLAUDE_BIN" ]; then
   say "registering marketplace + enabling plugin"
+  # Clear any stale registration first so a re-install picks up the new layout.
+  "$CLAUDE_BIN" plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
   "$CLAUDE_BIN" plugin marketplace add "$MARKETPLACE_DIR" >/dev/null 2>&1 || true
   "$CLAUDE_BIN" plugin enable "${PLUGIN_NAME}@${MARKETPLACE_NAME}" >/dev/null 2>&1 \
     || say "note: could not auto-enable; run: claude plugin enable ${PLUGIN_NAME}@${MARKETPLACE_NAME}"
@@ -158,7 +219,7 @@ mkdir -p "$CLAUDE_DIR"
 BACKUP="${SETTINGS}.imsg-backup"
 [ -f "$BACKUP" ] || cp "$SETTINGS" "$BACKUP"
 
-STATUSLINE_CMD="$BUN ${MARKETPLACE_DIR}/bin/imsg.ts statusline"
+STATUSLINE_CMD="$BUN ${PLUGIN_DIR}/bin/imsg.ts statusline"
 REPLY_PERMISSION="mcp__${PLUGIN_NAME}__reply"
 
 SETTINGS_FILE="$SETTINGS" STATUSLINE_CMD="$STATUSLINE_CMD" REPLY_PERMISSION="$REPLY_PERMISSION" \
@@ -201,11 +262,11 @@ say "wrap-chained statusLine + pre-allowed $REPLY_PERMISSION (backup: $BACKUP)"
 if [ -n "${TOKEN:-}" ]; then
   say "pairing device with the control plane"
   IMSG_CONTROL_PLANE_URL="$CONTROL_PLANE_URL" IMSG_DEVICE_DIR="$DEVICE_DIR" \
-    "$BUN" "${MARKETPLACE_DIR}/bin/imsg.ts" pair "$TOKEN" \
+    "$BUN" "${PLUGIN_DIR}/bin/imsg.ts" pair "$TOKEN" \
     || die "pairing failed — request a fresh token from the dashboard and re-run"
 else
   say "no TOKEN provided — pair later with:"
-  say "  $BUN ${MARKETPLACE_DIR}/bin/imsg.ts pair <pairing-token>"
+  say "  $BUN ${PLUGIN_DIR}/bin/imsg.ts pair <pairing-token>"
 fi
 
 say "done. Restart Claude Code (or start a new session) to load the plugin."

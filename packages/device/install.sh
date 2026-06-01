@@ -18,6 +18,9 @@
 #   6. Pre-allow the channel MCP `reply` tool in permissions.allow so the agent
 #      never gets a permission prompt for relaying to the phone.
 #   7. Exchange the single-use pairing TOKEN immediately for a device_token.
+#   8. Alias `claude` (in ~/.zshrc / ~/.bashrc) to launch with the channels flag
+#      (--dangerously-load-development-channels), required for the AFK permission
+#      relay. Revertable via uninstall.sh (marker-wrapped block).
 #
 # Env (all OPTIONAL — the served script bakes its own defaults; the canonical
 # one-liner is just `curl -fsSL .../install.sh | TOKEN=<token> sh`):
@@ -293,4 +296,48 @@ else
   say "  $BUN ${PLUGIN_DIR}/bin/imsg.ts pair <pairing-token>"
 fi
 
-say "done. Restart Claude Code (or start a new session) to load the plugin."
+# --- 8. alias `claude` to load the imsg-device channel ----------------------
+# The AFK permission relay only activates when Claude Code is launched with the
+# channels flag (imsg-device is a custom/development channel, so it needs the
+# --dangerously-load-development-channels form). Add a revertable, marker-wrapped
+# alias to the user's shell rc so plain `claude` carries the flag. uninstall.sh
+# strips the same block. (`command claude` still bypasses it if ever needed.)
+CHANNEL_REF="plugin:${PLUGIN_NAME}@${MARKETPLACE_NAME}"
+CLAUDE_ALIAS="alias claude='claude --dangerously-load-development-channels ${CHANNEL_REF}'"
+RC_BLOCK_ID="imsg-device channels alias"
+
+write_rc_block() {
+  rc="$1"
+  RC_FILE="$rc" BLOCK_ID="$RC_BLOCK_ID" ALIAS_LINE="$CLAUDE_ALIAS" "$BUN" -e '
+    const fs = require("fs");
+    const f = process.env.RC_FILE, id = process.env.BLOCK_ID, alias = process.env.ALIAS_LINE;
+    const begin = `# >>> ${id} >>>`, end = `# <<< ${id} <<<`;
+    let s = ""; try { s = fs.readFileSync(f, "utf8"); } catch {}
+    // Strip any prior block (string-indexed — no regex escaping of the markers).
+    const bi = s.indexOf(begin);
+    if (bi !== -1) { const ei = s.indexOf(end, bi); if (ei !== -1) s = s.slice(0, bi) + s.slice(ei + end.length); }
+    s = s.replace(/\n{3,}/g, "\n\n");
+    if (s.length && !s.endsWith("\n")) s += "\n";
+    s += `${begin}\n${alias}\n${end}\n`;
+    fs.writeFileSync(f, s);
+  '
+}
+
+ALIASED=""
+# Always manage ~/.zshrc (the default shell here); also ~/.bashrc if it exists.
+for RC in "$HOME/.zshrc" "$HOME/.bashrc"; do
+  if [ "$RC" = "$HOME/.zshrc" ] || [ -f "$RC" ]; then
+    [ -f "$RC" ] || : > "$RC"
+    write_rc_block "$RC"
+    ALIASED="$ALIASED $RC"
+  fi
+done
+say "aliased 'claude' to load the channel (--dangerously-load-development-channels ${CHANNEL_REF}) in:${ALIASED}"
+say "  open a NEW terminal (or run: source ~/.zshrc) for it to take effect"
+if [ -n "${IMSG_INSTALL_BASE:-}" ]; then
+  say "  revert anytime:  curl -fsSL ${IMSG_INSTALL_BASE%/}/uninstall.sh | sh"
+else
+  say "  revert anytime:  run uninstall.sh from this plugin"
+fi
+
+say "done. Open a NEW terminal so the alias loads, then start Claude Code to load the plugin."

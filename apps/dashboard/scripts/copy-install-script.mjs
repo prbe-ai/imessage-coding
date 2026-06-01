@@ -62,6 +62,13 @@ console.log(
   `[copy-install-script] ${src} -> ${dest} (IMSG_INSTALL_BASE=${installOrigin || "(unset)"})`,
 );
 
+// Serve the uninstaller too (curl -fsSL .../uninstall.sh | sh). It's all-local
+// (strip alias, restore settings, unregister, remove dirs) so it needs no bake.
+const uninstallSrc = resolve(deviceDir, "uninstall.sh");
+const uninstallDest = resolve(destDir, "uninstall.sh");
+writeFileSync(uninstallDest, readFileSync(uninstallSrc, "utf8"));
+console.log(`[copy-install-script] ${uninstallSrc} -> ${uninstallDest}`);
+
 // Pack the plugin into a SELF-CONTAINED tarball. The plugin depends on the
 // workspace package @imsg/shared, which a standalone `bun install` (run by the
 // piped installer outside the monorepo) cannot resolve via `workspace:*`. So we

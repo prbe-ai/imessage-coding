@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Probe favicon. Adapts to the user's system theme via prefers-color-scheme:
+    light mode → dark square with light triangles
+    dark mode  → light square with dark triangles
+  Modern browsers (Chrome 80+, Safari 13+, Firefox 75+) honor media queries
+  inside SVG favicons.
+-->
+<svg id="Layer_1" xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 256 256">
+  <defs>
+    <style>
+      .st-bg { fill: #0a0a0a; }
+      .st-fg { fill: #e8e8e8; }
+      @media (prefers-color-scheme: dark) {
+        .st-bg { fill: #e8e8e8; }
+        .st-fg { fill: #0a0a0a; }
+      }
+    </style>
+  </defs>
+  <rect class="st-bg" width="256" height="256"/>
+  <path class="st-fg" opacity=".1" d="M56.79,118l64,36-64,36v-72Z"/>
+  <path class="st-fg" opacity=".25" d="M77.21,94l78,48-78,48v-96Z"/>
+  <path class="st-fg" d="M99.21,66l100,62-100,62v-124Z"/>
+</svg>

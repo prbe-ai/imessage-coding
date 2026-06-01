@@ -4,10 +4,8 @@ disable-model-invocation: true
 allowed-tools: Bash(bun *)
 ---
 
-Toggling AFK for imsg-device:
-
 ```!
 bun "${CLAUDE_PLUGIN_ROOT}/bin/imsg.ts" afk toggle
 ```
 
-The line above is the new state: `afk: on` routes permission prompts and questions to your phone; `afk: off` keeps everything local. Just report it back to me — nothing else to do.
+Reply with only the new AFK state shown above (e.g. `afk: on`), nothing else.

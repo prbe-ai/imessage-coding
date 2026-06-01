@@ -196,6 +196,25 @@ CREATE TABLE IF NOT EXISTS message_log (
 CREATE INDEX IF NOT EXISTS idx_message_log_account_created ON message_log(account_id, created_at DESC);
 
 -- -----------------------------------------------------------------------------
+-- processed_webhooks — idempotency ledger for inbound AgentPhone deliveries.
+-- AgentPhone delivers at-least-once: a slow/failed ack (or a transient outage)
+-- makes it retry the SAME message, and X-Webhook-ID is STABLE across those
+-- retries. The webhook handler claims the id here (INSERT ... ON CONFLICT DO
+-- NOTHING) BEFORE running the assistant turn — a losing claim means "already
+-- seen", so the turn is skipped. Without this, every redelivery re-ran the turn
+-- and the user got the same reply two-to-five times (the burst seen after a
+-- recovery, each answering an older queued message).
+--
+-- Rows are tiny and append-only; ids are never re-checked once past the
+-- provider's retry window, so prune rows older than a few days out of band if
+-- the table ever grows.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS processed_webhooks (
+  webhook_id  TEXT        PRIMARY KEY,                 -- X-Webhook-ID (stable across retries)
+  seen_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- -----------------------------------------------------------------------------
 -- session_messages — free-text steering pushed INTO a running coding-agent
 -- session by the assistant ("also add tests"). Distinct from decisions (which
 -- resolve a pending attention): a steer has no attention to resolve. The device

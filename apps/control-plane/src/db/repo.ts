@@ -683,6 +683,40 @@ export async function recentMessages(args: {
   }));
 }
 
+// --- webhook idempotency ------------------------------------------------------
+
+/**
+ * Claim an inbound webhook delivery by its X-Webhook-ID. Returns true if THIS
+ * call won the claim (the first time we've seen this id) and the caller should
+ * process the message; false if the id was already claimed (a provider retry of
+ * the same message) and the caller must skip. This is the dedup that stops an
+ * at-least-once redelivery from re-running the assistant turn and texting the
+ * user the same reply again. Atomic via INSERT ... ON CONFLICT DO NOTHING, so
+ * two concurrent deliveries of the same id can never both win.
+ */
+export async function claimWebhook(webhookId: string): Promise<boolean> {
+  const rows = await query<{ webhook_id: string }>(
+    `INSERT INTO processed_webhooks (webhook_id) VALUES ($1)
+       ON CONFLICT (webhook_id) DO NOTHING
+     RETURNING webhook_id`,
+    [webhookId],
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Release a previously-claimed webhook id so a provider redelivery can re-run.
+ * The claim is TENTATIVE: we claim before processing (to dedup concurrent/fast
+ * retries) but the row only legitimately means "handled" once the turn settles.
+ * If the turn THROWS before doing its work (a transient DB/account-resolution
+ * blip), releasing the claim restores the provider's at-least-once retry as the
+ * recovery path — without this, a claimed-but-unanswered message would be
+ * silently dropped, since we've already 200'd and the redelivery would dedup.
+ */
+export async function releaseWebhook(webhookId: string): Promise<void> {
+  await query(`DELETE FROM processed_webhooks WHERE webhook_id = $1`, [webhookId]);
+}
+
 // --- session messages (free-text steering INTO a running session) -------------
 
 /** A free-text steer queued for delivery into a session. */

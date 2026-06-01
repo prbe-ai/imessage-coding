@@ -22,6 +22,35 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 
 -- -----------------------------------------------------------------------------
+-- agent_numbers — the pool of AgentPhone numbers this deployment owns. Each
+-- account is assigned one (see accounts.agent_number_id). Rows are deployment
+-- data, seeded from the live AgentPhone API (scripts/seed-agent-numbers.ts) —
+-- never committed literals (keeps the OSS repo de-branded).
+--
+-- Phase 1: ONE active row, shared by every account (assignment is non-exclusive).
+-- Phase 2 (dedicated numbers): assignment becomes 1:1 — add UNIQUE(agent_number_id)
+-- on accounts and claim a free row with FOR UPDATE SKIP LOCKED. Callers of
+-- ensureAgentNumberForAccount() do not change.
+--
+-- Lifecycle: retire a number by setting active=FALSE (soft), NEVER DELETE — the
+-- assigner only serves active rows, and the FK below intentionally has NO ON
+-- DELETE action so an accidental delete of an in-use number fails loud.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_numbers (
+  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  phone_number  TEXT        NOT NULL UNIQUE,        -- E.164, e.g. +16576263011
+  agent_id      TEXT        NOT NULL,               -- AgentPhone agentId that owns it
+  provider_id   TEXT,                               -- AgentPhone number id
+  active        BOOLEAN     NOT NULL DEFAULT TRUE,  -- allocatable?
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- The account's assigned outbound agent number. NULL until first assigned (or
+-- when the pool is empty). Shared-number phase: many accounts -> same row.
+ALTER TABLE accounts
+  ADD COLUMN IF NOT EXISTS agent_number_id UUID REFERENCES agent_numbers(id);
+
+-- -----------------------------------------------------------------------------
 -- devices — a paired machine running the Claude Code plugin.
 -- device_token_hash is a peppered hash; the raw token is returned to the
 -- device exactly once at pair time and never stored.

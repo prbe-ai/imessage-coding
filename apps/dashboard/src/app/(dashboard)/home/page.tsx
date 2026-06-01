@@ -24,7 +24,12 @@ import { SessionCard } from "@/components/session-card";
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AfkState, SessionState, type SessionInfo } from "@imsg/shared";
-import { getLinkedNumber, listSessions, setAfk } from "@/lib/api/home";
+import {
+  getAgentNumber,
+  getLinkedNumber,
+  listSessions,
+  setAfk,
+} from "@/lib/api/home";
 import { chatDeepLink } from "@/lib/deep-link";
 import { extractError } from "@/lib/utils";
 
@@ -36,6 +41,8 @@ export default function HomePage() {
   const { data: session, isPending } = useSession();
 
   const [phoneNumber, setPhoneNumber] = useState<string | null>(null);
+  // The agent number to chat WITH (distinct from phoneNumber, the user's own).
+  const [agentNumber, setAgentNumber] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [afkBusy, setAfkBusy] = useState(false);
   const bootRef = useRef(false);
@@ -58,6 +65,14 @@ export default function HomePage() {
           return;
         }
         setPhoneNumber(res.phoneNumber);
+        // The number to chat WITH (the agent), not the user's own linked one.
+        getAgentNumber(ac.signal)
+          .then((r) => {
+            if (!ac.signal.aborted) setAgentNumber(r.phoneNumber);
+          })
+          .catch(() => {
+            // Non-fatal — the chat button just stays hidden until it resolves.
+          });
       })
       .catch(() => {
         if (ac.signal.aborted) return;
@@ -152,10 +167,12 @@ export default function HomePage() {
       <div className="space-y-8">
         {/* Chat + linked number */}
         <section className="space-y-4">
-          <a className="imsg-blue-btn" href={chatDeepLink(phoneNumber)}>
-            <MessageSquare aria-hidden="true" />
-            Open chat in Messages
-          </a>
+          {agentNumber && (
+            <a className="imsg-blue-btn" href={chatDeepLink(agentNumber)}>
+              <MessageSquare aria-hidden="true" />
+              Open chat in Messages
+            </a>
+          )}
           <div className="flex items-center justify-between rounded-lg border border-outline-variant/40 bg-surface-container-low px-4 py-3">
             <div>
               <div className="font-mono text-[10px] uppercase tracking-widest text-outline">

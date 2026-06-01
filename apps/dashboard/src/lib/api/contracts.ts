@@ -15,6 +15,8 @@ export interface OnboardingStartResponse {
   token: string;
   /** ISO-8601 expiry of the token. */
   expiresAt: string;
+  /** The agent number (E.164) the user should text — addresses the deep link. */
+  agentNumber: string;
 }
 
 /** A derived phone number awaiting the user's confirmation, or the
@@ -34,6 +36,14 @@ export interface OnboardingStatusResponse {
 export interface LinkedNumberResponse {
   phoneNumber: string | null;
   verified: boolean;
+}
+
+/** Response of GET /api/account/agent-number — the AgentPhone number assigned
+ *  to this account (the number the user texts/chats). NULL only when the pool
+ *  is empty. Distinct from LinkedNumberResponse, which is the user's OWN
+ *  verified number. */
+export interface AgentNumberResponse {
+  phoneNumber: string | null;
 }
 
 /** Response of GET /api/home/sessions — live, account-scoped sessions. */

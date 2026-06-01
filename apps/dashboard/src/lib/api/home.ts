@@ -7,6 +7,7 @@
 import { apiGet, apiPost } from "@/lib/api/client";
 import type { AfkState, GrantLevel } from "@imsg/shared";
 import type {
+  AgentNumberResponse,
   LinkedNumberResponse,
   SessionsResponse,
   SetAfkResponse,
@@ -17,6 +18,14 @@ export function getLinkedNumber(
   signal?: AbortSignal,
 ): Promise<LinkedNumberResponse> {
   return apiGet<LinkedNumberResponse>("/api/home/number", signal);
+}
+
+/** The agent number this account texts/chats — for the "Open chat" deep link.
+ *  Distinct from getLinkedNumber (the user's own linked number). */
+export function getAgentNumber(
+  signal?: AbortSignal,
+): Promise<AgentNumberResponse> {
+  return apiGet<AgentNumberResponse>("/api/account/agent-number", signal);
 }
 
 export function listSessions(signal?: AbortSignal): Promise<SessionsResponse> {

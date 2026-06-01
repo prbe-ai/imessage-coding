@@ -15,6 +15,7 @@
 import { NextResponse } from "next/server";
 
 import { requireAccount } from "@/lib/server-session";
+import { ensureAgentNumberForAccount } from "@/lib/agent-number";
 import { query } from "@/lib/db";
 import {
   mintRawToken,
@@ -30,6 +31,18 @@ export async function POST(req: Request): Promise<Response> {
   const ctx = await requireAccount(req);
   if (!ctx) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
+  // Resolve the account's agent number BEFORE burning/minting a token — if no
+  // number can be provisioned the deep link is useless, so fail loud here
+  // rather than hand back a token the user can't send anywhere. This is the one
+  // place that hard-fails on an empty pool (ensureAccount stays best-effort).
+  const agentNumber = await ensureAgentNumberForAccount(ctx.accountId);
+  if (!agentNumber) {
+    return NextResponse.json(
+      { error: "no_agent_number_provisioned" },
+      { status: 500 },
+    );
   }
 
   // Burn any earlier un-used token for this account+session so only the
@@ -50,6 +63,6 @@ export async function POST(req: Request): Promise<Response> {
     [hashToken(raw), ctx.accountId, ctx.sessionId, expiresAt],
   );
 
-  const body: OnboardingStartResponse = { token: raw, expiresAt };
+  const body: OnboardingStartResponse = { token: raw, expiresAt, agentNumber };
   return NextResponse.json(body, { status: 200 });
 }

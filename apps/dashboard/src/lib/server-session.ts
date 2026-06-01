@@ -13,6 +13,7 @@ import "server-only";
 
 import { getAuth } from "@/lib/idp/auth";
 import { query } from "@/lib/db";
+import { ensureAgentNumberForAccount } from "@/lib/agent-number";
 
 export interface SessionUser {
   /** Better Auth user id. */
@@ -50,14 +51,28 @@ export async function getSessionUser(req: Request): Promise<SessionUser | null> 
  * is UNIQUE, so the upsert is idempotent and concurrency-safe.
  */
 export async function ensureAccount(email: string): Promise<AccountRow> {
-  const res = await query<AccountRow>(
+  const res = await query<AccountRow & { agent_number_id: string | null }>(
     `INSERT INTO accounts (email) VALUES ($1)
        ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
-     RETURNING id, email`,
+     RETURNING id, email, agent_number_id`,
     [email],
   );
   // ON CONFLICT ... DO UPDATE always returns the row (existing or new).
-  return res.rows[0]!;
+  const row = res.rows[0]!;
+
+  // Eager, best-effort agent-number assignment on first touch. The extra column
+  // in RETURNING is free; the assign only runs when still unassigned. It NEVER
+  // throws — an empty pool just leaves agent_number_id NULL and the dashboard
+  // stays up. The one place that fails loud on a missing number is
+  // /api/onboarding/start (where the user actually needs it).
+  if (!row.agent_number_id) {
+    await ensureAgentNumberForAccount(row.id).catch((err) => {
+      console.warn("[ensureAccount] agent-number assign failed (non-fatal)", err);
+      return null;
+    });
+  }
+
+  return { id: row.id, email: row.email };
 }
 
 /**

@@ -39,9 +39,6 @@ import { extractError } from "@/lib/utils";
 /** How often to poll for an inbound match once the deep link is shown. */
 const STATUS_POLL_INTERVAL_MS = 2500;
 
-/** Agent number shown in the deep link, when configured at build time. */
-const AGENT_PHONE_NUMBER = process.env.NEXT_PUBLIC_AGENT_PHONE_NUMBER || null;
-
 type Step = "boot" | "link" | "confirm" | "done" | "error";
 
 export default function OnboardingPage() {
@@ -50,6 +47,8 @@ export default function OnboardingPage() {
 
   const [step, setStep] = useState<Step>("boot");
   const [token, setToken] = useState<string | null>(null);
+  // The agent number to text, returned by /api/onboarding/start (per-account).
+  const [agentNumber, setAgentNumber] = useState<string | null>(null);
   const [phoneNumber, setPhoneNumber] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -91,6 +90,7 @@ export default function OnboardingPage() {
         const minted = await startOnboarding(ac.signal);
         if (ac.signal.aborted) return;
         setToken(minted.token);
+        setAgentNumber(minted.agentNumber);
         setStep("link");
       } catch (err) {
         if (ac.signal.aborted) return;
@@ -191,7 +191,7 @@ export default function OnboardingPage() {
 
   // ── Step: link your number (deep link). ───────────────────────────────
   if (step === "link" && token) {
-    const href = smsDeepLink(token, AGENT_PHONE_NUMBER);
+    const href = smsDeepLink(token, agentNumber);
     return (
       <OnboardingShell
         stepKey="onb-link"

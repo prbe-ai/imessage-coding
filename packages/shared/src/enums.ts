@@ -97,6 +97,9 @@ export const DeviceApiRoute = {
   DECISIONS: '/api/device/decisions',
   /** SSE event stream (decisions + session-message steers) — replaces polling. */
   EVENTS: '/api/device/events',
+  /** Device confirms it injected decisions (by attentionId) so the server can
+   *  mark them delivered and stop re-serving them — at-least-once + dedup. */
+  ACK: '/api/device/ack',
   HEARTBEAT: '/api/device/heartbeat',
   STATE: '/api/device/state',
   /** Lightweight, AFK-gated session-transcript activity batches (the tap). */

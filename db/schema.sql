@@ -178,9 +178,21 @@ CREATE TABLE IF NOT EXISTS decisions (
   "grant"       TEXT        CHECK ("grant" IN ('off', 'edits', 'full')),
   source        TEXT        NOT NULL
                   CHECK (source IN ('phone', 'dashboard', 'keyboard', 'timeout')),
-  resolved_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+  resolved_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Set once the device ACKs that it injected this decision into the session
+  -- (POST /api/device/ack). The SSE stream only serves decisions where this is
+  -- NULL, so a resolved answer/verdict is delivered at-least-once but never
+  -- re-injected on reconnect/restart (was the duplicate-reply loop). Mirrors
+  -- session_messages.delivered_at.
+  delivered_at  TIMESTAMPTZ
 );
+-- Idempotent add for already-provisioned DBs (CREATE TABLE IF NOT EXISTS above
+-- is a no-op once the table exists).
+ALTER TABLE decisions ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_decisions_attention ON decisions(attention_id);
+-- Hot path: the SSE flush queries undelivered decisions per session.
+CREATE INDEX IF NOT EXISTS idx_decisions_undelivered
+  ON decisions(attention_id) WHERE delivered_at IS NULL;
 
 -- -----------------------------------------------------------------------------
 -- message_log — durable record of inbound/outbound messages, account-scoped.

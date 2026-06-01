@@ -13,11 +13,13 @@
  * control surface is GONE. Instead this server talks to the CLOUD CONTROL PLANE:
  *   - a permission_request / reply / idle  → an AttentionEvent enqueued in the
  *     durable outbox and POSTed to /api/device/attention (Bearer device_token).
- *   - verdicts + answers + remote grant changes arrive by LONG-POLLING
- *     GET /api/device/decisions; a verdict is relayed back to Claude Code via
- *     the claude/channel/permission notification, an answer is pushed into the
+ *   - verdicts + answers + remote grant changes arrive over the SSE stream
+ *     GET /api/device/events; a verdict is relayed back to Claude Code via the
+ *     claude/channel/permission notification, an answer is pushed into the
  *     session as a <channel> message, and a grant escalation is written to the
- *     local grant.state so the PreToolUse hook honors it.
+ *     local grant.state so the PreToolUse hook honors it. After injecting, the
+ *     device POSTs /api/device/ack so the server marks those decisions delivered
+ *     and never re-serves them (at-least-once + in-process dedup).
  *   - afk/grant are mirrored from the local state files (set by the CLI and by
  *     this server when it learns of a remote change) and heartbeated up.
  *
@@ -269,7 +271,24 @@ async function drainOutbox(): Promise<void> {
 // --- decision long-poll: pull verdicts/answers/grants from the control plane -
 // Applying a Decision (the fail-CLOSED approval path lives here on the relay
 // side: we only ever SEND a verdict we explicitly received; absence = no send).
+
+// Idempotency for decisions (mirrors appliedSteers): an attention resolves to
+// exactly ONE decision, so its attentionId is a stable key. A reconnect/restart
+// (or a lost ACK) can make the server re-serve a still-undelivered decision; we
+// inject it at most once per process — without this, the agent re-ran the same
+// answer every reconnect (the duplicate-reply loop). The server-side delivered_at
+// (set on ACK) is the durable guard; this is the in-process belt-and-suspenders.
+const appliedDecisions = new Set<string>();
+const APPLIED_DECISIONS_CAP = 500;
+
 async function applyDecision(d: Decision, requestIdByAttention: Map<string, string>): Promise<void> {
+  if (appliedDecisions.has(d.attentionId)) {
+    // Already applied in this process; the re-send means a prior ACK didn't
+    // stick. Skip re-injection — the caller still re-ACKs so the server marks it
+    // delivered and stops re-serving it.
+    log('decision_dup_skipped', { attentionId: d.attentionId });
+    return;
+  }
   // Grant escalation (e.g. plan approved as "edits"/"full" from the phone) is
   // written locally so the PreToolUse hook honors it on the next tool call.
   if (d.grant && isGrantLevel(d.grant) && d.grant !== readGrant()) {
@@ -309,6 +328,38 @@ async function applyDecision(d: Decision, requestIdByAttention: Map<string, stri
     log('answer_pushed', { attentionId: d.attentionId, len: d.answerText.length });
     pendingCount = Math.max(0, pendingCount - 1);
     writePending(pendingCount);
+  }
+
+  appliedDecisions.add(d.attentionId);
+  if (appliedDecisions.size > APPLIED_DECISIONS_CAP) {
+    const oldest = appliedDecisions.values().next().value; // Set keeps insertion order
+    if (oldest !== undefined) appliedDecisions.delete(oldest);
+  }
+}
+
+/**
+ * ACK delivered decisions back to the control plane (by attentionId) so it marks
+ * them delivered and stops re-serving them on the next flush. Best-effort: the
+ * in-process dedup already prevents re-injection, so a failed ack only means a
+ * harmless re-send later. Never throws.
+ */
+async function ackDecisions(attentionIds: string[]): Promise<void> {
+  if (attentionIds.length === 0) return;
+  const token = loadToken();
+  if (!token) return;
+  try {
+    const resp = await postJson(
+      deviceApiUrl(DeviceApiRoute.ACK),
+      JSON.stringify({ sessionId: SESSION_ID, attentionIds }),
+      { bearer: token },
+    );
+    if (resp.classification === Classification.SUCCESS) {
+      log('decisions_acked', { count: attentionIds.length });
+    } else {
+      log('ack_failed', { status: resp.status });
+    }
+  } catch (err) {
+    log('ack_error', { error: err instanceof Error ? err.message : String(err) });
   }
 }
 
@@ -405,8 +456,13 @@ async function subscribeEvents(): Promise<void> {
             if (event === SseEvent.DECISIONS) {
               const body = JSON.parse(data) as DecisionsResponse;
               const requestIds = new Map<string, string>(Object.entries(body.requestIds ?? {}));
-              for (const d of body.decisions ?? []) await applyDecision(d, requestIds);
+              const decisions = body.decisions ?? [];
+              for (const d of decisions) await applyDecision(d, requestIds);
               if (body.since) since = body.since;
+              // ACK every decision in the frame (applied or dup-skipped) so the
+              // server marks them delivered and stops re-serving. Fire-and-forget
+              // so the read loop isn't held on the round-trip.
+              if (decisions.length > 0) void ackDecisions(decisions.map((d) => d.attentionId));
             } else if (event === SseEvent.SESSION_MESSAGES) {
               const body = JSON.parse(data) as { messages?: Array<{ id: string; body: string }> };
               for (const m of body.messages ?? []) await applySteer(m);

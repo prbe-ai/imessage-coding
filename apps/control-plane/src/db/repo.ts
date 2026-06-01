@@ -94,6 +94,7 @@ interface DecisionRow {
   grant: string | null;
   source: string;
   resolved_at: string;
+  delivered_at: string | null;
 }
 
 interface MessageLogRow {
@@ -789,6 +790,7 @@ export async function listDecisionsForSession(args: {
       WHERE ae.session_id = $1
         AND s.device_id   = $2
         AND s.account_id  = $3
+        AND d.delivered_at IS NULL
         AND ($4::timestamptz IS NULL OR d.resolved_at > $4::timestamptz)
       ORDER BY d.resolved_at ASC`,
     [args.sessionId, args.deviceId, args.accountId, args.since ?? null],
@@ -803,6 +805,38 @@ export async function listDecisionsForSession(args: {
     if (since === undefined || iso > since) since = iso;
   }
   return { decisions, requestIds, since };
+}
+
+/**
+ * Mark decisions delivered once the device confirms it injected them (by
+ * attentionId, via POST /api/device/ack). Decisions are 1:1 with their
+ * attention, so attentionId is a stable ack key. Scoped to the device's own
+ * session so an ack can never mark another tenant's decision. Idempotent
+ * (already-delivered rows are skipped). Returns the attentionIds actually
+ * flipped, for logging.
+ */
+export async function markDecisionsDelivered(args: {
+  sessionId: string;
+  deviceId: string;
+  accountId: string;
+  attentionIds: string[];
+}): Promise<string[]> {
+  if (args.attentionIds.length === 0) return [];
+  const rows = await query<{ attention_id: string }>(
+    `UPDATE decisions d
+        SET delivered_at = now()
+       FROM attention_events ae
+       JOIN sessions s ON s.id = ae.session_id
+      WHERE d.attention_id   = ae.id
+        AND ae.session_id    = $1
+        AND s.device_id      = $2
+        AND s.account_id     = $3
+        AND d.attention_id   = ANY($4::uuid[])
+        AND d.delivered_at IS NULL
+    RETURNING d.attention_id`,
+    [args.sessionId, args.deviceId, args.accountId, args.attentionIds],
+  );
+  return rows.map((r) => r.attention_id);
 }
 
 // --- message log --------------------------------------------------------------

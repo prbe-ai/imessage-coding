@@ -15,6 +15,20 @@
           { "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/intercept.ts" }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/session-start.ts" }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/session-end.ts" }
+        ]
+      }
     ]
   }
 }

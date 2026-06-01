@@ -344,3 +344,41 @@ CREATE TRIGGER trg_session_state_update
     OR OLD.state   IS DISTINCT FROM NEW.state
   )
   EXECUTE FUNCTION notify_session_state();
+
+-- -----------------------------------------------------------------------------
+-- session_activity — the AFK transcript tap. A lightweight, per-block stream of
+-- what a Claude Code session is DOING (user messages, assistant replies, tool
+-- call markers, failed tool results) so the orchestrator can answer "what's my
+-- session up to?". The device ships these ONLY while AFK; tool inputs are reduced
+-- to a one-line `summary`, tool results carry NO content (only is_error), and
+-- thinking blocks are dropped — never the full transcript data.
+--
+-- kind ∈ user_message|assistant_text|tool_use|tool_result.
+-- (line_no, block_idx) is the transcript position (line_no is a monotonic
+-- per-session event index, block_idx the block within that line): UNIQUE per
+-- session so a device re-read after a crash (before its byte cursor committed)
+-- de-dupes via ON CONFLICT DO NOTHING rather than double-inserting. Also the
+-- canonical ORDER for the orchestrator's trail (insert time can reorder on
+-- retry). No NOTIFY trigger — pull-only context read at turn time.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS session_activity (
+  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id  UUID        NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  account_id  UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  device_id   UUID        NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  line_no     INTEGER     NOT NULL,
+  block_idx   INTEGER     NOT NULL,
+  kind        TEXT        NOT NULL
+                CHECK (kind IN ('user_message', 'assistant_text', 'tool_use', 'tool_result')),
+  tool_name   TEXT,
+  summary     TEXT,
+  body        TEXT,                                 -- message text (NULL for tool markers)
+  is_error    BOOLEAN     NOT NULL DEFAULT false,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (session_id, line_no, block_idx)
+);
+-- "recent N for this session" (orchestrator turn context), ordered by transcript
+-- position (line_no, block_idx) — matches recentSessionActivity's ORDER BY.
+CREATE INDEX IF NOT EXISTS idx_session_activity_recent
+  ON session_activity(session_id, line_no DESC, block_idx DESC);
+CREATE INDEX IF NOT EXISTS idx_session_activity_account ON session_activity(account_id);

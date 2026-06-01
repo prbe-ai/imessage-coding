@@ -36,12 +36,18 @@ import {
   listPendingAttentionForAccount,
   logMessage,
   recentMessages,
+  recentSessionActivity,
   resolveAttention,
   setAttentionNotifyMessageId,
 } from '../db/repo.ts';
 import { hashToken } from '../auth/device.ts';
 import { runAssistantTurn, type ToolExecutor } from './llm.ts';
-import { assistantTools, buildTurnMessages, type TurnMode } from './prompt.ts';
+import {
+  assistantTools,
+  buildTurnMessages,
+  type SessionActivityMap,
+  type TurnMode,
+} from './prompt.ts';
 import {
   checkDestructiveAllow,
   deterministicTarget,
@@ -50,6 +56,28 @@ import {
 } from './safety.ts';
 
 const HISTORY_LIMIT = 20;
+
+/** Per-session activity surfaced into the turn snapshot (bounded to keep the
+ *  prompt small): the N most-recent live sessions, last M events each. */
+const ACTIVITY_PER_SESSION = 8;
+const MAX_ACTIVITY_SESSIONS = 5;
+
+/** Recent AFK-tap activity for the most-recent live sessions, keyed by id. */
+async function loadSessionActivity(
+  accountId: string,
+  sessions: ReadonlyArray<{ id: string }>,
+): Promise<SessionActivityMap> {
+  const top = sessions.slice(0, MAX_ACTIVITY_SESSIONS);
+  const entries = await Promise.all(
+    top.map(
+      async (s) =>
+        [s.id, await recentSessionActivity({ sessionId: s.id, accountId, limit: ACTIVITY_PER_SESSION })] as const,
+    ),
+  );
+  const map: SessionActivityMap = {};
+  for (const [id, acts] of entries) if (acts.length > 0) map[id] = acts;
+  return map;
+}
 
 /** Outcome of one turn (for logging/tests). */
 export interface TurnResult {
@@ -127,11 +155,13 @@ async function runUserTurn(
     actions,
     sent,
   };
+  const activity = await loadSessionActivity(accountId, sessions);
   const messages = buildTurnMessages({
     trigger: { kind: 'user_message', inbound },
     pending,
     sessions,
     history,
+    activity,
   });
 
   try {
@@ -210,11 +240,13 @@ async function runAgentEventTurnLocked(
       actions,
       sent,
     };
+    const activity = await loadSessionActivity(accountId, sessions);
     const messages = buildTurnMessages({
       trigger: { kind: 'agent_event', attention },
       pending,
       sessions,
       history,
+      activity,
     });
     const outcome = await runAssistantTurn({
       messages,

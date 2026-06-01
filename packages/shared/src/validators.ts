@@ -5,6 +5,7 @@
  * boundaries (webhook parse, device API request bodies) to narrow `unknown`.
  */
 import {
+  ActivityKind,
   AfkState,
   AgentKind,
   AttentionKind,
@@ -15,6 +16,8 @@ import {
   SessionState,
 } from './enums.ts';
 import type {
+  ActivityBatchBody,
+  ActivityEvent,
   AttentionEvent,
   Decision,
   InboundMessage,
@@ -56,6 +59,8 @@ export const isGrantLevel = (v: unknown): v is GrantLevel =>
   isEnumValue(GrantLevel, v);
 export const isAttentionKind = (v: unknown): v is AttentionKind =>
   isEnumValue(AttentionKind, v);
+export const isActivityKind = (v: unknown): v is ActivityKind =>
+  isEnumValue(ActivityKind, v);
 export const isDecisionBehavior = (v: unknown): v is DecisionBehavior =>
   isEnumValue(DecisionBehavior, v);
 export const isDecisionSource = (v: unknown): v is DecisionSource =>
@@ -84,6 +89,32 @@ export function isAttentionEvent(v: unknown): v is AttentionEvent {
     isOptString(v['notifyMessageId']) &&
     isString(v['createdAt'])
   );
+}
+
+function isNonNegInt(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0;
+}
+
+export function isActivityEvent(v: unknown): v is ActivityEvent {
+  if (!isRecord(v)) return false;
+  return (
+    isNonNegInt(v['lineNo']) &&
+    isNonNegInt(v['blockIdx']) &&
+    isActivityKind(v['kind']) &&
+    isOptString(v['toolName']) &&
+    isOptString(v['text']) &&
+    isOptString(v['summary']) &&
+    (v['isError'] === undefined || typeof v['isError'] === 'boolean') &&
+    isString(v['at'])
+  );
+}
+
+export function isActivityBatchBody(v: unknown): v is ActivityBatchBody {
+  if (!isRecord(v)) return false;
+  if (!isString(v['sessionId'])) return false;
+  if (!isOptString(v['cwd'])) return false;
+  const events = v['events'];
+  return Array.isArray(events) && events.every(isActivityEvent);
 }
 
 export function isDecision(v: unknown): v is Decision {

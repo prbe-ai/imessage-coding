@@ -84,6 +84,35 @@ export function disabledFile(): string {
   return join(deviceDir(), '.disabled');
 }
 
+// --- per-session tap daemon state (one set per Claude Code session) -----------
+// All keyed by CC's real session id, shared between the SessionStart/SessionEnd
+// hooks (which spawn/stop the daemon) and the daemon itself.
+
+/** Directory holding the per-session tap state files. */
+export function sessionsDir(): string {
+  return join(deviceDir(), 'sessions');
+}
+
+/** Persisted tail cursor (byte offset + last line number) for a session. */
+export function sessionCursorFile(sessionId: string): string {
+  return join(sessionsDir(), `${sessionId}.cursor.json`);
+}
+
+/** Durable per-session activity outbox (JSONL of un-shipped batches). */
+export function sessionOutboxFile(sessionId: string): string {
+  return join(sessionsDir(), `${sessionId}.activity.jsonl`);
+}
+
+/** Shutdown sentinel: presence tells the daemon to exit (set by SessionEnd). */
+export function sessionShutdownFile(sessionId: string): string {
+  return join(sessionsDir(), `${sessionId}.shutdown`);
+}
+
+/** PID of the spawned daemon (written by SessionStart, read by SessionEnd). */
+export function sessionPidFile(sessionId: string): string {
+  return join(sessionsDir(), `${sessionId}.pid`);
+}
+
 /**
  * Build-baked config, written into the plugin ROOT (next to package.json) at
  * build time by apps/dashboard/scripts/copy-install-script.mjs. This is how the

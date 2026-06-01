@@ -12,6 +12,8 @@ import {
   AgentKind,
   GrantLevel,
   SessionState,
+  type ActivityEvent,
+  type ActivityKind,
   type AttentionEvent,
   type AttentionKind,
   type Decision,
@@ -488,6 +490,118 @@ export async function listLiveSessionsForAccount(
     [accountId, SessionState.ENDED],
   );
   return rows.map(toSessionInfo);
+}
+
+// --- session activity (the AFK transcript tap) --------------------------------
+
+interface SessionActivityRow {
+  line_no: number;
+  block_idx: number;
+  kind: string;
+  tool_name: string | null;
+  summary: string | null;
+  body: string | null;
+  is_error: boolean;
+  created_at: string;
+}
+
+/** A surfaced unit of session activity for orchestrator context (most-recent-first). */
+export interface SessionActivity {
+  kind: ActivityKind;
+  toolName?: string;
+  summary?: string;
+  body?: string;
+  isError: boolean;
+  createdAt: string;
+}
+
+function toSessionActivity(r: SessionActivityRow): SessionActivity {
+  const a: SessionActivity = {
+    kind: r.kind as ActivityKind,
+    isError: r.is_error,
+    createdAt: new Date(r.created_at).toISOString(),
+  };
+  if (r.tool_name !== null) a.toolName = r.tool_name;
+  if (r.summary !== null) a.summary = r.summary;
+  if (r.body !== null) a.body = r.body;
+  return a;
+}
+
+/**
+ * Bulk-insert a batch of session-activity events (the AFK tap). Tenant-scoped:
+ * rows are inserted ONLY if the session belongs to this device + account (the
+ * WHERE EXISTS guard, like insertAttentionEvent), so a device can never write
+ * activity into another tenant's session. Idempotent via ON CONFLICT on the
+ * transcript position (session_id, line_no, block_idx) — a device re-read after a
+ * crash (before its byte cursor committed) is de-duped, not double-inserted.
+ * Returns the number of rows actually inserted.
+ */
+export async function insertSessionActivity(args: {
+  deviceId: string;
+  accountId: string;
+  sessionId: string;
+  events: ReadonlyArray<ActivityEvent>;
+}): Promise<number> {
+  if (args.events.length === 0) return 0;
+  // Server-side length clamp: the device sanitizer caps these, but a forged/buggy
+  // device must not be able to bloat the table. Defense-in-depth, not the primary guard.
+  const BODY_CAP = 4_000;
+  const NAME_CAP = 200;
+  const clamp = (s: string | undefined, n: number): string | null =>
+    s === undefined ? null : s.length > n ? s.slice(0, n) : s;
+  const lineNos = args.events.map((e) => e.lineNo);
+  const blockIdxs = args.events.map((e) => e.blockIdx);
+  const kinds = args.events.map((e) => e.kind);
+  const toolNames = args.events.map((e) => clamp(e.toolName, NAME_CAP));
+  const summaries = args.events.map((e) => clamp(e.summary, BODY_CAP));
+  const bodies = args.events.map((e) => clamp(e.text, BODY_CAP));
+  const isErrors = args.events.map((e) => e.isError ?? false);
+
+  const rows = await query<{ id: string }>(
+    `INSERT INTO session_activity
+       (session_id, account_id, device_id, line_no, block_idx, kind, tool_name, summary, body, is_error)
+     SELECT $1, $2, $3, t.line_no, t.block_idx, t.kind, t.tool_name, t.summary, t.body, t.is_error
+       FROM unnest($4::int[], $5::int[], $6::text[], $7::text[], $8::text[], $9::text[], $10::bool[])
+         AS t(line_no, block_idx, kind, tool_name, summary, body, is_error)
+      WHERE EXISTS (
+        SELECT 1 FROM sessions s
+         WHERE s.id = $1 AND s.device_id = $3 AND s.account_id = $2
+      )
+     ON CONFLICT (session_id, line_no, block_idx) DO NOTHING
+     RETURNING id`,
+    [
+      args.sessionId,
+      args.accountId,
+      args.deviceId,
+      lineNos,
+      blockIdxs,
+      kinds,
+      toolNames,
+      summaries,
+      bodies,
+      isErrors,
+    ],
+  );
+  return rows.length;
+}
+
+/** Recent activity for a session (most-recent-first), capped — orchestrator context. */
+export async function recentSessionActivity(args: {
+  sessionId: string;
+  accountId: string;
+  limit: number;
+}): Promise<SessionActivity[]> {
+  // Order by transcript position (line_no, block_idx), NOT insert time: a retried
+  // outbox batch can land out of order, so created_at would misrepresent the trail.
+  const rows = await query<SessionActivityRow>(
+    `SELECT line_no, block_idx, kind, tool_name, summary, body, is_error, created_at
+       FROM session_activity
+      WHERE session_id = $1 AND account_id = $2
+      ORDER BY line_no DESC, block_idx DESC
+      LIMIT $3`,
+    [args.sessionId, args.accountId, args.limit],
+  );
+  return rows.map(toSessionActivity);
 }
 
 // --- attention events ---------------------------------------------------------

@@ -54,6 +54,7 @@ import {
   logDir,
 } from './config.ts';
 import { loadToken } from './creds.ts';
+import { readHandshakeForProject } from './handshake.ts';
 import { Classification, postJson } from './httpclient.ts';
 import { HaltError, drain, enqueue } from './outbox.ts';
 import { egressEnabled } from './killswitch.ts';
@@ -73,10 +74,56 @@ function log(event: string, data: unknown): void {
   process.stderr.write(`[imsg-device] ${line}\n`);
 }
 
-// Each channel server instance owns one CC session. The session id is supplied
-// by the SessionStart-provided env when available, else minted per process.
-const SESSION_ID = process.env.IMSG_SESSION_ID ?? randomUUID();
+// Each channel server instance owns one CC session, but Claude Code does NOT
+// hand the session id to a plugin MCP server (its env/`initialize`/Channels
+// params are all silent — only CLAUDE_PROJECT_DIR / CLAUDE_PLUGIN_ROOT are set).
+// So we learn the REAL session id from the SessionStart hook's handshake, keyed
+// by the project dir (CLAUDE_PROJECT_DIR, which we DO get). Resolved async at
+// boot; the background loops + emitAttention await `sessionReady` before using
+// it. This fixes the long-standing random-UUID bug so the MCP server's `sessions`
+// row, SSE subscription, steering, and the tap daemon's activity rows all key off
+// ONE real id. Fallbacks (env override, then a random id) keep an un-paired /
+// pre-handshake session working, just not joined to the activity tap.
+const PROJECT_CWD = process.env.CLAUDE_PROJECT_DIR?.trim() || process.cwd();
+let SESSION_ID = process.env.IMSG_SESSION_ID ?? '';
 const DEVICE_ID = readDeviceId();
+
+/** Bounded wait for the SessionStart handshake (MCP server may boot first).
+ *  Generous so a slow SessionStart doesn't fall back to a random id (which would
+ *  fork this session from the tap daemon's real-id rows). */
+const HANDSHAKE_WAIT_MS = 15_000;
+const HANDSHAKE_POLL_MS = 250;
+
+const sessionReady: Promise<void> = resolveSessionId().then((id) => {
+  SESSION_ID = id;
+});
+
+/**
+ * Resolve the real CC session id from the SessionStart handshake, polling
+ * briefly in case the MCP server booted before the hook wrote it. SessionEnd
+ * deletes the handshake when a session ends, so a handshake present here belongs
+ * to the live session in this project dir — and an MCP-only restart mid-session
+ * (no fresh SessionStart) still finds it, so it never forks the session id. Falls
+ * back to an env override, then a random id (degrades to the old behavior — the
+ * session just won't correlate with the tap).
+ *
+ * Same-dir concurrent sessions can't be told apart (last writer wins) — a known,
+ * documented limitation; the supported workflow is one session per worktree.
+ */
+async function resolveSessionId(): Promise<string> {
+  const override = process.env.IMSG_SESSION_ID;
+  if (override && override.trim()) return override.trim();
+  const deadline = Date.now() + HANDSHAKE_WAIT_MS;
+  for (;;) {
+    const h = readHandshakeForProject(PROJECT_CWD);
+    if (h?.sessionId) return h.sessionId;
+    if (Date.now() >= deadline) {
+      log('session_id_fallback', { reason: 'no_handshake', project: PROJECT_CWD });
+      return randomUUID();
+    }
+    await sleep(HANDSHAKE_POLL_MS);
+  }
+}
 
 function readDeviceId(): string {
   try {
@@ -178,6 +225,7 @@ async function emitAttention(
   partial: Pick<AttentionEvent, 'kind'> &
     Partial<Pick<AttentionEvent, 'toolName' | 'description' | 'inputPreview' | 'requestId' | 'qid'>>,
 ): Promise<void> {
+  await sessionReady; // ensure the real session id is resolved before tagging
   const evt: AttentionEvent = {
     id: randomUUID(),
     deviceId: DEVICE_ID,
@@ -314,6 +362,7 @@ function parseSSEFrame(frame: string): { event: string; data: string } {
  * cursor so nothing is missed across drops; the server's 'ping' keeps it warm.
  */
 async function subscribeEvents(): Promise<void> {
+  await sessionReady; // subscribe under the REAL session id (so steers reach us)
   let since = new Date(0).toISOString();
   for (;;) {
     const token = loadToken();
@@ -405,6 +454,7 @@ async function subscribeEvents(): Promise<void> {
 // ignores any afk/grant in the body anyway. Sending them would falsely imply an
 // up-sync and risk clobbering the authoritative value.
 async function heartbeatLoop(): Promise<void> {
+  await sessionReady; // beat under the REAL session id (so the row matches the tap)
   for (;;) {
     const token = loadToken();
     const enabled = token ? await egressEnabled(token).catch(() => true) : false;
@@ -414,7 +464,9 @@ async function heartbeatLoop(): Promise<void> {
         deviceId: DEVICE_ID,
         agent: AgentKind.CLAUDE_CODE,
         hostname: hostname(),
-        cwd: process.cwd(),
+        // CLAUDE_PROJECT_DIR (the real project dir), NOT process.cwd() — the MCP
+        // server's cwd is forced to CLAUDE_PLUGIN_ROOT by .mcp.json's --cwd.
+        cwd: PROJECT_CWD,
         at: new Date().toISOString(),
       });
       const resp = await postJson(deviceApiUrl(DeviceApiRoute.HEARTBEAT), body, { bearer: token });
@@ -431,9 +483,12 @@ function sleep(ms: number): Promise<void> {
 
 // --- boot --------------------------------------------------------------------
 await mcp.connect(new StdioServerTransport());
-log('connected', { session: SESSION_ID, device: DEVICE_ID, control: deviceApiUrl(DeviceApiRoute.ATTENTION) });
+log('connected', { device: DEVICE_ID, project: PROJECT_CWD, control: deviceApiUrl(DeviceApiRoute.ATTENTION) });
+// Session id resolves async from the handshake; record it once known.
+void sessionReady.then(() => log('session_resolved', { session: SESSION_ID }));
 
 // Fire the background loops; they own their own retry/backoff and never throw
-// out (errors are logged + retried) so the MCP stdio loop stays alive.
+// out (errors are logged + retried) so the MCP stdio loop stays alive. Each
+// awaits `sessionReady` so it operates under the real session id.
 void subscribeEvents();
 void heartbeatLoop();

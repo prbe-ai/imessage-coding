@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Productized Claude Code channel plugin: AFK-aware permission relay + chat bridge to the imessage-coding cloud control plane.",
   "bin": {
-    "imsg": "./bin/imsg.ts"
+    "imsg": "./bin/imsg.ts",
+    "imsg-tap": "./bin/tap.ts"
   },
   "scripts": {
     "start": "bun run ./src/channel.ts",

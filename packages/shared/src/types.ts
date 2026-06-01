@@ -6,6 +6,7 @@
  * and from these exact keys.
  */
 import type {
+  ActivityKind,
   AfkState,
   AgentKind,
   AttentionKind,
@@ -76,6 +77,45 @@ export interface SessionInfo {
   state: SessionState;
   afk: AfkState;
   grant: GrantLevel;
+}
+
+/**
+ * One surfaced unit of session activity (the AFK transcript tap). The device
+ * derives these from the Claude Code transcript and ships them ONLY while AFK.
+ * `lineNo`+`blockIdx` is the transcript position — a stable idempotency key so a
+ * re-read (crash before cursor commit) never double-inserts server-side.
+ *
+ * Deliberately lightweight: it carries WHAT the session is doing, never the full
+ * data. Tool inputs become a one-line `summary`; tool RESULTS carry no content
+ * (only `isError` when a step failed); thinking blocks are dropped entirely.
+ */
+export interface ActivityEvent {
+  /** Transcript line index (0-based within the session). */
+  lineNo: number;
+  /** Block index within that line's message content (one line → many blocks). */
+  blockIdx: number;
+  kind: ActivityKind;
+  /** Tool name for a TOOL_USE marker (e.g. "Bash", "Edit"). */
+  toolName?: string;
+  /** Message text for USER_MESSAGE / ASSISTANT_TEXT (sanitized, capped). */
+  text?: string;
+  /** One-line summary of a TOOL_USE input (command/path/pattern/…, capped). */
+  summary?: string;
+  /** True for a failed TOOL_RESULT (the only tool-result we surface). */
+  isError?: boolean;
+  /** ISO-8601 timestamp the device observed the block. */
+  at: string;
+}
+
+/**
+ * A batch of ActivityEvents for one session, POSTed to /api/device/activity.
+ * `sessionId` is CC's real transcript session id; `cwd` lets the route register
+ * the session (project dir) if the heartbeat hasn't yet.
+ */
+export interface ActivityBatchBody {
+  sessionId: string;
+  cwd?: string;
+  events: ActivityEvent[];
 }
 
 /** One prior message AgentPhone includes for conversational context. */

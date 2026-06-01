@@ -76,6 +76,19 @@ export const AttentionKind = {
 export type AttentionKind = (typeof AttentionKind)[keyof typeof AttentionKind];
 
 // -----------------------------------------------------------------------------
+// Session activity (the AFK transcript tap). One per surfaced transcript block:
+// a user message, an assistant reply, a tool call marker, or a failed tool call.
+// Deliberately coarse — it captures WHAT a session is doing, not the full data.
+// -----------------------------------------------------------------------------
+export const ActivityKind = {
+  USER_MESSAGE: 'user_message',
+  ASSISTANT_TEXT: 'assistant_text',
+  TOOL_USE: 'tool_use',
+  TOOL_RESULT: 'tool_result',
+} as const;
+export type ActivityKind = (typeof ActivityKind)[keyof typeof ActivityKind];
+
+// -----------------------------------------------------------------------------
 // Device API routes (control plane).
 // -----------------------------------------------------------------------------
 export const DeviceApiRoute = {
@@ -86,6 +99,8 @@ export const DeviceApiRoute = {
   EVENTS: '/api/device/events',
   HEARTBEAT: '/api/device/heartbeat',
   STATE: '/api/device/state',
+  /** Lightweight, AFK-gated session-transcript activity batches (the tap). */
+  ACTIVITY: '/api/device/activity',
 } as const;
 export type DeviceApiRoute = (typeof DeviceApiRoute)[keyof typeof DeviceApiRoute];
 

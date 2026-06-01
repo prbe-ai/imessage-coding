@@ -28,6 +28,7 @@ import {
   DeviceApiRoute,
   SessionState,
   SseEvent,
+  isActivityBatchBody,
   isAfkState,
   isAttentionEvent,
   isGrantLevel,
@@ -46,6 +47,7 @@ import {
   getDeviceState,
   getSessionForDevice,
   insertAttentionEvent,
+  insertSessionActivity,
   listDecisionsForSession,
   listUndeliveredSessionMessages,
   markSessionMessagesDelivered,
@@ -64,6 +66,9 @@ const LONG_POLL_MS = 25_000;
 
 /** SSE keepalive cadence (ms) — ping under proxy idle timeouts. */
 const SSE_HEARTBEAT_MS = 25_000;
+
+/** Max activity events accepted in one POST /api/device/activity (device chunks at 500). */
+const MAX_ACTIVITY_BATCH = 2_000;
 
 /** Attention kinds that, when AFK, get routed to the phone via the orchestrator. */
 const PHONE_ROUTED_KINDS: ReadonlySet<AttentionKind> = new Set([
@@ -117,6 +122,7 @@ deviceRoutes.post(DeviceApiRoute.PAIR, async (c) => {
 
 // --- everything below requires a device_token --------------------------------
 deviceRoutes.use(`${DeviceApiRoute.ATTENTION}`, requireDevice);
+deviceRoutes.use(`${DeviceApiRoute.ACTIVITY}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.DECISIONS}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.EVENTS}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.HEARTBEAT}`, requireDevice);
@@ -202,6 +208,48 @@ async function maybeRouteToPhone(
     console.error('[device/attention] agent-event turn failed', err);
   });
 }
+
+// --- ACTIVITY (the AFK transcript tap) ----------------------------------------
+// A lightweight, per-block stream of what a session is DOING — shipped by the
+// device's tap daemon ONLY while AFK. We register/refresh the session (the tap
+// may report a brand-new one before the heartbeat) and bulk-insert the events
+// (idempotent on transcript position). No phone routing: this is pull-only
+// context the orchestrator reads at turn time, not an attention to surface.
+deviceRoutes.post(DeviceApiRoute.ACTIVITY, async (c) => {
+  const auth = device(c);
+  const body = await c.req.json().catch(() => null);
+  if (!isActivityBatchBody(body)) {
+    return c.json({ error: 'invalid_activity_batch' }, 400);
+  }
+  if (body.events.length === 0) {
+    return c.json({ accepted: 0 });
+  }
+  // Hard bound: the device chunks at 500/batch; reject anything wildly larger so a
+  // forged/buggy device can't push an unbounded batch into one query.
+  if (body.events.length > MAX_ACTIVITY_BATCH) {
+    return c.json({ error: 'batch_too_large' }, 400);
+  }
+  try {
+    // Ensure the session exists (cwd = the project dir). No state override — keep
+    // a WAITING/IDLE state set by an attention event; only revive if reaped.
+    await upsertSession({
+      sessionId: body.sessionId,
+      deviceId: auth.deviceId,
+      accountId: auth.accountId,
+      cwd: body.cwd,
+    });
+    const accepted = await insertSessionActivity({
+      deviceId: auth.deviceId,
+      accountId: auth.accountId,
+      sessionId: body.sessionId,
+      events: body.events,
+    });
+    return c.json({ accepted });
+  } catch (err) {
+    console.error('[device/activity] store failed', err);
+    return c.json({ error: 'store_failed' }, 500);
+  }
+});
 
 // --- DECISIONS (LONG-POLL) ----------------------------------------------------
 deviceRoutes.get(DeviceApiRoute.DECISIONS, async (c) => {

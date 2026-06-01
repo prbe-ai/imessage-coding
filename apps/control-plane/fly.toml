@@ -20,14 +20,15 @@ primary_region = "sjc"
   PORT = "8080"
   AGENTPHONE_API_BASE = "https://api.agentphone.ai"
   # Private LiteLLM proxy reached over Fly flycast (same org, no public IP).
-  # LLM_API_KEY (a LiteLLM virtual key) is set via `fly secrets set`.
+  # LLM_API_KEY (a LiteLLM virtual key) is synced from .env.control via
+  # apps/control-plane/scripts/sync-fly-secrets.sh.
   LLM_API_BASE = "http://imsg-litellm.flycast/v1"
   LLM_MODEL = "gemini-3.5-flash"
   # PUBLIC origin of THIS control plane (the device + install.sh point at it).
   # Intentionally NOT set here: a hardcoded host would re-brand this OSS repo.
-  # Each deployment supplies its own via `fly secrets set WEBHOOK_BASE_URL=...`
-  # (e.g. https://api.messaging.prbe.ai). Unset => env.ts falls back to
-  # http://localhost:8080 for local dev (DEFAULT_WEBHOOK_BASE_URL).
+  # Each deployment supplies its own from .env.control via the sync script
+  # (apps/control-plane/scripts/sync-fly-secrets.sh) — never `fly secrets set`
+  # by hand. Unset => env.ts falls back to http://localhost:8080 (local dev).
 
 [http_service]
   internal_port = 8080

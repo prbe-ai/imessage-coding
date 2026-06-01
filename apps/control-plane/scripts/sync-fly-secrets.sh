@@ -7,9 +7,8 @@
 # control-plane reads into `fly secrets` for app `imsg-control-plane`.
 #
 # Deliberately NOT synced:
-#   * Non-secret config (PORT, AGENTPHONE_API_BASE, LLM_MODEL, WEBHOOK_BASE_URL)
-#     — those live in fly.toml's [env] block; duplicating them as secrets only
-#     creates drift.
+#   * Non-secret config (PORT, AGENTPHONE_API_BASE, LLM_MODEL) — those live in
+#     fly.toml's [env] block; duplicating them as secrets only creates drift.
 #   * Dashboard-only secrets (GOOGLE_*, BETTER_AUTH_*, CONTROL_PLANE_URL,
 #     NEXT_PUBLIC_*) — the dashboard runs on Vercel, set them there.
 #   * Device-only vars (TOKEN, IMSG_*) — consumed on the developer's machine.
@@ -36,8 +35,11 @@
 set -euo pipefail
 
 # --- the contract: which .env keys are control-plane secrets -----------------
-# Required: the control-plane fails closed if these are unset, so a sync that
-# left any of them out would be worse than useless. Missing one is a hard error.
+# Required: the control-plane fails closed (or, for WEBHOOK_BASE_URL, silently
+# falls back to localhost:8080) if these are unset, so a sync that left any of
+# them out would be worse than useless. Missing one is a hard error.
+# WEBHOOK_BASE_URL is the public control-plane origin; it was moved out of
+# fly.toml [env] (0008cf7) so each deployment supplies it here via this script.
 REQUIRED_SECRETS=(
   DATABASE_URL
   DEVICE_TOKEN_PEPPER
@@ -45,6 +47,7 @@ REQUIRED_SECRETS=(
   AGENTPHONE_AGENT_ID
   AGENTPHONE_WEBHOOK_SECRET
   LLM_API_KEY
+  WEBHOOK_BASE_URL
 )
 # Optional: an override for a non-secret default that fly.toml says to point at a
 # private LiteLLM proxy. Synced only when present in .env AND different from the

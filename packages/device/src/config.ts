@@ -7,6 +7,7 @@
  * where state lives WITHOUT coordinating. The plugin root (CLAUDE_PLUGIN_ROOT)
  * holds code; the device dir holds mutable state (token, outbox, state files).
  */
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DeviceApiRoute } from '@imsg/shared';
@@ -83,11 +84,54 @@ export function disabledFile(): string {
   return join(deviceDir(), '.disabled');
 }
 
+/**
+ * Build-baked config, written into the plugin ROOT (next to package.json) at
+ * build time by apps/dashboard/scripts/copy-install-script.mjs. This is how the
+ * long-lived MCP server + CLI learn the control-plane URL: Claude Code spawns
+ * them with NO env, so without a baked value `controlPlaneUrl()` would fall back
+ * to localhost. Absent in local-checkout / dev installs (then env or the
+ * localhost default applies).
+ */
+interface BuildConfig {
+  controlPlaneUrl?: string;
+}
+
+let _buildConfig: BuildConfig | null | undefined;
+
+/** Read + memoize `<pluginRoot>/build-config.json`. Located relative to THIS
+ *  file (src/config.ts -> ../build-config.json) so it resolves identically from
+ *  the marketplace dir or Claude Code's plugin cache, regardless of cwd or
+ *  whether CLAUDE_PLUGIN_ROOT is set. NEVER throws: missing or malformed -> null
+ *  (a throw here would crash-loop the MCP server on every start). */
+export function buildConfig(): BuildConfig | null {
+  if (_buildConfig !== undefined) return _buildConfig;
+  try {
+    const path = join(import.meta.dir, '..', 'build-config.json');
+    _buildConfig = JSON.parse(readFileSync(path, 'utf8')) as BuildConfig;
+  } catch {
+    _buildConfig = null;
+  }
+  return _buildConfig;
+}
+
+/**
+ * Pure control-plane URL resolution (no filesystem / process access — unit
+ * tested directly). Precedence: explicit env override > build-baked config >
+ * local-dev default. Empty / whitespace-only values are treated as unset so an
+ * accidental `CONTROL_PLANE_URL=""` at build time can't shadow the default.
+ */
+export function resolveControlPlaneUrl(
+  env: Record<string, string | undefined>,
+  baked: BuildConfig | null,
+): string {
+  const candidates = [env.IMSG_CONTROL_PLANE_URL, env.CONTROL_PLANE_URL, baked?.controlPlaneUrl];
+  const found = candidates.find((v) => typeof v === 'string' && v.trim().length > 0);
+  return (found ?? DEFAULT_CONTROL_PLANE_URL).trim().replace(/\/+$/, '');
+}
+
 /** Resolve the control-plane base URL, trailing slash stripped. */
 export function controlPlaneUrl(): string {
-  const env =
-    process.env.IMSG_CONTROL_PLANE_URL ?? process.env.CONTROL_PLANE_URL ?? DEFAULT_CONTROL_PLANE_URL;
-  return env.replace(/\/+$/, '');
+  return resolveControlPlaneUrl(process.env, buildConfig());
 }
 
 /** Absolute URL for a device API route. */

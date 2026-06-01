@@ -70,6 +70,26 @@ try {
   pkg.dependencies["@imsg/shared"] = "file:./vendor/shared";
   writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
 
+  // Bake the control-plane URL into the plugin. Claude Code spawns the long-lived
+  // MCP server + CLI with NO env, so config.ts can't read CONTROL_PLANE_URL at
+  // runtime — it reads this file (build-config.json at the plugin root) instead.
+  // Only write it when the env is actually set: an ABSENT file means "no override,
+  // use the localhost default", which is the correct behavior for local-dev /
+  // self-host builds that don't have the URL at build time. (See config.ts
+  // buildConfig() + resolveControlPlaneUrl().)
+  const cpUrl = (process.env.CONTROL_PLANE_URL || "").trim();
+  if (cpUrl) {
+    writeFileSync(
+      join(staging, "build-config.json"),
+      JSON.stringify({ controlPlaneUrl: cpUrl }, null, 2) + "\n",
+    );
+    console.log(`[copy-install-script] baked controlPlaneUrl=${cpUrl}`);
+  } else {
+    console.log(
+      "[copy-install-script] CONTROL_PLANE_URL unset — no build-config.json baked (device falls back to localhost)",
+    );
+  }
+
   // `-C staging .` roots the archive at the staging dir, so extracting yields
   // ./.claude-plugin/plugin.json + ./vendor/shared — what install.sh expects.
   execFileSync("tar", ["-czf", tarball, "-C", staging, "."], {

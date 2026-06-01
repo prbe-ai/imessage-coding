@@ -302,13 +302,20 @@ export async function upsertSession(args: {
     `INSERT INTO sessions (id, device_id, account_id, cwd, agent, state, last_event_at)
      VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'active'), now())
      ON CONFLICT (id) DO UPDATE
-        SET cwd           = COALESCE(EXCLUDED.cwd, sessions.cwd),
+        SET -- Reassign to the current device, and scope the claim by ACCOUNT (not
+            -- device). A re-pair on the same machine mints a NEW device_id under
+            -- the same account; a long-running channel keeps its session id across
+            -- that, so without this every heartbeat 500s ("belongs to a different
+            -- device"). The session id is a 128-bit random UUID and the caller is
+            -- an authenticated device of the account, so cross-account stays safe.
+            device_id     = $2,
+            cwd           = COALESCE(EXCLUDED.cwd, sessions.cwd),
             -- A heartbeat revives a session the staleness reaper had ended (e.g.
             -- the device slept past the window, then woke and beat again).
             state         = COALESCE($6, CASE WHEN sessions.state = 'ended'
                                               THEN 'active' ELSE sessions.state END),
             last_event_at = now()
-      WHERE sessions.device_id = $2 AND sessions.account_id = $3
+      WHERE sessions.account_id = $3
      RETURNING *`,
     [
       args.sessionId,
@@ -320,7 +327,7 @@ export async function upsertSession(args: {
     ],
   );
   if (!row) {
-    throw new Error('upsertSession: session id belongs to a different device/account');
+    throw new Error('upsertSession: session id belongs to a different account');
   }
   return toSessionInfo(row);
 }

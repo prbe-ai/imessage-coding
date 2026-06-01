@@ -296,3 +296,51 @@ CREATE TRIGGER trg_session_message
   AFTER INSERT ON session_messages
   FOR EACH ROW
   EXECUTE FUNCTION notify_session_message();
+
+-- =============================================================================
+-- LISTEN/NOTIFY: wake BOTH the device's event stream AND the dashboard's event
+-- stream when a session's afk/grant/state changes — whoever wrote it (the
+-- dashboard's account-scoped UPDATE, the CLI's device-wide UPDATE, or a
+-- lifecycle transition). The control plane is the single source of truth + SSE
+-- hub: on wake the device re-queries its session's {afk,grant} and pushes a
+-- `state` event (so the PreToolUse hook honors a dashboard toggle), and the
+-- dashboard re-queries the account's live sessions and pushes a `sessions` event.
+-- The payload carries session_id (device, session-keyed) AND account_id
+-- (dashboard, account-keyed).
+--
+-- Two triggers, deliberately: the UPDATE trigger's WHEN fires ONLY on a real
+-- afk/grant/state change — NOT on the per-60s touchSession() that only bumps
+-- last_event_at (which would otherwise wake the device every heartbeat). The
+-- INSERT trigger always fires so a newly-started session appears live in the
+-- dashboard. (A single AFTER INSERT OR UPDATE trigger can't be used here: a WHEN
+-- clause may not reference OLD on the INSERT path.)
+-- =============================================================================
+CREATE OR REPLACE FUNCTION notify_session_state() RETURNS trigger AS $$
+BEGIN
+  PERFORM pg_notify(
+    'session_state',
+    json_build_object(
+      'session_id', NEW.id,
+      'account_id', NEW.account_id
+    )::text
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_session_state_insert ON sessions;
+CREATE TRIGGER trg_session_state_insert
+  AFTER INSERT ON sessions
+  FOR EACH ROW
+  EXECUTE FUNCTION notify_session_state();
+
+DROP TRIGGER IF EXISTS trg_session_state_update ON sessions;
+CREATE TRIGGER trg_session_state_update
+  AFTER UPDATE ON sessions
+  FOR EACH ROW
+  WHEN (
+    OLD.afk     IS DISTINCT FROM NEW.afk
+    OR OLD."grant" IS DISTINCT FROM NEW."grant"
+    OR OLD.state   IS DISTINCT FROM NEW.state
+  )
+  EXECUTE FUNCTION notify_session_state();

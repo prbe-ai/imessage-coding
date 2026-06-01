@@ -46,4 +46,10 @@ export const ENV = {
   // mismatch (or a plain, un-peppered hash on either side) silently breaks
   // pairing — the lookup never matches.
   deviceTokenPepper: () => required("DEVICE_TOKEN_PEPPER"),
+
+  // Shared HMAC secret for dashboard SSE tickets — MUST be the SAME value the
+  // control plane reads (its SSE_TICKET_SECRET). The dashboard mints a short-TTL
+  // ticket the browser passes to the control plane's GET /api/dashboard/events;
+  // the control plane re-derives the same HMAC to verify it.
+  sseTicketSecret: () => required("SSE_TICKET_SECRET"),
 };

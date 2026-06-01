@@ -5,13 +5,14 @@
  */
 
 import { apiGet, apiPost } from "@/lib/api/client";
-import type { AfkState, GrantLevel } from "@imsg/shared";
+import { DashboardApiRoute, type AfkState, type GrantLevel } from "@imsg/shared";
 import type {
   AgentNumberResponse,
   LinkedNumberResponse,
   SessionsResponse,
   SetAfkResponse,
   SetGrantResponse,
+  SseTicketResponse,
 } from "@/lib/api/contracts";
 
 export function getLinkedNumber(
@@ -30,6 +31,11 @@ export function getAgentNumber(
 
 export function listSessions(signal?: AbortSignal): Promise<SessionsResponse> {
   return apiGet<SessionsResponse>("/api/home/sessions", signal);
+}
+
+/** Mint a control-plane SSE ticket + the EVENTS url for the live sessions feed. */
+export function getSseTicket(signal?: AbortSignal): Promise<SseTicketResponse> {
+  return apiGet<SseTicketResponse>(DashboardApiRoute.SSE_TICKET, signal);
 }
 
 export function setAfk(

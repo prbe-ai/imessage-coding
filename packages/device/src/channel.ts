@@ -40,8 +40,10 @@ import {
   DecisionBehavior,
   DeviceApiRoute,
   GrantLevel,
+  SseEvent,
   type AttentionEvent,
   type Decision,
+  isAfkState,
   isDecisionBehavior,
   isGrantLevel,
 } from '@imsg/shared';
@@ -56,7 +58,7 @@ import { Classification, postJson } from './httpclient.ts';
 import { HaltError, drain, enqueue } from './outbox.ts';
 import { egressEnabled } from './killswitch.ts';
 import { sanitizeOptional, sanitizeText } from './sanitize.ts';
-import { readAfk, readGrant, writeGrant, writePending } from './state.ts';
+import { readAfk, readGrant, writeAfk, writeGrant, writePending } from './state.ts';
 
 // --- logging (stderr + file; never the token) -------------------------------
 mkdirSync(logDir(), { recursive: true });
@@ -351,16 +353,29 @@ async function subscribeEvents(): Promise<void> {
           const { event, data } = parseSSEFrame(frame);
           if (!data) continue;
           try {
-            if (event === 'decisions') {
+            if (event === SseEvent.DECISIONS) {
               const body = JSON.parse(data) as DecisionsResponse;
               const requestIds = new Map<string, string>(Object.entries(body.requestIds ?? {}));
               for (const d of body.decisions ?? []) await applyDecision(d, requestIds);
               if (body.since) since = body.since;
-            } else if (event === 'session_messages') {
+            } else if (event === SseEvent.SESSION_MESSAGES) {
               const body = JSON.parse(data) as { messages?: Array<{ id: string; body: string }> };
               for (const m of body.messages ?? []) await applySteer(m);
+            } else if (event === SseEvent.STATE) {
+              // Mirror the control plane's authoritative afk/grant into the local
+              // state files the PreToolUse hook reads (guarded: write on change).
+              // This is the dashboard/CLI toggle finally reaching the hook.
+              const body = JSON.parse(data) as { afk?: string; grant?: string };
+              if (isAfkState(body.afk) && body.afk !== readAfk()) {
+                writeAfk(body.afk);
+                log('afk_synced', { afk: body.afk });
+              }
+              if (isGrantLevel(body.grant) && body.grant !== readGrant()) {
+                writeGrant(body.grant);
+                log('grant_synced', { grant: body.grant });
+              }
             }
-            // 'ping' (keepalive) + unknown events: ignore.
+            // SseEvent.PING (keepalive) + unknown events: ignore.
           } catch (err) {
             log('event_apply_error', {
               event,
@@ -371,13 +386,24 @@ async function subscribeEvents(): Promise<void> {
       }
       // Stream ended (server cycle / network) — reconnect promptly with the cursor.
     } catch (err) {
-      log('events_error', { error: err instanceof Error ? err.message : String(err) });
+      // Include the URL we tried: a stale process resolving the localhost
+      // default vs. the baked prod host is the usual cause, and this makes the
+      // mismatch obvious at a glance in channel.log.
+      log('events_error', {
+        url: deviceApiUrl(DeviceApiRoute.EVENTS),
+        error: err instanceof Error ? err.message : String(err),
+      });
       await sleep(5_000);
     }
   }
 }
 
-// --- heartbeat: liveness + afk/grant mirror up to the control plane ----------
+// --- heartbeat: liveness + session touch -------------------------------------
+// NOTE: afk/grant are NOT sent up here. The control plane is the source of
+// truth: afk/grant flow DOWN to the device via the `state` SSE event (set from
+// the dashboard or the CLI's POST /api/device/state), and the heartbeat route
+// ignores any afk/grant in the body anyway. Sending them would falsely imply an
+// up-sync and risk clobbering the authoritative value.
 async function heartbeatLoop(): Promise<void> {
   for (;;) {
     const token = loadToken();
@@ -387,8 +413,6 @@ async function heartbeatLoop(): Promise<void> {
         sessionId: SESSION_ID,
         deviceId: DEVICE_ID,
         agent: AgentKind.CLAUDE_CODE,
-        afk: readAfk(),
-        grant: readGrant(),
         hostname: hostname(),
         cwd: process.cwd(),
         at: new Date().toISOString(),

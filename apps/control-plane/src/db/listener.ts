@@ -1,55 +1,133 @@
 /**
- * LISTEN/NOTIFY bridge for the device EVENT STREAM (SSE) and the legacy
- * decisions long-poll.
+ * LISTEN/NOTIFY bridge for the control plane's SSE streams (device + dashboard)
+ * and the legacy decisions long-poll.
  *
- * The schema fires two notifications, both carrying a `session_id`:
- *   - `decision_ready`  on every decisions INSERT (verdict/answer/grant)
- *   - `session_message` on every session_messages INSERT (free-text steering)
- * We hold ONE dedicated pg client LISTENing on both channels and fan each
- * notification out to in-process waiters subscribed by session id. A waiter is a
- * bare wake signal — the caller re-queries Neon (the source of truth) on wake;
- * a timeout returns without a wake (fail-closed: never a default allow).
+ * The schema fires three notifications:
+ *   - `decision_ready`  on a decisions INSERT (verdict/answer/grant)  [session]
+ *   - `session_message` on a session_messages INSERT (free-text steer) [session]
+ *   - `session_state`   on a sessions afk/grant/state change           [session + account]
+ * We hold ONE dedicated pg client LISTENing on all three channels and fan each
+ * notification out to in-process waiters. Waiters subscribe by KEY — sessionId
+ * (the device's per-session stream) or accountId (the dashboard's account-scoped
+ * stream). A waiter is a bare wake signal; the caller re-queries Neon (the source
+ * of truth) on wake. A timeout returns without a wake (fail-closed: never a
+ * default allow).
+ *
+ * `session_state` wakes BOTH the session waiter (device → push `state`) and the
+ * account waiter (dashboard → push `sessions`); the other two channels wake only
+ * the session waiter.
  *
  * Per-process: with multiple app instances each LISTENs independently, so every
  * instance is woken; the post-wake DB re-query is the real arbiter.
  */
 import { Client } from 'pg';
+import { NotifyChannel } from '@imsg/shared';
 import { loadEnv } from '../env.ts';
 
-const CHANNELS = ['decision_ready', 'session_message'] as const;
+const CHANNELS = [
+  NotifyChannel.DECISION_READY,
+  NotifyChannel.SESSION_MESSAGE,
+  NotifyChannel.SESSION_STATE,
+] as const;
 
-/** A bare wake signal for a parked session waiter. */
+/** A bare wake signal for a parked waiter. */
 type Waiter = () => void;
 
-/** sessionId -> set of waiters parked on that session. */
-const waiters = new Map<string, Set<Waiter>>();
+/**
+ * A registry of waiters keyed by an arbitrary string (sessionId or accountId).
+ * Encapsulates the wake/park/cleanup bookkeeping so the session- and
+ * account-scoped streams share one well-tested implementation.
+ */
+function makeWaiterRegistry() {
+  /** key -> set of waiters parked on that key. */
+  const waiters = new Map<string, Set<Waiter>>();
+
+  function wake(key: string): void {
+    const set = waiters.get(key);
+    if (!set) return;
+    // Copy before iterating: waiters typically unsubscribe on wake.
+    for (const w of [...set]) {
+      try {
+        w();
+      } catch (err) {
+        console.error('[listener] waiter threw', err);
+      }
+    }
+  }
+
+  /**
+   * Wait until a NOTIFY lands for `key`, or until `timeoutMs` elapses. Resolves
+   * true if woken by a NOTIFY, false on timeout/abort. The caller does the DB
+   * re-query (the arbiter of truth).
+   */
+  function waitFor(key: string, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const set = waiters.get(key) ?? new Set<Waiter>();
+      waiters.set(key, set);
+
+      const cleanup = (): void => {
+        set.delete(waiter);
+        if (set.size === 0) waiters.delete(key);
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', onAbort);
+      };
+
+      const waiter: Waiter = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(true);
+      };
+      const onAbort = (): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(false);
+      };
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(false);
+      }, timeoutMs);
+
+      set.add(waiter);
+      if (signal) {
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+  }
+
+  return { wake, waitFor };
+}
+
+const sessionWaiters = makeWaiterRegistry();
+const accountWaiters = makeWaiterRegistry();
 
 let client: Client | undefined;
 let starting: Promise<void> | undefined;
 
-function wake(sessionId: string): void {
-  const set = waiters.get(sessionId);
-  if (!set) return;
-  // Copy before iterating: waiters typically unsubscribe on wake.
-  for (const w of [...set]) {
-    try {
-      w();
-    } catch (err) {
-      console.error('[listener] waiter threw', err);
-    }
-  }
-}
-
 function handleNotification(channel: string, payloadText: string | undefined): void {
   if (!(CHANNELS as readonly string[]).includes(channel) || !payloadText) return;
-  let sessionId: string | undefined;
+  let payload: { session_id?: string; account_id?: string };
   try {
-    sessionId = (JSON.parse(payloadText) as { session_id?: string }).session_id;
+    payload = JSON.parse(payloadText) as { session_id?: string; account_id?: string };
   } catch {
     console.error('[listener] unparseable payload on', channel, payloadText);
     return;
   }
-  if (sessionId) wake(sessionId);
+  // All channels carry a session_id → wake the device's session stream.
+  if (payload.session_id) sessionWaiters.wake(payload.session_id);
+  // Only session_state is account-fanned → wake the dashboard's account stream.
+  if (channel === NotifyChannel.SESSION_STATE && payload.account_id) {
+    accountWaiters.wake(payload.account_id);
+  }
 }
 
 /**
@@ -97,56 +175,27 @@ function scheduleReconnect(): void {
 }
 
 /**
- * Wait until ANY event (decision or session message) lands for `sessionId`, or
- * until `timeoutMs` elapses. Resolves true if woken by a NOTIFY, false on
- * timeout/abort. The caller does the DB re-query (the arbiter of truth).
+ * Wait until ANY event (decision, steer, or state change) lands for `sessionId`,
+ * or until `timeoutMs` elapses (device per-session stream + decisions long-poll).
  */
 export function waitForSessionEvent(
   sessionId: string,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    let settled = false;
-    const set = waiters.get(sessionId) ?? new Set<Waiter>();
-    waiters.set(sessionId, set);
+  return sessionWaiters.waitFor(sessionId, timeoutMs, signal);
+}
 
-    const cleanup = (): void => {
-      set.delete(waiter);
-      if (set.size === 0) waiters.delete(sessionId);
-      clearTimeout(timer);
-      if (signal) signal.removeEventListener('abort', onAbort);
-    };
-
-    const waiter: Waiter = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(true);
-    };
-    const onAbort = (): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(false);
-    };
-
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(false);
-    }, timeoutMs);
-
-    set.add(waiter);
-    if (signal) {
-      if (signal.aborted) {
-        onAbort();
-        return;
-      }
-      signal.addEventListener('abort', onAbort, { once: true });
-    }
-  });
+/**
+ * Wait until a `session_state` change lands for any session on `accountId`, or
+ * until `timeoutMs` elapses (the dashboard's account-scoped SSE stream).
+ */
+export function waitForAccountEvent(
+  accountId: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  return accountWaiters.waitFor(accountId, timeoutMs, signal);
 }
 
 /** @deprecated Alias retained for the legacy decisions long-poll. */

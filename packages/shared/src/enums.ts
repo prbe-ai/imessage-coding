@@ -90,6 +90,54 @@ export const DeviceApiRoute = {
 export type DeviceApiRoute = (typeof DeviceApiRoute)[keyof typeof DeviceApiRoute];
 
 // -----------------------------------------------------------------------------
+// Dashboard API routes. EVENTS is the account-scoped SSE stream the dashboard
+// browser opens DIRECTLY against the control plane (the single SSE hub + source
+// of truth); SSE_TICKET is the dashboard's same-origin Next route that mints the
+// short-TTL HMAC ticket the browser passes to EVENTS (EventSource can't set
+// Authorization headers, so auth rides as a `?ticket=` query param).
+// -----------------------------------------------------------------------------
+export const DashboardApiRoute = {
+  /** Control-plane SSE: pushes the account's live `sessions` list. */
+  EVENTS: '/api/dashboard/events',
+  /** Dashboard same-origin: GET → { ticket } for the EVENTS stream. */
+  SSE_TICKET: '/api/home/sse-ticket',
+} as const;
+export type DashboardApiRoute =
+  (typeof DashboardApiRoute)[keyof typeof DashboardApiRoute];
+
+// -----------------------------------------------------------------------------
+// SSE `event:` names on the control-plane streams (device + dashboard). Both the
+// server writer (streamSSE) and the client frame-parser MUST reference these.
+// -----------------------------------------------------------------------------
+export const SseEvent = {
+  /** Device stream: resolved decisions (verdicts/answers/grants). */
+  DECISIONS: 'decisions',
+  /** Device stream: free-text steering messages to inject. */
+  SESSION_MESSAGES: 'session_messages',
+  /** Device stream: a session's current { afk, grant } (push-down sync). */
+  STATE: 'state',
+  /** Dashboard stream: the account's live `sessions` list. */
+  SESSIONS: 'sessions',
+  /** Keepalive on both streams (ignored by clients). */
+  PING: 'ping',
+} as const;
+export type SseEvent = (typeof SseEvent)[keyof typeof SseEvent];
+
+// -----------------------------------------------------------------------------
+// Postgres LISTEN/NOTIFY channels (control-plane listener ↔ schema triggers).
+// Each notification payload carries a `session_id` and/or `account_id`.
+// -----------------------------------------------------------------------------
+export const NotifyChannel = {
+  /** Fired on a decisions INSERT (wake the device's verdict/answer waiter). */
+  DECISION_READY: 'decision_ready',
+  /** Fired on a session_messages INSERT (wake the device's steer waiter). */
+  SESSION_MESSAGE: 'session_message',
+  /** Fired on a sessions afk/grant/state change (wake device + dashboard). */
+  SESSION_STATE: 'session_state',
+} as const;
+export type NotifyChannel = (typeof NotifyChannel)[keyof typeof NotifyChannel];
+
+// -----------------------------------------------------------------------------
 // Transport events (inbound from the messaging provider webhook).
 // -----------------------------------------------------------------------------
 export const TransportEvent = {

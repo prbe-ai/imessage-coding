@@ -18,6 +18,15 @@ export interface ControlPlaneEnv {
   /** Server-side pepper mixed into device_token hashing. Never shipped to a device. */
   deviceTokenPepper: string;
 
+  /**
+   * Shared HMAC secret for dashboard SSE tickets. The dashboard (a separate app)
+   * mints a short-TTL ticket with this same secret; the control plane verifies
+   * it on GET /api/dashboard/events. OPTIONAL so the control plane still boots
+   * before the secret is provisioned — the dashboard route fail-closes (no
+   * secret → no valid ticket → 401) rather than crash-looping at boot.
+   */
+  sseTicketSecret: string | undefined;
+
   /** AgentPhone transport config (also read by @imsg/transport from env). */
   agentPhone: {
     apiKey: string | undefined;
@@ -76,6 +85,7 @@ export function loadEnv(): ControlPlaneEnv {
     // Device token hashing MUST be peppered; a missing pepper is a security
     // misconfiguration, so we fail closed at boot.
     deviceTokenPepper: require_('DEVICE_TOKEN_PEPPER'),
+    sseTicketSecret: read('SSE_TICKET_SECRET'),
     agentPhone: {
       apiKey: read('AGENTPHONE_API_KEY'),
       apiBase: read('AGENTPHONE_API_BASE'),

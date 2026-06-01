@@ -27,6 +27,7 @@ import {
   AttentionKind,
   DeviceApiRoute,
   SessionState,
+  SseEvent,
   isAfkState,
   isAttentionEvent,
   isGrantLevel,
@@ -70,6 +71,17 @@ const PHONE_ROUTED_KINDS: ReadonlySet<AttentionKind> = new Set([
   AttentionKind.QUESTION,
   AttentionKind.PLAN,
 ]);
+
+/**
+ * RFC-4122 UUID shape. Query/body ids are checked against this BEFORE they reach
+ * a UUID column: a SELECT/UPDATE with a non-UUID string otherwise throws a
+ * Postgres `invalid input syntax for type uuid`, surfacing as an unhandled 500
+ * instead of a clean 4xx.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuid(s: string): boolean {
+  return UUID_RE.test(s);
+}
 
 export const deviceRoutes = new Hono<DeviceHonoEnv>();
 
@@ -199,6 +211,9 @@ deviceRoutes.get(DeviceApiRoute.DECISIONS, async (c) => {
   if (!sessionId) {
     return c.json({ error: 'missing_session_id' }, 400);
   }
+  if (!isUuid(sessionId)) {
+    return c.json({ error: 'invalid_session_id' }, 400);
+  }
 
   // Scope check: the session must belong to this device/account.
   const session = await getSessionForDevice({
@@ -252,6 +267,9 @@ deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
   if (!sessionId) {
     return c.json({ error: 'missing_session_id' }, 400);
   }
+  if (!isUuid(sessionId)) {
+    return c.json({ error: 'invalid_session_id' }, 400);
+  }
   const session = await getSessionForDevice({
     sessionId,
     deviceId: auth.deviceId,
@@ -264,13 +282,20 @@ deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
 
   return streamSSE(c, async (stream) => {
     let since = since0; // decisions cursor (ISO resolved_at); advances as we emit
+    // Last afk/grant pushed for THIS session; undefined → emit the current value
+    // on the first flush so a reconnecting device re-syncs even if it missed a
+    // change while disconnected.
+    let lastAfk: typeof session.afk | undefined;
+    let lastGrant: typeof session.grant | undefined;
     let aborted = false;
     stream.onAbort(() => {
       aborted = true;
     });
 
-    // Emit pending decisions (since cursor) + undelivered steers, then mark
-    // steers delivered. The device's applyDecision stays the verdict arbiter.
+    // Emit pending decisions (since cursor) + undelivered steers (mark them
+    // delivered) + the session's current {afk,grant} when it changed. The
+    // device's applyDecision stays the verdict arbiter; the `state` event is
+    // applied to its local afk.state/grant.state files (idempotent there).
     const flush = async (): Promise<void> => {
       const dec = await listDecisionsForSession({
         sessionId,
@@ -280,7 +305,7 @@ deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
       });
       if (dec.decisions.length > 0) {
         await stream.writeSSE({
-          event: 'decisions',
+          event: SseEvent.DECISIONS,
           data: JSON.stringify({
             decisions: dec.decisions,
             requestIds: dec.requestIds,
@@ -295,8 +320,24 @@ deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
         accountId: auth.accountId,
       });
       if (msgs.length > 0) {
-        await stream.writeSSE({ event: 'session_messages', data: JSON.stringify({ messages: msgs }) });
+        await stream.writeSSE({ event: SseEvent.SESSION_MESSAGES, data: JSON.stringify({ messages: msgs }) });
         await markSessionMessagesDelivered(msgs.map((m) => m.id));
+      }
+      // Push afk/grant on change so a dashboard/CLI toggle reaches the device's
+      // PreToolUse hook (which reads the local state files). Re-query for the
+      // freshest value; the session may have ended mid-stream (cur undefined).
+      const cur = await getSessionForDevice({
+        sessionId,
+        deviceId: auth.deviceId,
+        accountId: auth.accountId,
+      });
+      if (cur && (cur.afk !== lastAfk || cur.grant !== lastGrant)) {
+        await stream.writeSSE({
+          event: SseEvent.STATE,
+          data: JSON.stringify({ afk: cur.afk, grant: cur.grant }),
+        });
+        lastAfk = cur.afk;
+        lastGrant = cur.grant;
       }
     };
 
@@ -316,7 +357,7 @@ deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
       // be stranded until an unrelated NOTIFY. The timeout path bounds worst-case
       // delivery latency to one heartbeat (matches the old long-poll's behavior).
       await flush();
-      if (!woken) await stream.writeSSE({ event: 'ping', data: '{}' });
+      if (!woken) await stream.writeSSE({ event: SseEvent.PING, data: '{}' });
     }
   });
 });

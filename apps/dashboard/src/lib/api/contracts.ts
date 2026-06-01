@@ -46,9 +46,20 @@ export interface AgentNumberResponse {
   phoneNumber: string | null;
 }
 
-/** Response of GET /api/home/sessions — live, account-scoped sessions. */
+/** Response of GET /api/home/sessions — live, account-scoped sessions. Also the
+ *  shape of each `sessions` SSE event pushed by the control plane. */
 export interface SessionsResponse {
   sessions: SessionInfo[];
+}
+
+/** Response of GET /api/home/sse-ticket — a short-TTL ticket + the absolute
+ *  control-plane SSE URL the browser opens an EventSource against. The dashboard
+ *  is on a different origin than the control plane, so the browser needs both. */
+export interface SseTicketResponse {
+  /** Opaque HMAC ticket; passed as the `?ticket=` query param to `url`. */
+  ticket: string;
+  /** Absolute control-plane SSE endpoint (DashboardApiRoute.EVENTS). */
+  url: string;
 }
 
 /** Body of POST /api/home/afk — set AFK across the account's live sessions. */

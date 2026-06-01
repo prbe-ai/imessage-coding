@@ -50,10 +50,14 @@ REQUIRED_SECRETS=(
   WEBHOOK_BASE_URL
 )
 # Optional: an override for a non-secret default that fly.toml says to point at a
-# private LiteLLM proxy. Synced only when present in .env AND different from the
-# value already declared in fly.toml's [env] (no point shadowing it otherwise).
+# private LiteLLM proxy, plus the dashboard SSE ticket secret (the control plane
+# reads it optionally and the dashboard SSE route fail-closes without it, so a
+# not-yet-provisioned value must not hard-fail the sync). SSE_TICKET_SECRET MUST
+# match the dashboard's SSE_TICKET_SECRET (Vercel env) for tickets to verify.
+# Synced only when present in .env.
 OPTIONAL_SECRETS=(
   LLM_API_BASE
+  SSE_TICKET_SECRET
 )
 
 say()  { printf '[sync-fly-secrets] %s\n' "$*"; }

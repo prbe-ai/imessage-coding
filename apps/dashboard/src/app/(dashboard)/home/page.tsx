@@ -6,8 +6,10 @@
  * - iMessage "Chat" deep-link button (opens Messages to the agent number).
  * - The linked, verified phone number.
  * - An account-wide AFK master toggle (sets AFK across every live session).
- * - A live Sessions list (per device/agent), polled from the control plane
- *   via the dashboard's own /api/home/sessions.
+ * - A live Sessions list (per device/agent): an initial snapshot from the
+ *   dashboard's own /api/home/sessions, then a live EventSource to the control
+ *   plane's /api/dashboard/events (the SSE hub + source of truth), so a
+ *   dashboard/CLI AFK toggle reflects here within ~1s with no polling.
  *
  * Gates on the Better Auth session; bounces unauthenticated visitors to
  * /sign-in and un-linked accounts to /onboarding.
@@ -23,18 +25,16 @@ import { DashboardChrome } from "@/components/dashboard-chrome";
 import { SessionCard } from "@/components/session-card";
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AfkState, SessionState, type SessionInfo } from "@imsg/shared";
+import { AfkState, SessionState, SseEvent, type SessionInfo } from "@imsg/shared";
 import {
   getAgentNumber,
   getLinkedNumber,
+  getSseTicket,
   listSessions,
   setAfk,
 } from "@/lib/api/home";
 import { chatDeepLink } from "@/lib/deep-link";
 import { extractError } from "@/lib/utils";
-
-/** Live-state refresh cadence for the sessions list. */
-const SESSIONS_POLL_INTERVAL_MS = 5000;
 
 export default function HomePage() {
   const router = useRouter();
@@ -81,25 +81,81 @@ export default function HomePage() {
     return () => ac.abort();
   }, [session, isPending, router]);
 
-  // ── Live sessions poll (only once the number is linked). ──────────────
+  // ── Live sessions via the control-plane SSE hub (once the number is linked).
+  //    Initial snapshot from the same-origin route, then a live EventSource to
+  //    the control plane; on drop we re-mint a ticket and reconnect (bounded
+  //    backoff). The control plane is the source of truth — a dashboard/CLI AFK
+  //    toggle round-trips back here as a fresh `sessions` event. ──────────────
   useEffect(() => {
     if (!phoneNumber) return;
+    let cancelled = false;
+    let es: EventSource | null = null;
+    let reconnectTimer: number | undefined;
+    let attempt = 0;
+
+    // First paint from the same-origin snapshot; the stream then drives updates.
     const ac = new AbortController();
-    const load = () => {
-      listSessions(ac.signal)
-        .then((res) => {
-          if (ac.signal.aborted) return;
-          setSessions(res.sessions);
-        })
-        .catch(() => {
-          // Transient — keep the last good list.
-        });
+    listSessions(ac.signal)
+      .then((res) => {
+        if (!cancelled) setSessions(res.sessions);
+      })
+      .catch(() => {
+        // Transient — keep the last good list.
+      });
+
+    const scheduleReconnect = () => {
+      if (cancelled) return;
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      attempt += 1;
+      const delay = Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5));
+      reconnectTimer = window.setTimeout(() => void connect(), delay);
     };
-    load();
-    const id = window.setInterval(load, SESSIONS_POLL_INTERVAL_MS);
+
+    const connect = async () => {
+      if (cancelled) return;
+      try {
+        const { ticket, url } = await getSseTicket(ac.signal);
+        if (cancelled) return;
+        const sep = url.includes("?") ? "&" : "?";
+        const source = new EventSource(
+          `${url}${sep}ticket=${encodeURIComponent(ticket)}`,
+        );
+        es = source;
+        source.addEventListener("open", () => {
+          attempt = 0; // healthy connection → reset backoff
+        });
+        source.addEventListener(SseEvent.SESSIONS, (ev) => {
+          try {
+            const body = JSON.parse((ev as MessageEvent).data) as {
+              sessions: SessionInfo[];
+            };
+            if (!cancelled) setSessions(body.sessions);
+          } catch {
+            // Ignore a malformed frame; the next event reconciles.
+          }
+        });
+        source.addEventListener("error", () => {
+          // On a transient drop the browser auto-reconnects (readyState
+          // CONNECTING) reusing this ticket — let it; that's a ~3s recovery vs.
+          // our backoff. Only take over on a permanent close (CLOSED) — e.g. the
+          // ticket expired and the retry 401'd — by re-minting a fresh ticket.
+          if (source.readyState !== EventSource.CLOSED) return;
+          if (es === source) es = null;
+          scheduleReconnect();
+        });
+      } catch {
+        // Ticket mint failed (e.g. SSE not yet configured) — back off + retry.
+        scheduleReconnect();
+      }
+    };
+
+    void connect();
+
     return () => {
+      cancelled = true;
       ac.abort();
-      window.clearInterval(id);
+      es?.close();
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
     };
   }, [phoneNumber]);
 

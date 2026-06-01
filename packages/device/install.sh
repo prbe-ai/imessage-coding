@@ -101,6 +101,15 @@ if [ -z "$SRC" ]; then
 fi
 [ -f "$SRC/.claude-plugin/plugin.json" ] || die "no plugin.json under $SRC — set IMSG_DEVICE_SRC"
 
+# Resolve the Claude CLI up front. `claude plugin marketplace remove` DELETES the
+# marketplace's install directory ($MARKETPLACE_DIR is a CC-managed dir), so clear
+# any stale registration HERE — BEFORE we stage into that same dir. Doing it after
+# staging would wipe the freshly-staged plugin and break pairing.
+CLAUDE_BIN="$(command -v claude || true)"
+if [ -n "$CLAUDE_BIN" ]; then
+  "$CLAUDE_BIN" plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
+fi
+
 # --- 2. stage the plugin (in a subdir) + generate the catalog + install deps -
 # Lay out the marketplace the way Claude Code expects:
 #   $MARKETPLACE_DIR/.claude-plugin/marketplace.json   (catalog; source ./imsg-device)
@@ -196,18 +205,18 @@ rewrite_bun "$PLUGIN_DIR/hooks/hooks.json"
 say "rewrote bun command to absolute path in .mcp.json + hooks.json"
 
 # --- 4. register marketplace + enable plugin --------------------------------
-CLAUDE_BIN="$(command -v claude || true)"
+# CLAUDE_BIN resolved above (where the stale marketplace was removed pre-staging).
 if [ -n "$CLAUDE_BIN" ]; then
-  say "registering marketplace + enabling plugin"
-  # Clear any stale registration first so a re-install picks up the new layout.
-  "$CLAUDE_BIN" plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
+  say "registering marketplace + installing plugin"
   "$CLAUDE_BIN" plugin marketplace add "$MARKETPLACE_DIR" >/dev/null 2>&1 || true
-  "$CLAUDE_BIN" plugin enable "${PLUGIN_NAME}@${MARKETPLACE_NAME}" >/dev/null 2>&1 \
-    || say "note: could not auto-enable; run: claude plugin enable ${PLUGIN_NAME}@${MARKETPLACE_NAME}"
+  # `install` downloads/caches + enables; `enable` only flips an already-installed
+  # plugin, so it would NOT cache ours (and the plugin would never load).
+  "$CLAUDE_BIN" plugin install "${PLUGIN_NAME}@${MARKETPLACE_NAME}" >/dev/null 2>&1 \
+    || say "note: could not auto-install; run: claude plugin install ${PLUGIN_NAME}@${MARKETPLACE_NAME}"
 else
-  say "note: 'claude' CLI not on PATH — enable manually with:"
+  say "note: 'claude' CLI not on PATH — install manually with:"
   say "  claude plugin marketplace add $MARKETPLACE_DIR"
-  say "  claude plugin enable ${PLUGIN_NAME}@${MARKETPLACE_NAME}"
+  say "  claude plugin install ${PLUGIN_NAME}@${MARKETPLACE_NAME}"
 fi
 
 # --- 5/6. wrap-chain statusLine + pre-allow the reply tool in settings.json --

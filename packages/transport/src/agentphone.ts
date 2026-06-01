@@ -124,16 +124,25 @@ export class AgentPhoneTransport implements Transport {
       throw new Error('AgentPhoneTransport: AGENTPHONE_AGENT_ID is not set');
     }
 
-    /* VERIFY against live API: endpoint, body field names, response shape. */
+    // Verified live against the API + the official AgentPhone client
+    // (github.com/AgentPhone-AI/agentphone-mcp `sendMessage`, 2026-06-01):
+    //   POST /v1/messages { agent_id, to_number, body, media_url?, number_id? }
+    // AgentPhone threads the reply into the right conversation purely from
+    // agent_id + to_number, so a reply target is NOT required.
+    //
+    // We deliberately do NOT forward msg.replyToMessageId here. AgentPhone's
+    // optional `reply_to_message_id` must be a real *message* id; an inbound
+    // webhook gives us only the per-delivery `X-Webhook-ID` (what populates
+    // InboundMessage.messageId), never a message id. Passing that delivery id
+    // makes AgentPhone fail to resolve the parent and reject the whole send with
+    // `404 {"detail":"Reply target not found."}` — so every reply silently
+    // failed while the user saw only a read receipt. Omitting it sends cleanly.
     const url = `${this.apiBase}/v1/messages`;
     const body: Record<string, unknown> = {
       agent_id: this.agentId,
       to_number: msg.to,
       body: msg.text,
     };
-    if (msg.replyToMessageId !== undefined) {
-      body['reply_to_message_id'] = msg.replyToMessageId;
-    }
 
     const res = await fetch(url, {
       method: 'POST',
@@ -151,7 +160,8 @@ export class AgentPhoneTransport implements Transport {
       );
     }
 
-    /* VERIFY against live API: response id field. */
+    // Verified live: a 200 returns { id, status, channel, from_number,
+    // to_number, ... }. The extra fallbacks are belt-and-suspenders.
     const json = (await res.json().catch(() => ({}))) as {
       id?: string;
       message_id?: string;

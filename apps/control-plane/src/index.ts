@@ -11,6 +11,7 @@
 import { createApp } from './app.ts';
 import { loadEnv } from './env.ts';
 import { ensureListener } from './db/listener.ts';
+import { reapStaleSessions } from './db/repo.ts';
 
 const env = loadEnv();
 const app = createApp();
@@ -19,6 +20,23 @@ const app = createApp();
 ensureListener().catch((err) => {
   console.error('[boot] listener warm-up failed (will retry lazily)', err);
 });
+
+// Session liveness reaper. Devices heartbeat every 60s; the control plane is the
+// source of truth for "live" because a client can't reliably announce its own
+// death (SIGKILL / crash / sleep / lost network). Sweep stale sessions to
+// `ended` so they drop out of the dashboard + orchestrator (both filter
+// state <> 'ended'). Idempotent, so running on every instance is fine; errors
+// are logged, never thrown out of the timer.
+const REAP_INTERVAL_MS = 60_000;
+function sweepStaleSessions(): void {
+  reapStaleSessions()
+    .then((n) => {
+      if (n > 0) console.log(`[reaper] ended ${n} stale session(s)`);
+    })
+    .catch((err) => console.error('[reaper] sweep failed (will retry)', err));
+}
+sweepStaleSessions(); // once at boot to clear anything stale from before restart
+setInterval(sweepStaleSessions, REAP_INTERVAL_MS);
 
 console.log(`[control-plane] listening on :${env.port}`);
 

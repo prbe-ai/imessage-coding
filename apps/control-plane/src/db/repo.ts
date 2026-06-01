@@ -303,7 +303,10 @@ export async function upsertSession(args: {
      VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'active'), now())
      ON CONFLICT (id) DO UPDATE
         SET cwd           = COALESCE(EXCLUDED.cwd, sessions.cwd),
-            state         = COALESCE($6, sessions.state),
+            -- A heartbeat revives a session the staleness reaper had ended (e.g.
+            -- the device slept past the window, then woke and beat again).
+            state         = COALESCE($6, CASE WHEN sessions.state = 'ended'
+                                              THEN 'active' ELSE sessions.state END),
             last_event_at = now()
       WHERE sessions.device_id = $2 AND sessions.account_id = $3
      RETURNING *`,
@@ -335,6 +338,38 @@ export async function touchSession(args: {
     [args.sessionId, args.deviceId, args.accountId],
   );
   return rows.length > 0;
+}
+
+/**
+ * Staleness window for the session liveness reaper. The device heartbeats every
+ * 60s (HEARTBEAT_INTERVAL_MS), so this is several missed beats — generous enough
+ * not to false-reap a brief blip, and a live process that beats again is revived
+ * by upsertSession. Tune down for snappier cleanup, up if you see false-deaths.
+ */
+export const SESSION_STALE_SECONDS = 300;
+
+/**
+ * Server-side liveness reaper: mark sessions `ended` once their last heartbeat
+ * is older than the staleness window. This is the AUTHORITATIVE cleanup — the
+ * device's client-side shutdown hooks can't cover SIGKILL / crash / laptop-sleep
+ * / lost-network (and Claude Code's MCP-server lifecycle is unreliable), so the
+ * control plane must not depend on a goodbye message. Both live-session reads
+ * already filter `state <> 'ended'`, so reaping here hides dead sessions from the
+ * dashboard + orchestrator. Idempotent — safe to run on every control-plane
+ * instance. Returns the number of sessions reaped.
+ */
+export async function reapStaleSessions(
+  staleSeconds: number = SESSION_STALE_SECONDS,
+): Promise<number> {
+  const rows = await query<{ id: string }>(
+    `UPDATE sessions
+        SET state = 'ended'
+      WHERE state <> 'ended'
+        AND last_event_at < now() - ($1::int * interval '1 second')
+      RETURNING id`,
+    [staleSeconds],
+  );
+  return rows.length;
 }
 
 /** Update afk/grant on a device's session. */

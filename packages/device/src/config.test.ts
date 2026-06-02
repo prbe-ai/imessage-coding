@@ -13,7 +13,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 
-import { resolveControlPlaneUrl } from './config.ts';
+import { pickEagerSessionId, resolveControlPlaneUrl } from './config.ts';
 
 const DEFAULT = 'http://localhost:8080';
 const BAKED = { controlPlaneUrl: 'https://baked.example.com' };
@@ -49,5 +49,40 @@ describe('resolveControlPlaneUrl', () => {
     expect(resolveControlPlaneUrl({}, { controlPlaneUrl: 'https://x.example.com///' })).toBe(
       'https://x.example.com',
     );
+  });
+});
+
+describe('pickEagerSessionId', () => {
+  const SID = '11111111-1111-1111-1111-111111111111';
+  const NATIVE = '22222222-2222-2222-2222-222222222222';
+
+  test('IMSG_SESSION_ID override wins over the CC-native id', () => {
+    expect(pickEagerSessionId({ IMSG_SESSION_ID: SID, CLAUDE_CODE_SESSION_ID: NATIVE })).toBe(SID);
+  });
+
+  test('CLAUDE_CODE_SESSION_ID is used when no override is set (the same-cwd fix)', () => {
+    expect(pickEagerSessionId({ CLAUDE_CODE_SESSION_ID: NATIVE })).toBe(NATIVE);
+  });
+
+  test('returns null when neither is set (caller falls back to handshake/random)', () => {
+    expect(pickEagerSessionId({})).toBeNull();
+  });
+
+  test('a non-UUID CLAUDE_CODE_SESSION_ID is rejected so the handshake can recover', () => {
+    expect(pickEagerSessionId({ CLAUDE_CODE_SESSION_ID: 'not-a-uuid' })).toBeNull();
+    expect(pickEagerSessionId({ CLAUDE_CODE_SESSION_ID: 'garbage 123' })).toBeNull();
+  });
+
+  test('whitespace-only / blank env values are ignored, not treated as ids', () => {
+    expect(pickEagerSessionId({ IMSG_SESSION_ID: '   ', CLAUDE_CODE_SESSION_ID: NATIVE })).toBe(NATIVE);
+    expect(pickEagerSessionId({ CLAUDE_CODE_SESSION_ID: '  ' })).toBeNull();
+  });
+
+  test('trims surrounding whitespace on the chosen id', () => {
+    expect(pickEagerSessionId({ CLAUDE_CODE_SESSION_ID: `  ${NATIVE}  ` })).toBe(NATIVE);
+  });
+
+  test('explicit IMSG_SESSION_ID override is honored as-is (not UUID-validated)', () => {
+    expect(pickEagerSessionId({ IMSG_SESSION_ID: 'manual-test-id' })).toBe('manual-test-id');
   });
 });

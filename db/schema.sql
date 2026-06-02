@@ -120,6 +120,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   device_id      UUID        NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   account_id     UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   cwd            TEXT,
+  -- Human label = the session's first user message (sanitized, truncated). Set
+  -- once, then frozen (first-writer-wins in upsertSession). NULL until observed.
+  title          TEXT,
   agent          TEXT        NOT NULL DEFAULT 'claude-code',
   state          TEXT        NOT NULL DEFAULT 'active'
                    CHECK (state IN ('active', 'waiting', 'idle', 'ended')),

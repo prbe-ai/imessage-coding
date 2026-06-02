@@ -63,6 +63,7 @@ interface SessionRow {
   device_id: string;
   account_id: string;
   cwd: string | null;
+  title: string | null;
   agent: string;
   state: string;
   afk: string;
@@ -116,6 +117,7 @@ function toSessionInfo(r: SessionRow): SessionInfo {
     grant: r.grant as GrantLevel,
   };
   if (r.cwd !== null) info.cwd = r.cwd;
+  if (r.title !== null) info.title = r.title;
   return info;
 }
 
@@ -299,11 +301,12 @@ export async function upsertSession(args: {
   deviceId: string;
   accountId: string;
   cwd?: string | undefined;
+  title?: string | undefined;
   state?: SessionState | undefined;
 }): Promise<SessionInfo> {
   const row = await queryOne<SessionRow>(
-    `INSERT INTO sessions (id, device_id, account_id, cwd, agent, state, last_event_at)
-     VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'active'), now())
+    `INSERT INTO sessions (id, device_id, account_id, cwd, title, agent, state, last_event_at)
+     VALUES ($1, $2, $3, $4, $7, $5, COALESCE($6, 'active'), now())
      ON CONFLICT (id) DO UPDATE
         SET -- Reassign to the current device, and scope the claim by ACCOUNT (not
             -- device). A re-pair on the same machine mints a NEW device_id under
@@ -313,6 +316,9 @@ export async function upsertSession(args: {
             -- an authenticated device of the account, so cross-account stays safe.
             device_id     = $2,
             cwd           = COALESCE(EXCLUDED.cwd, sessions.cwd),
+            -- Title is FROZEN once set (the first user message) — first-writer-wins,
+            -- so a later heartbeat re-sending it can't overwrite the original label.
+            title         = COALESCE(sessions.title, EXCLUDED.title),
             -- A heartbeat revives a session the staleness reaper had ended (e.g.
             -- the device slept past the window, then woke and beat again).
             state         = COALESCE($6, CASE WHEN sessions.state = 'ended'
@@ -327,6 +333,7 @@ export async function upsertSession(args: {
       args.cwd ?? null,
       AgentKind.CLAUDE_CODE,
       args.state ?? null,
+      args.title ?? null,
     ],
   );
   if (!row) {

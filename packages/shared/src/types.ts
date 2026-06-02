@@ -71,6 +71,13 @@ export interface SessionInfo {
   id: string;
   deviceId: string;
   cwd?: string;
+  /**
+   * Human label for the session — the (sanitized, truncated) first user message,
+   * captured once and frozen. Lets the dashboard + orchestrator name a session by
+   * what it's doing instead of an opaque id + folder. Absent until the first user
+   * message is observed; readers fall back to the cwd basename.
+   */
+  title?: string;
   agent: AgentKind;
   /** ISO-8601 timestamp of the most recent event on this session. */
   lastEventAt: string;
@@ -78,6 +85,10 @@ export interface SessionInfo {
   afk: AfkState;
   grant: GrantLevel;
 }
+
+/** Max length of a session `title` (chars). Capped device-side at capture and
+ *  re-clamped server-side as defense-in-depth. */
+export const SESSION_TITLE_MAX_LEN = 80;
 
 /**
  * One surfaced unit of session activity (the AFK transcript tap). The device

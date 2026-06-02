@@ -49,18 +49,32 @@ export function SessionCard({
   onToggleAfk: (next: AfkState) => void;
   busy: boolean;
 }) {
-  const cwd = session.cwd?.split("/").filter(Boolean).pop() ?? session.cwd;
+  // Prefer the captured task title; fall back to the cwd basename, then a stub.
+  // When a title is present the folder is demoted to the meta row so it's not lost.
+  const folder = session.cwd?.split("/").filter(Boolean).pop() ?? session.cwd ?? undefined;
+  const label = session.title ?? folder ?? "Untitled session";
+  const tooltip = session.title
+    ? session.cwd
+      ? `${session.title}\n${session.cwd}`
+      : session.title
+    : (session.cwd ?? undefined);
   return (
     <div className="rounded-lg border border-outline-variant/40 bg-surface-container-low p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 text-sm font-bold tracking-tight text-on-surface">
             <Folder className="size-4 shrink-0 text-on-surface-variant" />
-            <span className="line-clamp-1" title={session.cwd ?? undefined}>
-              {cwd || "Untitled session"}
+            <span className="line-clamp-1" title={tooltip}>
+              {label}
             </span>
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-outline">
+            {session.title && folder ? (
+              <>
+                <span className="normal-case">{folder}</span>
+                <span aria-hidden="true">·</span>
+              </>
+            ) : null}
             <span>{session.agent}</span>
             <span aria-hidden="true">·</span>
             <span>updated {formatRelativeTime(session.lastEventAt)}</span>

@@ -30,13 +30,21 @@ import {
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { AfkState, DeviceApiRoute, type ActivityBatchBody, type ActivityEvent } from '@imsg/shared';
+import {
+  ActivityKind,
+  AfkState,
+  DeviceApiRoute,
+  SESSION_TITLE_MAX_LEN,
+  type ActivityBatchBody,
+  type ActivityEvent,
+} from '@imsg/shared';
 import {
   deviceApiUrl,
   logDir,
   sessionCursorFile,
   sessionOutboxFile,
   sessionShutdownFile,
+  sessionTitleFile,
   sessionsDir,
 } from '../src/config.ts';
 import { loadToken } from '../src/creds.ts';
@@ -219,6 +227,63 @@ function enqueueEvents(events: ActivityEvent[]): void {
   }
 }
 
+// --- session title (first user message) --------------------------------------
+// The channel MCP server reads this file and forwards it on the heartbeat. It's
+// a LOCAL write (not egress), so it's deliberately OUTSIDE the AFK ship-gate —
+// the title is a session LABEL (metadata, like cwd), not transcript content, so
+// it populates even at the keyboard. Captured ONCE per session, then frozen.
+let titleCaptured = existsSync(sessionTitleFile(SESSION_ID));
+
+/** Atomically write the session title (already sanitized by extractActivity).
+ *  Returns true only on a confirmed write — the caller must NOT mark the title
+ *  captured on failure, or it's lost forever (the byte cursor advances past the
+ *  first user message each tick, so a failed write is never re-scanned). */
+function writeTitle(text: string): boolean {
+  try {
+    const path = sessionTitleFile(SESSION_ID);
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, text, 'utf8');
+    renameSync(tmp, path);
+    return true;
+  } catch {
+    return false; // best-effort — retried next tick that has lines (title non-critical)
+  }
+}
+
+/**
+ * Scan this tick's new transcript lines for the FIRST user message and capture
+ * it as the title (truncated). Runs regardless of AFK; no-ops once captured. The
+ * cursor starts at byte 0 on a fresh session, so the first run always sees the
+ * opening user turn.
+ */
+function maybeCaptureTitle(lines: string[]): void {
+  if (titleCaptured) return;
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    for (const a of extractActivity(parsed)) {
+      if (a.kind === ActivityKind.USER_MESSAGE && a.text && a.text.trim()) {
+        const title = a.text.trim().slice(0, SESSION_TITLE_MAX_LEN);
+        // Only mark captured on a CONFIRMED write. On a (rare) write failure we
+        // leave titleCaptured false and fall through future ticks: the cursor has
+        // already advanced past this message, so the title ends up being the NEXT
+        // user message rather than the first — acceptable degradation, and far
+        // better than the alternative (marking captured on a failed write would
+        // freeze the title at NULL forever).
+        if (writeTitle(title)) {
+          titleCaptured = true;
+          log('title_captured', { len: title.length });
+        }
+        return;
+      }
+    }
+  }
+}
+
 // --- orphan detection (CC hard-killed without SessionEnd) ---------------------
 /** True/false if lsof can tell; null if lsof unavailable (treat as "alive"). */
 function transcriptHasReader(): boolean | null {
@@ -288,6 +353,9 @@ async function main(): Promise<number> {
       missing = 0;
       if (res.lines.length > 0) {
         hadLines = true;
+        // Capture the title (first user message) regardless of AFK — it's a local
+        // write, not egress, so it's outside the ship-gate below.
+        maybeCaptureTitle(res.lines);
         // lineNo is a MONOTONIC per-session event index (never reset), so it stays
         // a stable, unique dedup key derived from the (uncommitted-until-success)
         // cursor: a crash-before-commit re-read re-derives the same lineNos and the

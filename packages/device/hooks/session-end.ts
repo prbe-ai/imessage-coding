@@ -57,4 +57,9 @@ try {
 } catch {
   /* ignore */
 }
+// NOTE: the per-session .title file is intentionally NOT removed here. A session
+// shorter than the heartbeat interval may have written the title locally but not
+// yet shipped it; deleting on SessionEnd would race that delivery. It's a tiny
+// file and leaks the same way .cursor.json / .activity.jsonl already do — a
+// holistic sessionsDir cleanup is the right place to reclaim all three.
 process.exit(0);

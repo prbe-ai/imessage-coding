@@ -54,6 +54,8 @@ import {
   deviceApiUrl,
   deviceIdFile,
   logDir,
+  pickEagerSessionId,
+  sessionTitleFile,
 } from './config.ts';
 import { loadToken } from './creds.ts';
 import { readHandshakeForProject } from './handshake.ts';
@@ -76,18 +78,19 @@ function log(event: string, data: unknown): void {
   process.stderr.write(`[imsg-device] ${line}\n`);
 }
 
-// Each channel server instance owns one CC session, but Claude Code does NOT
-// hand the session id to a plugin MCP server (its env/`initialize`/Channels
-// params are all silent — only CLAUDE_PROJECT_DIR / CLAUDE_PLUGIN_ROOT are set).
-// So we learn the REAL session id from the SessionStart hook's handshake, keyed
-// by the project dir (CLAUDE_PROJECT_DIR, which we DO get). Resolved async at
-// boot; the background loops + emitAttention await `sessionReady` before using
-// it. This fixes the long-standing random-UUID bug so the MCP server's `sessions`
-// row, SSE subscription, steering, and the tap daemon's activity rows all key off
-// ONE real id. Fallbacks (env override, then a random id) keep an un-paired /
-// pre-handshake session working, just not joined to the activity tap.
+// Each channel server instance owns one CC session. Claude Code ≥2.1.160 hands
+// the real session id to a plugin's stdio MCP server directly as the
+// CLAUDE_CODE_SESSION_ID env var (verified live), so we read it from there — this
+// is what lets concurrent sessions in the SAME project dir be told apart, since
+// each MCP server now knows its OWN id instead of all reading one shared,
+// last-writer-wins handshake file. Older CC (no env var) falls back to the
+// SessionStart hook's project-dir-keyed handshake (the prior mechanism); that
+// fallback still collides on same-cwd sessions, but the env var is the norm now.
+// Resolved at boot; the background loops + emitAttention await `sessionReady`
+// before using it. Keys the MCP server's `sessions` row, SSE subscription,
+// steering, and the tap daemon's activity rows off ONE real id.
 const PROJECT_CWD = process.env.CLAUDE_PROJECT_DIR?.trim() || process.cwd();
-let SESSION_ID = process.env.IMSG_SESSION_ID ?? '';
+let SESSION_ID = pickEagerSessionId() ?? '';
 const DEVICE_ID = readDeviceId();
 
 /** Bounded wait for the SessionStart handshake (MCP server may boot first).
@@ -101,20 +104,22 @@ const sessionReady: Promise<void> = resolveSessionId().then((id) => {
 });
 
 /**
- * Resolve the real CC session id from the SessionStart handshake, polling
- * briefly in case the MCP server booted before the hook wrote it. SessionEnd
- * deletes the handshake when a session ends, so a handshake present here belongs
- * to the live session in this project dir — and an MCP-only restart mid-session
- * (no fresh SessionStart) still finds it, so it never forks the session id. Falls
- * back to an env override, then a random id (degrades to the old behavior — the
- * session just won't correlate with the tap).
+ * Resolve the real CC session id. Precedence:
+ *   1. IMSG_SESSION_ID    — explicit override (tests / manual runs).
+ *   2. CLAUDE_CODE_SESSION_ID — CC-native (≥2.1.160), authoritative + synchronous.
+ *      This is the fix for same-cwd collisions: each MCP server gets its OWN id.
+ *   3. SessionStart handshake (project-dir-keyed) — fallback for older CC, polled
+ *      briefly in case the MCP server booted before the hook wrote it. SessionEnd
+ *      deletes the handshake, so a present one belongs to the live session here.
+ *   4. random id — last resort (degrades to the old behavior; the session just
+ *      won't correlate with the tap).
  *
- * Same-dir concurrent sessions can't be told apart (last writer wins) — a known,
- * documented limitation; the supported workflow is one session per worktree.
+ * NOTE: the handshake fallback (3) still can't disambiguate concurrent same-cwd
+ * sessions (last writer wins) — but on CC ≥2.1.160 (2) wins first, so it does.
  */
 async function resolveSessionId(): Promise<string> {
-  const override = process.env.IMSG_SESSION_ID;
-  if (override && override.trim()) return override.trim();
+  const eager = pickEagerSessionId();
+  if (eager) return eager;
   const deadline = Date.now() + HANDSHAKE_WAIT_MS;
   for (;;) {
     const h = readHandshakeForProject(PROJECT_CWD);
@@ -139,7 +144,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.1' },
+  { name: 'imsg-device', version: '0.1.2' },
   {
     capabilities: {
       experimental: {
@@ -509,6 +514,19 @@ async function subscribeEvents(): Promise<void> {
 // the dashboard or the CLI's POST /api/device/state), and the heartbeat route
 // ignores any afk/grant in the body anyway. Sending them would falsely imply an
 // up-sync and risk clobbering the authoritative value.
+
+/** The session title (first user message) captured locally by the tap daemon,
+ *  or undefined if not yet observed. Forwarded on the heartbeat as session
+ *  metadata (like cwd) so it populates regardless of AFK; server freezes it. */
+function readSessionTitle(): string | undefined {
+  try {
+    const t = readFileSync(sessionTitleFile(SESSION_ID), 'utf8').trim();
+    return t || undefined;
+  } catch {
+    return undefined; // not captured yet — readers fall back to cwd
+  }
+}
+
 async function heartbeatLoop(): Promise<void> {
   await sessionReady; // beat under the REAL session id (so the row matches the tap)
   for (;;) {
@@ -523,6 +541,8 @@ async function heartbeatLoop(): Promise<void> {
         // CLAUDE_PROJECT_DIR (the real project dir), NOT process.cwd() — the MCP
         // server's cwd is forced to CLAUDE_PLUGIN_ROOT by .mcp.json's --cwd.
         cwd: PROJECT_CWD,
+        // Omitted (dropped by JSON.stringify) until the tap captures it.
+        title: readSessionTitle(),
         at: new Date().toISOString(),
       });
       const resp = await postJson(deviceApiUrl(DeviceApiRoute.HEARTBEAT), body, { bearer: token });

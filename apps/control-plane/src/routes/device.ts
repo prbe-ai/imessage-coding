@@ -30,6 +30,7 @@ import {
   AfkState,
   AttentionKind,
   DeviceApiRoute,
+  SESSION_TITLE_MAX_LEN,
   SessionState,
   SseEvent,
   isActivityBatchBody,
@@ -472,12 +473,24 @@ deviceRoutes.post(DeviceApiRoute.HEARTBEAT, async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as {
     sessionId?: unknown;
     cwd?: unknown;
+    title?: unknown;
   };
   const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
   if (!sessionId) {
     return c.json({ error: 'missing_session_id' }, 400);
   }
+  // sessions.id is a UUID column. The id now comes from CLAUDE_CODE_SESSION_ID
+  // (CC-owned), not our randomUUID(), so guard it like the SSE/decisions/ack
+  // routes do — a non-UUID would otherwise throw an invalid-uuid 500 in the
+  // INSERT on every heartbeat instead of a clean 400.
+  if (!isUuid(sessionId)) {
+    return c.json({ error: 'invalid_session_id' }, 400);
+  }
   const cwd = typeof body.cwd === 'string' ? body.cwd : undefined;
+  // Re-clamp the device-capped title: a forged/buggy client must not bloat the
+  // row. The empty string maps to undefined so it never overwrites a real title.
+  const rawTitle = typeof body.title === 'string' ? body.title.slice(0, SESSION_TITLE_MAX_LEN) : '';
+  const title = rawTitle.trim() ? rawTitle : undefined;
 
   // Upsert so a heartbeat can register a brand-new session, then touch it.
   await upsertSession({
@@ -485,6 +498,7 @@ deviceRoutes.post(DeviceApiRoute.HEARTBEAT, async (c) => {
     deviceId: auth.deviceId,
     accountId: auth.accountId,
     cwd,
+    title,
   });
   const ok = await touchSession({
     sessionId,

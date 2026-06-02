@@ -26,6 +26,7 @@ export interface SessionDbRow {
   id: string;
   device_id: string;
   cwd: string | null;
+  title: string | null;
   agent: string;
   last_event_at: string;
   state: string;
@@ -47,5 +48,6 @@ export function toSessionInfo(row: SessionDbRow): SessionInfo {
     grant: isGrantLevel(row.grant) ? row.grant : GrantLevel.OFF,
   };
   if (row.cwd) info.cwd = row.cwd;
+  if (row.title) info.title = row.title;
   return info;
 }

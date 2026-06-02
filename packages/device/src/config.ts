@@ -114,6 +114,40 @@ export function sessionPidFile(sessionId: string): string {
 }
 
 /**
+ * Captured session title (the first user message, sanitized + truncated). The
+ * tap daemon writes it once from the transcript; the channel MCP server reads it
+ * and forwards it on the heartbeat. A plain local file — NOT egress — so it's
+ * independent of the tap's AFK ship-gate (the title rides the always-on
+ * heartbeat as session metadata, like cwd).
+ */
+export function sessionTitleFile(sessionId: string): string {
+  return join(sessionsDir(), `${sessionId}.title`);
+}
+
+/** Canonical UUID shape (CC session ids are UUIDs; sessions.id is a UUID column). */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Eager (synchronous) session-id source, in precedence order:
+ *   1. IMSG_SESSION_ID        — explicit override (tests / manual runs), honored as-is.
+ *   2. CLAUDE_CODE_SESSION_ID — CC-native (≥2.1.160): the real session id handed
+ *      to the plugin's MCP server. This is what disambiguates concurrent sessions
+ *      sharing one project dir — each server reads its OWN id. Accepted ONLY if it's
+ *      UUID-shaped — a blank/garbage/shell-polluted value falls through so the caller
+ *      can recover via the SessionStart handshake (same CC, real id) instead of
+ *      stranding the session on an id the control plane will reject.
+ * Returns null when neither yields a usable id, so the caller falls back to the
+ * handshake (older CC) and finally a random id. Pure (env injectable) for testing.
+ */
+export function pickEagerSessionId(env: NodeJS.ProcessEnv = process.env): string | null {
+  const override = env.IMSG_SESSION_ID?.trim();
+  if (override) return override;
+  const native = env.CLAUDE_CODE_SESSION_ID?.trim();
+  if (native && UUID_RE.test(native)) return native;
+  return null;
+}
+
+/**
  * Build-baked config, written into the plugin ROOT (next to package.json) at
  * build time by apps/dashboard/scripts/copy-install-script.mjs. This is how the
  * long-lived MCP server + CLI learn the control-plane URL: Claude Code spawns

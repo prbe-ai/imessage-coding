@@ -21,13 +21,14 @@ ensureListener().catch((err) => {
   console.error('[boot] listener warm-up failed (will retry lazily)', err);
 });
 
-// Session liveness reaper. Devices heartbeat every 60s; the control plane is the
+// Session liveness reaper. Devices heartbeat every 10s; the control plane is the
 // source of truth for "live" because a client can't reliably announce its own
 // death (SIGKILL / crash / sleep / lost network). Sweep stale sessions to
 // `ended` so they drop out of the dashboard + orchestrator (both filter
-// state <> 'ended'). Idempotent, so running on every instance is fine; errors
+// state <> 'ended'). Sweep cadence matches the heartbeat so detection latency
+// stays tight. Idempotent, so running on every instance is fine; errors
 // are logged, never thrown out of the timer.
-const REAP_INTERVAL_MS = 60_000;
+const REAP_INTERVAL_MS = 10_000;
 function sweepStaleSessions(): void {
   reapStaleSessions()
     .then((n) => {

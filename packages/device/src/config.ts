@@ -21,8 +21,9 @@ const DEFAULT_CONTROL_PLANE_URL = 'http://localhost:8080';
 /** Long-poll timeout for GET /api/device/decisions, kept under the server's ~25s. */
 export const DECISIONS_LONG_POLL_TIMEOUT_MS = 30_000;
 
-/** Heartbeat cadence the channel server posts session liveness on. */
-export const HEARTBEAT_INTERVAL_MS = 60_000;
+/** Heartbeat cadence the channel server posts session liveness on. Short so the
+ *  server's staleness reaper (SESSION_STALE_SECONDS) can drop dead sessions fast. */
+export const HEARTBEAT_INTERVAL_MS = 10_000;
 
 /** Killswitch poll TTL (fail-OPEN disable check). Matches tap-plugin's 300s. */
 export const KILLSWITCH_TTL_MS = 300_000;

@@ -359,11 +359,12 @@ export async function touchSession(args: {
 
 /**
  * Staleness window for the session liveness reaper. The device heartbeats every
- * 60s (HEARTBEAT_INTERVAL_MS), so this is several missed beats — generous enough
- * not to false-reap a brief blip, and a live process that beats again is revived
- * by upsertSession. Tune down for snappier cleanup, up if you see false-deaths.
+ * 10s (HEARTBEAT_INTERVAL_MS), so this is three missed beats — tight enough to
+ * drop dead sessions within ~30-40s, generous enough not to false-reap a brief
+ * blip (a live process that beats again is revived by upsertSession). Tune down
+ * for snappier cleanup, up if you see false-deaths.
  */
-export const SESSION_STALE_SECONDS = 300;
+export const SESSION_STALE_SECONDS = 30;
 
 /**
  * Server-side liveness reaper: mark sessions `ended` once their last heartbeat

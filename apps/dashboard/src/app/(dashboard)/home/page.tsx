@@ -25,13 +25,20 @@ import { DashboardChrome } from "@/components/dashboard-chrome";
 import { SessionCard } from "@/components/session-card";
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AfkState, SessionState, SseEvent, type SessionInfo } from "@imsg/shared";
+import {
+  AfkState,
+  GrantLevel,
+  SessionState,
+  SseEvent,
+  type SessionInfo,
+} from "@imsg/shared";
 import {
   getAgentNumber,
   getLinkedNumber,
   getSseTicket,
   listSessions,
   setAfk,
+  setGrant,
 } from "@/lib/api/home";
 import { chatDeepLink } from "@/lib/deep-link";
 import { extractError } from "@/lib/utils";
@@ -45,6 +52,10 @@ export default function HomePage() {
   const [agentNumber, setAgentNumber] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
   const [afkBusy, setAfkBusy] = useState(false);
+  // Per-session grant writes in flight — serialized so two overlapping POSTs
+  // can't race, and surfaced as `grantBusy` to disable the control meanwhile.
+  const grantPending = useRef<Set<string>>(new Set<string>());
+  const [grantBusyIds, setGrantBusyIds] = useState<readonly string[]>([]);
   const bootRef = useRef(false);
 
   // ── Boot: gate auth + linked number. ──────────────────────────────────
@@ -206,6 +217,63 @@ export default function HomePage() {
     [],
   );
 
+  // ── Per-session grant change. ─────────────────────────────────────────
+  const onSessionGrant = useCallback(
+    async (sessionId: string, next: GrantLevel) => {
+      // Serialize per session: ignore a change while this session's grant write
+      // is still in flight, so two overlapping POSTs can't land out of order and
+      // leave the authoritative grant disagreeing with the user's last choice.
+      if (grantPending.current.has(sessionId)) return;
+      grantPending.current.add(sessionId);
+      setGrantBusyIds([...grantPending.current]);
+
+      // Optimistic flip; remember the prior level to roll back on failure.
+      let prevGrant: GrantLevel | undefined;
+      setSessions((prev) =>
+        prev
+          ? prev.map((s) => {
+              if (s.id !== sessionId) return s;
+              prevGrant = s.grant;
+              return { ...s, grant: next };
+            })
+          : prev,
+      );
+
+      try {
+        const res = await setGrant(next, sessionId);
+        // updated === 0 means no row matched (e.g. the session ended between
+        // render and click) — the write never took, so treat it as a failure
+        // rather than leaving the optimistic value showing.
+        if (res.updated === 0) throw new Error("Session is no longer live.");
+        // Reconcile to the server's authoritative level, not our optimistic one,
+        // so any future server-side capping can't be masked by the UI.
+        setSessions((prev) =>
+          prev
+            ? prev.map((s) =>
+                s.id === sessionId ? { ...s, grant: res.grant } : s,
+              )
+            : prev,
+        );
+      } catch (err) {
+        if (prevGrant !== undefined) {
+          const restore = prevGrant;
+          setSessions((prev) =>
+            prev
+              ? prev.map((s) =>
+                  s.id === sessionId ? { ...s, grant: restore } : s,
+                )
+              : prev,
+          );
+        }
+        toast.error(extractError(err, "Couldn't update grant."));
+      } finally {
+        grantPending.current.delete(sessionId);
+        setGrantBusyIds([...grantPending.current]);
+      }
+    },
+    [],
+  );
+
   const userEmail = session?.user?.email ?? null;
 
   if (isPending || !phoneNumber) {
@@ -281,7 +349,9 @@ export default function HomePage() {
                   key={s.id}
                   session={s}
                   busy={afkBusy}
+                  grantBusy={grantBusyIds.includes(s.id)}
                   onToggleAfk={(next) => void onSessionAfk(s.id, next)}
+                  onSetGrant={(next) => void onSessionGrant(s.id, next)}
                 />
               ))}
             </div>

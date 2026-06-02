@@ -21,12 +21,15 @@
  * back to the static notification (agent-event path) — never an unsafe action.
  */
 import {
+  AfkState,
   AttentionKind,
   DecisionBehavior,
   DecisionSource,
   GrantLevel,
   RequestAction,
+  isAfkState,
   isGrantLevel,
+  isUuid,
   type AttentionEvent,
   type InboundMessage,
 } from '@imsg/shared';
@@ -44,6 +47,7 @@ import {
   recentSessionActivity,
   resolveAttention,
   setAttentionNotifyMessageId,
+  setSessionsAfkForAccount,
 } from '../db/repo.ts';
 import { hashToken } from '../auth/device.ts';
 import { runAssistantTurn, type ToolExecutor } from './llm.ts';
@@ -375,8 +379,8 @@ interface DispatchCtx {
 }
 
 /** Build the tool executor for one turn. Tools never throw — they return `error:`.
- *  Three capable tools: text_user (any turn), send_to_session + respond_to_request
- *  (user-message turns only). */
+ *  Capable tools: text_user (any turn), send_to_session + respond_to_request +
+ *  set_afk (user-message turns only). */
 function makeExecTool(ctx: DispatchCtx): ToolExecutor {
   return async (name, args) => {
     if (name === 'text_user') {
@@ -423,6 +427,32 @@ function makeExecTool(ctx: DispatchCtx): ToolExecutor {
       if (!res) return 'error: no such live session for this account';
       ctx.actions.push(`steered session ${shortId(sessionId)}`);
       return 'sent to the session';
+    }
+
+    if (name === 'set_afk') {
+      if (!isAfkState(args.afk)) {
+        return `error: afk must be '${AfkState.ON}' or '${AfkState.OFF}'`;
+      }
+      // Filter to well-formed UUIDs BEFORE the ::uuid[] cast (a bad id would 500
+      // the query). The account_id predicate in the repo is the tenant boundary.
+      const ids = Array.isArray(args.session_ids)
+        ? args.session_ids.filter(isUuid)
+        : [];
+      if (ids.length === 0) {
+        return 'error: session_ids must be a non-empty array of session ids from LIVE SESSIONS';
+      }
+      const updated = await setSessionsAfkForAccount({
+        accountId: ctx.accountId,
+        sessionIds: ids,
+        afk: args.afk,
+      });
+      if (updated.length === 0) {
+        return 'error: none of those ids match a live session for this account';
+      }
+      ctx.actions.push(`set afk=${args.afk} on ${updated.length} session(s)`);
+      const missed = ids.length - updated.length;
+      const missedNote = missed > 0 ? `; ${missed} id(s) matched no live session` : '';
+      return `set afk=${args.afk} on ${updated.length} session(s)${missedNote}`;
     }
 
     if (name === 'respond_to_request') {

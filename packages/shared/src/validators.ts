@@ -72,6 +72,16 @@ export const isAgentKind = (v: unknown): v is AgentKind =>
 export const isMessageChannel = (v: unknown): v is MessageChannel =>
   isEnumValue(MessageChannel, v);
 
+// --- primitive guards --------------------------------------------------------
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** True if `v` is a canonical UUID string. Used to filter ids before a
+ *  Postgres `::uuid[]` cast (a malformed id would otherwise 22P02 the query). */
+export const isUuid = (v: unknown): v is string =>
+  typeof v === 'string' && UUID_RE.test(v);
+
 // --- shape guards ------------------------------------------------------------
 
 export function isAttentionEvent(v: unknown): v is AttentionEvent {

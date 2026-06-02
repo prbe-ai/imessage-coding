@@ -38,6 +38,7 @@ import {
   isAfkState,
   isAttentionEvent,
   isGrantLevel,
+  isUuid,
   type AttentionEvent,
 } from '@imsg/shared';
 import {
@@ -97,16 +98,9 @@ const PHONE_ROUTED_KINDS: ReadonlySet<AttentionKind> = new Set([
 const STATUS_RELAY_MIN_INTERVAL_MS = 1_000;
 const lastStatusRelayAt = new Map<string, number>();
 
-/**
- * RFC-4122 UUID shape. Query/body ids are checked against this BEFORE they reach
- * a UUID column: a SELECT/UPDATE with a non-UUID string otherwise throws a
- * Postgres `invalid input syntax for type uuid`, surfacing as an unhandled 500
- * instead of a clean 4xx.
- */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function isUuid(s: string): boolean {
-  return UUID_RE.test(s);
-}
+// `isUuid` (shared) guards query/body ids BEFORE they reach a UUID column: an
+// UPDATE/SELECT with a non-UUID string otherwise throws Postgres 22P02
+// (`invalid input syntax for type uuid`), surfacing as a 500 instead of a 4xx.
 
 export const deviceRoutes = new Hono<DeviceHonoEnv>();
 

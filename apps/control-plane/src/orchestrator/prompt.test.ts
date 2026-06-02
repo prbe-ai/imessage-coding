@@ -19,8 +19,10 @@ const toolNames = (mode: 'user_message' | 'agent_event' | 'agent_message'): stri
     .join(',');
 
 describe('assistantTools — notify-only gate', () => {
-  test('user_message exposes all three capable tools', () => {
-    expect(toolNames('user_message')).toBe('respond_to_request,send_to_session,text_user');
+  test('user_message exposes all four capable tools', () => {
+    expect(toolNames('user_message')).toBe(
+      'respond_to_request,send_to_session,set_afk,text_user',
+    );
   });
 
   test('agent_event is notify-only (text_user only)', () => {

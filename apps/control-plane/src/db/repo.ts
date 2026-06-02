@@ -444,6 +444,36 @@ export async function updateSessionStateForDevice(args: {
 }
 
 /**
+ * Set AFK across a NAMED set of the account's LIVE sessions. Used by the
+ * orchestrator's `set_afk` tool (the phone steering AFK on/off), mirroring the
+ * dashboard's account-scoped POST /api/home/afk write. account_id is the tenant
+ * boundary; ids that aren't a live session of this account are silently skipped.
+ * Returns the ids actually updated so the caller can report which took effect.
+ * The device observes the change on its next SSE `state` flush (it re-queries
+ * sessions.afk per stream) and mirrors it to the local PreToolUse hook file.
+ *
+ * AFK carries no auto-approve power on its own (grant is untouched here), so —
+ * unlike a FULL grant — it is safe for the LLM to flip.
+ */
+export async function setSessionsAfkForAccount(args: {
+  accountId: string;
+  sessionIds: string[];
+  afk: AfkState;
+}): Promise<string[]> {
+  if (args.sessionIds.length === 0) return [];
+  // No last_event_at bump: a remote control toggle is not session activity and
+  // must not revive the staleness reaper's clock (mirrors the dashboard path).
+  const rows = await query<{ id: string }>(
+    `UPDATE sessions
+        SET afk = $1
+      WHERE account_id = $2 AND id = ANY($3::uuid[]) AND state <> $4
+     RETURNING id`,
+    [args.afk, args.accountId, args.sessionIds, SessionState.ENDED],
+  );
+  return rows.map((r) => r.id);
+}
+
+/**
  * Current device state for the GET /api/device/state killswitch + state probe.
  * Reports `enabled` from the device row (revoked_at IS NULL AND disabled_at IS
  * NULL) and the afk/grant of the device's MOST-RECENT live session (the CLI's

@@ -13,6 +13,7 @@
  */
 import {
   ActivityKind,
+  AfkState,
   GrantLevel,
   RequestAction,
   type AttentionEvent,
@@ -59,9 +60,11 @@ export function systemPrompt(): string {
     'otherwise).',
     '',
     'Your tools: `text_user` (message the user), `send_to_session` (inject an',
-    'instruction into a running coding agent), and `respond_to_request` (resolve a',
-    "pending request an agent is blocked on — answer / approve / deny / allow). Only",
-    'a user-message turn gets the latter two; the agent-driven turns are notify-only.',
+    'instruction into a running coding agent), `respond_to_request` (resolve a',
+    "pending request an agent is blocked on — answer / approve / deny / allow), and",
+    '`set_afk` (turn AFK on/off for named sessions — AFK routes their prompts to you',
+    'here; off returns them to the keyboard). Only a user-message turn gets the',
+    'latter three; the agent-driven turns are notify-only.',
     '',
     'You are given a snapshot of the live coding sessions (with a short trail of',
     "each session's recent activity — user/assistant messages and tool calls,",
@@ -182,6 +185,37 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
             },
           },
           required: ['request_id', 'action'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'set_afk',
+        description:
+          'Turn AFK (away-from-keyboard) on or off for one or more live sessions. ' +
+          `'${AfkState.ON}' routes those sessions' permission prompts, questions, and ` +
+          `status to you here over iMessage; '${AfkState.OFF}' returns them to the ` +
+          'keyboard (native on-screen prompts, no relay). Name the targets by ' +
+          'session_id from the LIVE SESSIONS list — pass several to flip them ' +
+          'together. AFK only changes WHERE prompts surface; it never auto-approves ' +
+          'anything, so it is always safe to set.',
+        parameters: {
+          type: 'object',
+          properties: {
+            afk: {
+              type: 'string',
+              enum: [AfkState.ON, AfkState.OFF],
+              description: `'${AfkState.ON}' = away (relay to iMessage); '${AfkState.OFF}' = at the keyboard.`,
+            },
+            session_ids: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'Ids of the live sessions to update (from LIVE SESSIONS). At least one.',
+            },
+          },
+          required: ['afk', 'session_ids'],
         },
       },
     },

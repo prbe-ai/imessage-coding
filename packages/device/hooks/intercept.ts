@@ -30,7 +30,7 @@
  *     never auto-allowed except under grant=full.
  *
  *  2) AFK ROUTING (only the question/plan tools, only when AFK on):
- *       PreToolUse/AskUserQuestion -> deny + "ask via reply, qid, STOP".
+ *       PreToolUse/AskUserQuestion -> deny + "ask via message_user(expect_reply), reply_tag, STOP".
  *       PreToolUse/ExitPlanMode    -> no grant: deny+hold; grant present: allow.
  *       PermissionRequest/ExitPlanMode -> grant present: behavior:allow.
  *
@@ -93,13 +93,13 @@ function emitPerm(behavior: 'allow' | 'deny'): never {
 // Neutral instruction wording, carried over from the spike verbatim (only the
 // channel source name differs, set by the channel server).
 const ASK_REASON =
-  'The user is AFK (away). Do NOT answer this yourself and do NOT retry AskUserQuestion. Call the `reply` tool now ' +
-  'with the exact question and ALL options, tagged with a unique `qid`. Then STOP and end your turn. The user will ' +
-  'reply via a <channel source="imsg-device"> event; resume using that answer.';
+  'The user is AFK (away). Do NOT answer this yourself and do NOT retry AskUserQuestion. Call the `message_user` tool now ' +
+  'with expect_reply: true, the exact question and ALL options, and a unique reply_tag. Then STOP and end your turn. The user ' +
+  'will reply via a <channel source="imsg-device"> message; resume using that answer.';
 const PLAN_REASON =
   'The user is AFK and cannot see the native plan prompt. Do NOT proceed and do NOT retry ExitPlanMode yet. Send a ' +
-  'concise summary of THIS plan to the user via the `reply` tool, tagged with a `qid`, asking them to approve or reject. ' +
-  'Then STOP and end your turn. When approval arrives as a <channel> event, re-call ExitPlanMode once — it will be allowed.';
+  'concise summary of THIS plan to the user via the `message_user` tool with expect_reply: true and a reply_tag, asking them to ' +
+  'approve or reject. Then STOP and end your turn. When approval arrives as a <channel> message, re-call ExitPlanMode once — it will be allowed.';
 
 const raw = await Bun.stdin.text();
 let input: Record<string, unknown> = {};

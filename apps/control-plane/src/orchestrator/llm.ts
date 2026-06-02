@@ -3,9 +3,9 @@
  * user and their Claude Code agents.
  *
  * The assistant runs a coding-agent-style TURN: triggered by an event (a user
- * text, or a coding-agent attention), it loops — calling tools and sending
- * messages via the `send_message` tool — until it emits a model turn with NO
- * tool calls (the turn is over). A per-turn round cap bounds runaway loops.
+ * text, a coding-agent attention, or a coding-agent status message), it loops —
+ * calling tools and sending messages via the `text_user` tool — until it emits a
+ * model turn with NO tool calls (the turn is over). A per-turn round cap bounds runaway loops.
  *
  * Transport is OpenAI-compatible tool-calling Chat Completions over env
  * LLM_API_BASE / LLM_MODEL / LLM_API_KEY — in production a private LiteLLM proxy
@@ -90,8 +90,8 @@ export async function runAssistantTurn(args: {
   execTool: ToolExecutor;
   /**
    * Called with terminal assistant text when the turn ends with prose instead
-   * of a `send_message` call — a safety net so a stray final message is not
-   * silently dropped. Only invoked when the turn produced no `send_message`.
+   * of a `text_user` call — a safety net so a stray final message is not
+   * silently dropped. Only invoked when the turn produced no `text_user`.
    */
   onUnsentText?: (text: string) => Promise<void>;
 }): Promise<TurnOutcome> {
@@ -102,17 +102,17 @@ export async function runAssistantTurn(args: {
 
   const { messages, tools, user, execTool } = args;
   let toolCalls = 0;
-  let sawSendMessage = false;
+  let sawTextUser = false;
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
     const msg = await callModel(llm, messages, tools, user);
     const calls = msg.tool_calls ?? [];
 
     if (calls.length === 0) {
-      // Turn over. If the model ended with prose and never used send_message,
+      // Turn over. If the model ended with prose and never used text_user,
       // surface it so the user isn't left hanging (best-effort).
       const text = (msg.content ?? '').trim();
-      if (text && !sawSendMessage && args.onUnsentText) {
+      if (text && !sawTextUser && args.onUnsentText) {
         await args.onUnsentText(text);
       }
       return { rounds: round + 1, toolCalls };
@@ -123,7 +123,7 @@ export async function runAssistantTurn(args: {
 
     for (const tc of calls) {
       toolCalls++;
-      if (tc.function?.name === 'send_message') sawSendMessage = true;
+      if (tc.function?.name === 'text_user') sawTextUser = true;
       let result: string;
       try {
         const parsed =

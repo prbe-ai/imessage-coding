@@ -76,6 +76,23 @@ export const AttentionKind = {
 export type AttentionKind = (typeof AttentionKind)[keyof typeof AttentionKind];
 
 // -----------------------------------------------------------------------------
+// How the server agent resolves a pending request (permission / question / plan)
+// the coding agent is blocked on. One capable `respond_to_request` tool takes one
+// of these actions; the control plane validates it against the request kind.
+// -----------------------------------------------------------------------------
+export const RequestAction = {
+  /** Answer a question/plan with free text (becomes the agent's prompt input). */
+  ANSWER: 'answer',
+  /** Approve a plan (optionally with a standing edits grant). */
+  APPROVE: 'approve',
+  /** Deny / reject a permission or plan. Always safe. */
+  DENY: 'deny',
+  /** Allow a permission (destructive ones pass the deterministic gate in code). */
+  ALLOW: 'allow',
+} as const;
+export type RequestAction = (typeof RequestAction)[keyof typeof RequestAction];
+
+// -----------------------------------------------------------------------------
 // Session activity (the AFK transcript tap). One per surfaced transcript block:
 // a user message, an assistant reply, a tool call marker, or a failed tool call.
 // Deliberately coarse — it captures WHAT a session is doing, not the full data.
@@ -104,6 +121,9 @@ export const DeviceApiRoute = {
   STATE: '/api/device/state',
   /** Lightweight, AFK-gated session-transcript activity batches (the tap). */
   ACTIVITY: '/api/device/activity',
+  /** Fire-and-forget agent→user message (status/result). The server agent relays
+   *  it and drops it — it is NEVER an attention and has no `resolved` lifecycle. */
+  MESSAGE: '/api/device/message',
 } as const;
 export type DeviceApiRoute = (typeof DeviceApiRoute)[keyof typeof DeviceApiRoute];
 

@@ -3,16 +3,20 @@
  *
  * A turn is triggered by an EVENT and runs a coding-agent-style loop (tool calls
  * + outbound messages) until the model ends it:
- *   - `orchestrate(inbound)`     — the user texted (agentphone webhook).
- *   - `runAgentEventTurn(event)` — an agent needs attention (device attention POST,
- *                                  AFK-gated by the caller). NOTIFY-only.
+ *   - `orchestrate(inbound)`       — the user texted (agentphone webhook).
+ *   - `runAgentEventTurn(event)`   — an agent is blocked on a permission/question/
+ *                                    plan (device attention POST, AFK-gated). NOTIFY-only.
+ *   - `relayAgentMessage(message)` — an agent sent a fire-and-forget status/result
+ *                                    (device /message POST, AFK-gated). NOTIFY-only.
+ *     This is the SPLIT: a status relay never becomes an attention / `resolved`
+ *     row — the server agent relays it and drops it.
  *
  * SAFETY (unchanged contract, enforced in code — never on the model's say-so):
  *   - A destructive permission is allowed ONLY via a deterministic binding
- *     (tap-back/inline-reply or a single pending) — `allow_permission` checks
- *     `deterministicTarget()` + `checkDestructiveAllow()` and refuses otherwise.
+ *     (tap-back/inline-reply or a single pending) — `respond_to_request` (action
+ *     `allow`) checks `deterministicTarget()` + `checkDestructiveAllow()`, refuses else.
  *   - The model can never mint a FULL grant (`capGrant` caps to EDITS).
- *   - Agent-event turns expose only `send_message` (notify; the human resolves).
+ *   - The agent-driven turns expose only `text_user` (notify; the human resolves).
  * Fail-closed everywhere: a turn error sends a safe clarify (user path) or falls
  * back to the static notification (agent-event path) — never an unsafe action.
  */
@@ -21,6 +25,7 @@ import {
   DecisionBehavior,
   DecisionSource,
   GrantLevel,
+  RequestAction,
   isGrantLevel,
   type AttentionEvent,
   type InboundMessage,
@@ -49,6 +54,7 @@ import {
   type TurnMode,
 } from './prompt.ts';
 import {
+  actionAllowedForKind,
   checkDestructiveAllow,
   deterministicTarget,
   isDestructiveTool,
@@ -273,6 +279,82 @@ async function runAgentEventTurnLocked(
   }
 }
 
+/**
+ * AGENT-MESSAGE relay: an agent sent a fire-and-forget status/result (device
+ * /api/device/message, AFK-gated by the caller). NOTIFY-only — the server agent
+ * frames it and texts the user. This is the SPLIT from attentions: there is NO
+ * `attention_events` row and NOTHING to resolve, so it never joins the pending
+ * pile. Best-effort: a status update is not safety-critical.
+ */
+export function relayAgentMessage(
+  message: { sessionId: string; text: string },
+  accountId: string,
+  transport: Transport,
+): Promise<TurnResult> {
+  // Serialized per account, same as every other turn (see withAccountLock) so a
+  // relay can't interleave with a user turn and double-act on pending requests.
+  return withAccountLock(accountId, () => relayAgentMessageLocked(message, accountId, transport));
+}
+
+async function relayAgentMessageLocked(
+  message: { sessionId: string; text: string },
+  accountId: string,
+  transport: Transport,
+): Promise<TurnResult> {
+  const sent = { count: 0 };
+  try {
+    const [pending, sessions, history] = await Promise.all([
+      listPendingAttentionForAccount(accountId),
+      listLiveSessionsForAccount(accountId),
+      recentMessages({ accountId, limit: HISTORY_LIMIT }),
+    ]);
+    const actions: string[] = [];
+    const ctx: DispatchCtx = {
+      mode: 'agent_message',
+      accountId,
+      transport,
+      pending,
+      actions,
+      sent,
+    };
+    const activity = await loadSessionActivity(accountId, sessions);
+    const messages = buildTurnMessages({
+      trigger: { kind: 'agent_message', sessionId: message.sessionId, text: message.text },
+      pending,
+      sessions,
+      history,
+      activity,
+    });
+    const outcome = await runAssistantTurn({
+      messages,
+      tools: assistantTools('agent_message'),
+      user: accountId,
+      execTool: makeExecTool(ctx),
+      onUnsentText: async (text) => {
+        const id = await sendToUser(transport, accountId, text);
+        if (id) sent.count += 1;
+      },
+    });
+    // Guarantee the user hears back: if the model relayed nothing (silent turn),
+    // fall back to forwarding the agent's own text. The whole point is that every
+    // command gets a response — better to over-relay than silently drop the answer.
+    if (sent.count === 0) {
+      await sendToUser(transport, accountId, message.text);
+    }
+    return { handled: true, accountId, rounds: outcome.rounds, toolCalls: outcome.toolCalls };
+  } catch (err) {
+    // Best-effort: forward the raw status so a turn-engine error never eats the
+    // agent's answer. Guard on sent.count === 0 (mirrors the success path) — if
+    // the model already delivered a summary before the turn threw mid-round, a
+    // raw forward here would DUPLICATE it. Never throws out (caller fired + moved on).
+    console.error('[assistant] agent-message relay error', err);
+    if (sent.count === 0) {
+      await sendToUser(transport, accountId, message.text).catch(() => {});
+    }
+    return { handled: true, accountId, reason: 'relay_error_raw_forward' };
+  }
+}
+
 // --- tool dispatch ------------------------------------------------------------
 
 interface DispatchCtx {
@@ -284,7 +366,7 @@ interface DispatchCtx {
   pending: ReadonlyArray<AttentionEvent>;
   /** Deterministic binding for the destructive-allow gate (user-message turns). */
   boundTarget?: AttentionEvent;
-  /** Default tap-back binding target for send_message (agent-event turns). */
+  /** Default tap-back binding target for text_user (agent-event turns). */
   triggerAttentionId?: string;
   /** Recorded action notes (folded into history for multi-turn coherence). */
   actions: string[];
@@ -292,10 +374,12 @@ interface DispatchCtx {
   sent: { count: number };
 }
 
-/** Build the tool executor for one turn. Tools not throw — they return `error:`. */
+/** Build the tool executor for one turn. Tools never throw — they return `error:`.
+ *  Three capable tools: text_user (any turn), send_to_session + respond_to_request
+ *  (user-message turns only). */
 function makeExecTool(ctx: DispatchCtx): ToolExecutor {
   return async (name, args) => {
-    if (name === 'send_message') {
+    if (name === 'text_user') {
       const text = typeof args.text === 'string' ? args.text.trim() : '';
       if (!text) return 'error: text is required';
       const id = await sendToUser(ctx.transport, ctx.accountId, text, {
@@ -306,8 +390,8 @@ function makeExecTool(ctx: DispatchCtx): ToolExecutor {
       // error) must not suppress the agent-event static fallback (sent.count === 0).
       if (id) ctx.sent.count += 1;
       const about =
-        typeof args.aboutAttentionId === 'string' && args.aboutAttentionId
-          ? args.aboutAttentionId
+        typeof args.about_request_id === 'string' && args.about_request_id
+          ? args.about_request_id
           : ctx.triggerAttentionId;
       // about is LLM-provided. The write is account-scoped (repo) so it can't
       // touch another tenant. AND we refuse to bind a tap-back to a DESTRUCTIVE
@@ -324,15 +408,16 @@ function makeExecTool(ctx: DispatchCtx): ToolExecutor {
       return id ? 'sent' : 'error: could not deliver (no verified phone on file)';
     }
 
-    // Resolution + steering tools are user-message only — the human drives these.
-    if (ctx.mode === 'agent_event') {
-      return 'error: only send_message is available here; notify the user and let them decide';
+    // Steering + resolution are user-message only — the human drives these. Both
+    // agent-driven turns (attention + status relay) are notify-only.
+    if (ctx.mode !== 'user_message') {
+      return 'error: only text_user is available here; notify the user and let them decide';
     }
 
-    if (name === 'steer_session') {
-      const sessionId = typeof args.sessionId === 'string' ? args.sessionId : '';
+    if (name === 'send_to_session') {
+      const sessionId = typeof args.session_id === 'string' ? args.session_id : '';
       const text = typeof args.text === 'string' ? args.text.trim() : '';
-      if (!sessionId || !text) return 'error: sessionId and text are required';
+      if (!sessionId || !text) return 'error: session_id and text are required';
       // Tenant-scoped insert: only succeeds for a live session in this account.
       const res = await insertSessionMessage({ sessionId, accountId: ctx.accountId, body: text });
       if (!res) return 'error: no such live session for this account';
@@ -340,90 +425,93 @@ function makeExecTool(ctx: DispatchCtx): ToolExecutor {
       return 'sent to the session';
     }
 
-    const attentionId = typeof args.attentionId === 'string' ? args.attentionId : '';
-    if (!attentionId) return 'error: attentionId is required';
-    const target = await resolveTarget(attentionId, ctx.accountId, ctx.pending);
-    if (!target) return 'error: no such pending attention';
+    if (name === 'respond_to_request') {
+      const requestId = typeof args.request_id === 'string' ? args.request_id : '';
+      if (!requestId) return 'error: request_id is required';
+      const target = await resolveTarget(requestId, ctx.accountId, ctx.pending);
+      if (!target) return 'error: no such pending request';
 
-    switch (name) {
-      case 'answer_attention': {
-        const text = typeof args.text === 'string' ? args.text.trim() : '';
-        const dec = await resolveAttention({
-          accountId: ctx.accountId,
-          attentionId: target.id,
-          answerText: text,
-          source: DecisionSource.PHONE,
-        });
-        if (!dec) return 'error: that attention is already resolved';
-        ctx.actions.push(`answered ${target.kind} ${shortId(target.id)}`);
-        return 'answered';
-      }
-
-      case 'approve_plan': {
-        if (target.kind !== AttentionKind.PLAN) {
-          return 'error: that attention is not a plan (approve_plan is for plans only)';
+      switch (args.action) {
+        case RequestAction.ANSWER: {
+          const text = typeof args.text === 'string' ? args.text.trim() : '';
+          const dec = await resolveAttention({
+            accountId: ctx.accountId,
+            attentionId: target.id,
+            answerText: text,
+            source: DecisionSource.PHONE,
+          });
+          if (!dec) return 'error: that request is already resolved';
+          ctx.actions.push(`answered ${target.kind} ${shortId(target.id)}`);
+          return 'answered';
         }
-        const grant = capGrant(args.grant);
-        const dec = await resolveAttention({
-          accountId: ctx.accountId,
-          attentionId: target.id,
-          behavior: DecisionBehavior.ALLOW,
-          grant,
-          source: DecisionSource.PHONE,
-        });
-        if (!dec) return 'error: that plan is already resolved';
-        ctx.actions.push(`approved plan ${shortId(target.id)}${grant ? ` grant=${grant}` : ''}`);
-        return grant ? `approved (standing grant: ${grant})` : 'approved';
-      }
 
-      case 'deny_attention': {
-        const dec = await resolveAttention({
-          accountId: ctx.accountId,
-          attentionId: target.id,
-          behavior: DecisionBehavior.DENY,
-          source: DecisionSource.PHONE,
-        });
-        if (!dec) return 'error: that attention is already resolved';
-        ctx.actions.push(`denied ${target.kind} ${shortId(target.id)}`);
-        return 'denied';
-      }
+        case RequestAction.APPROVE: {
+          if (!actionAllowedForKind(RequestAction.APPROVE, target.kind)) {
+            return "error: action='approve' is for plans only (use answer/allow/deny otherwise)";
+          }
+          const grant = capGrant(args.grant);
+          const dec = await resolveAttention({
+            accountId: ctx.accountId,
+            attentionId: target.id,
+            behavior: DecisionBehavior.ALLOW,
+            grant,
+            source: DecisionSource.PHONE,
+          });
+          if (!dec) return 'error: that plan is already resolved';
+          ctx.actions.push(`approved plan ${shortId(target.id)}${grant ? ` grant=${grant}` : ''}`);
+          return grant ? `approved (standing grant: ${grant})` : 'approved';
+        }
 
-      case 'allow_permission': {
-        if (!isPermissionAttention(target)) {
-          return 'error: that is not a permission (use answer_attention or approve_plan)';
+        case RequestAction.DENY: {
+          const dec = await resolveAttention({
+            accountId: ctx.accountId,
+            attentionId: target.id,
+            behavior: DecisionBehavior.DENY,
+            source: DecisionSource.PHONE,
+          });
+          if (!dec) return 'error: that request is already resolved';
+          ctx.actions.push(`denied ${target.kind} ${shortId(target.id)}`);
+          return 'denied';
         }
-        // A destructive allow additionally requires PROOF the user was shown a
-        // code-generated, accurate notification for THIS attention:
-        // notify_message_id is set only by notifyStatic for destructive perms,
-        // never by the LLM (see send_message). Without it (notification lost on a
-        // restart, or never sent because the user wasn't AFK at creation), a bare
-        // "yes" to a lone pending must NOT approve an op the user never saw
-        // described — fail closed.
-        if (isDestructiveTool(target.toolName) && !target.notifyMessageId) {
-          return 'refused: that request was never confirmed to you with a description, so it cannot be approved by text — act on the on-screen prompt directly.';
-        }
-        // THE GATE: destructive allows require a deterministic binding. The model
-        // names a target; we only treat it as deterministic if it IS the bound one.
-        const binding =
-          ctx.boundTarget && ctx.boundTarget.id === target.id ? 'deterministic' : 'inferred';
-        const check = checkDestructiveAllow(target, binding);
-        if (!check.permitted) {
-          return `refused: ${check.reason}. Ask the user to reply directly to that exact request to approve it.`;
-        }
-        const dec = await resolveAttention({
-          accountId: ctx.accountId,
-          attentionId: target.id,
-          behavior: DecisionBehavior.ALLOW,
-          source: DecisionSource.PHONE,
-        });
-        if (!dec) return 'error: that permission is already resolved';
-        ctx.actions.push(`allowed ${target.toolName ?? 'permission'} ${shortId(target.id)}`);
-        return 'allowed';
-      }
 
-      default:
-        return `error: unknown tool ${name}`;
+        case RequestAction.ALLOW: {
+          if (!actionAllowedForKind(RequestAction.ALLOW, target.kind)) {
+            return "error: action='allow' is for permissions (use answer for a question, approve for a plan)";
+          }
+          // A destructive allow additionally requires PROOF the user was shown a
+          // code-generated, accurate notification for THIS request: notify_message_id
+          // is set only by notifyStatic for destructive perms, never by the LLM (see
+          // text_user). Without it (notification lost on a restart, or never sent
+          // because the user wasn't AFK at creation), a bare "yes" to a lone pending
+          // must NOT approve an op the user never saw described — fail closed.
+          if (isDestructiveTool(target.toolName) && !target.notifyMessageId) {
+            return 'refused: that request was never confirmed to you with a description, so it cannot be approved by text — act on the on-screen prompt directly.';
+          }
+          // THE GATE: destructive allows require a deterministic binding. The model
+          // names a target; we only treat it as deterministic if it IS the bound one.
+          const binding =
+            ctx.boundTarget && ctx.boundTarget.id === target.id ? 'deterministic' : 'inferred';
+          const check = checkDestructiveAllow(target, binding);
+          if (!check.permitted) {
+            return `refused: ${check.reason}. Ask the user to reply directly to that exact request to approve it.`;
+          }
+          const dec = await resolveAttention({
+            accountId: ctx.accountId,
+            attentionId: target.id,
+            behavior: DecisionBehavior.ALLOW,
+            source: DecisionSource.PHONE,
+          });
+          if (!dec) return 'error: that permission is already resolved';
+          ctx.actions.push(`allowed ${target.toolName ?? 'permission'} ${shortId(target.id)}`);
+          return 'allowed';
+        }
+
+        default:
+          return `error: unknown action ${String(args.action)} (use answer/approve/deny/allow)`;
+      }
     }
+
+    return `error: unknown tool ${name}`;
   };
 }
 

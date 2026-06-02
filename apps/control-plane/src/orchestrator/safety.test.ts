@@ -9,10 +9,12 @@ import { describe, expect, test } from 'bun:test';
 import {
   AttentionKind,
   MessageChannel,
+  RequestAction,
   type AttentionEvent,
   type InboundMessage,
 } from '@imsg/shared';
 import {
+  actionAllowedForKind,
   checkDestructiveAllow,
   deterministicTarget,
   isDestructiveTool,
@@ -134,5 +136,30 @@ describe('isPermissionAttention', () => {
     expect(isPermissionAttention(attention({ kind: AttentionKind.QUESTION }))).toBe(false);
     expect(isPermissionAttention(attention({ kind: AttentionKind.IDLE }))).toBe(false);
     expect(isPermissionAttention(attention({ kind: AttentionKind.TURN_COMPLETE }))).toBe(false);
+  });
+});
+
+describe('actionAllowedForKind — respond_to_request action↔kind gate', () => {
+  test("approve is plans-only", () => {
+    expect(actionAllowedForKind(RequestAction.APPROVE, AttentionKind.PLAN)).toBe(true);
+    expect(actionAllowedForKind(RequestAction.APPROVE, AttentionKind.PERMISSION)).toBe(false);
+    expect(actionAllowedForKind(RequestAction.APPROVE, AttentionKind.QUESTION)).toBe(false);
+  });
+
+  test("allow is permissions-only", () => {
+    expect(actionAllowedForKind(RequestAction.ALLOW, AttentionKind.PERMISSION)).toBe(true);
+    expect(actionAllowedForKind(RequestAction.ALLOW, AttentionKind.PLAN)).toBe(false);
+    expect(actionAllowedForKind(RequestAction.ALLOW, AttentionKind.QUESTION)).toBe(false);
+  });
+
+  test('answer and deny apply to any pending kind', () => {
+    for (const kind of [AttentionKind.PERMISSION, AttentionKind.QUESTION, AttentionKind.PLAN]) {
+      expect(actionAllowedForKind(RequestAction.ANSWER, kind)).toBe(true);
+      expect(actionAllowedForKind(RequestAction.DENY, kind)).toBe(true);
+    }
+  });
+
+  test('an unrecognized action is rejected (fail-closed)', () => {
+    expect(actionAllowedForKind('superuser' as RequestAction, AttentionKind.PERMISSION)).toBe(false);
   });
 });

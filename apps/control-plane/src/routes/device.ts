@@ -7,6 +7,7 @@
  *
  *   POST /api/device/pair       {pairingToken, os?, hostname?} -> {deviceToken}
  *   POST /api/device/attention  AttentionEvent[]               -> {accepted}
+ *   POST /api/device/message    {sessionId, text}              -> {relayed}   (fire-and-forget status)
  *   GET  /api/device/events     ?sessionId&since (SSE)         -> decisions + steers
  *   POST /api/device/ack        {sessionId, attentionIds}      -> {acked}
  *   GET  /api/device/decisions  ?sessionId&since               -> LONG-POLL (legacy)
@@ -65,7 +66,7 @@ import {
 import { ensureListener, waitForDecision, waitForSessionEvent } from '../db/listener.ts';
 import { streamSSE } from 'hono/streaming';
 import { getTransport } from '../transport.ts';
-import { runAgentEventTurn } from '../orchestrator/index.ts';
+import { relayAgentMessage, runAgentEventTurn } from '../orchestrator/index.ts';
 
 /** Long-poll ceiling (ms). Below typical 30s proxy/client timeouts. */
 const LONG_POLL_MS = 25_000;
@@ -82,6 +83,19 @@ const PHONE_ROUTED_KINDS: ReadonlySet<AttentionKind> = new Set([
   AttentionKind.QUESTION,
   AttentionKind.PLAN,
 ]);
+
+/**
+ * Per-session min-interval between fire-and-forget status relays. A status relay
+ * is unbounded (model-driven) and each one is an LLM turn + an outbound text, so a
+ * runaway agent loop calling `message_user` could flood the user's phone and rack
+ * up turns. This caps the blast radius: a sane agent reports on task completion,
+ * far under this rate; excess is DROPPED (not queued). In-memory + best-effort
+ * (resets on deploy; single-instance — a multi-instance deploy would move this to
+ * a shared store). Keyed by session; bounded by real sessions (must pass the
+ * tenant-scoped getSessionForDevice check below).
+ */
+const STATUS_RELAY_MIN_INTERVAL_MS = 1_000;
+const lastStatusRelayAt = new Map<string, number>();
 
 /**
  * RFC-4122 UUID shape. Query/body ids are checked against this BEFORE they reach
@@ -128,6 +142,7 @@ deviceRoutes.post(DeviceApiRoute.PAIR, async (c) => {
 
 // --- everything below requires a device_token --------------------------------
 deviceRoutes.use(`${DeviceApiRoute.ATTENTION}`, requireDevice);
+deviceRoutes.use(`${DeviceApiRoute.MESSAGE}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.ACTIVITY}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.DECISIONS}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.EVENTS}`, requireDevice);
@@ -215,6 +230,57 @@ async function maybeRouteToPhone(
     console.error('[device/attention] agent-event turn failed', err);
   });
 }
+
+// --- MESSAGE (fire-and-forget agent→user status / result) ---------------------
+// The SPLIT: a status message is NOT an attention — no `resolved` lifecycle, it
+// never joins the pending pile. We relay it (AFK-gated) through a notify-only
+// server-agent turn and drop it. Tenant-scoped + best-effort; the device POST is
+// not held on the LLM turn.
+deviceRoutes.post(DeviceApiRoute.MESSAGE, async (c) => {
+  const auth = device(c);
+  const body = (await c.req.json().catch(() => ({}))) as {
+    sessionId?: unknown;
+    text?: unknown;
+  };
+  const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+  const text = typeof body.text === 'string' ? body.text.trim() : '';
+  if (!sessionId) return c.json({ error: 'missing_session_id' }, 400);
+  if (!isUuid(sessionId)) return c.json({ error: 'invalid_session_id' }, 400);
+  if (!text) return c.json({ error: 'missing_text' }, 400);
+
+  // Status is fire-and-forget: relay only for an EXISTING, live session — and do
+  // NOT upsert here. upsertSession revives an `ended` row (ON CONFLICT COALESCE),
+  // so a late/duplicate/retried status POST would resurrect a reaped session into
+  // the live list. Scope-check first (tenant isolation); drop silently if the
+  // session is unknown or already ended.
+  const session = await getSessionForDevice({
+    sessionId,
+    deviceId: auth.deviceId,
+    accountId: auth.accountId,
+  });
+  if (!session) {
+    return c.json({ error: 'unknown_session' }, 404);
+  }
+  if (session.state === SessionState.ENDED) {
+    return c.json({ relayed: false });
+  }
+  // AFK-gate (mirrors maybeRouteToPhone): at the keyboard the user sees the agent
+  // directly, so don't relay. Dropped, not an error.
+  if (session.afk !== AfkState.ON) {
+    return c.json({ relayed: false });
+  }
+  // Throttle runaway status loops (see STATUS_RELAY_MIN_INTERVAL_MS): drop, don't queue.
+  const now = Date.now();
+  if (now - (lastStatusRelayAt.get(sessionId) ?? 0) < STATUS_RELAY_MIN_INTERVAL_MS) {
+    return c.json({ relayed: false, reason: 'throttled' });
+  }
+  lastStatusRelayAt.set(sessionId, now);
+
+  void relayAgentMessage({ sessionId, text }, auth.accountId, getTransport()).catch((err) => {
+    console.error('[device/message] relay turn failed', err);
+  });
+  return c.json({ relayed: true });
+});
 
 // --- ACTIVITY (the AFK transcript tap) ----------------------------------------
 // A lightweight, per-block stream of what a session is DOING — shipped by the

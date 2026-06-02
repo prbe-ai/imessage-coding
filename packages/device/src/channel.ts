@@ -7,12 +7,13 @@
  * server VERBATIM where possible:
  *   - capability claude/channel              → push events INTO the session
  *   - capability claude/channel/permission   → relay permission prompts OUT
- *   - a `reply` tool                         → chat bridge OUT (Claude → user)
+ *   - a `message_user` tool                  → chat bridge OUT (Claude → user)
  *
  * CHANGE FROM THE SPIKE (per the DEVICE PLUGIN contract): the localhost :8799
  * control surface is GONE. Instead this server talks to the CLOUD CONTROL PLANE:
- *   - a permission_request / reply / idle  → an AttentionEvent enqueued in the
- *     durable outbox and POSTed to /api/device/attention (Bearer device_token).
+ *   - a permission_request, or message_user(expect_reply) → an AttentionEvent
+ *     enqueued in the durable outbox + POSTed to /api/device/attention; a plain
+ *     message_user status is POSTed to /api/device/message (Bearer device_token).
  *   - verdicts + answers + remote grant changes arrive over the SSE stream
  *     GET /api/device/events; a verdict is relayed back to Claude Code via the
  *     claude/channel/permission notification, an answer is pushed into the
@@ -140,11 +141,11 @@ function readDeviceId(): string {
   }
 }
 
-// --- MCP server: declare BOTH channel capabilities + the reply tool ---------
+// --- MCP server: declare BOTH channel capabilities + the message_user tool ---
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.2' },
+  { name: 'imsg-device', version: '0.1.3' },
   {
     capabilities: {
       experimental: {
@@ -154,30 +155,49 @@ const mcp = new Server(
       tools: {},
     },
     instructions:
-      'You can ask the user questions with the AskUserQuestion tool as normal. IF a hook denies an ' +
-      'AskUserQuestion or ExitPlanMode call and tells you to use the `reply` tool, that means the user is ' +
-      'away from their keyboard (AFK): follow it — call `reply` with the full question/plan text (all options ' +
-      'verbatim) plus a short `qid` tag, then STOP and end your turn (do not exit, do not guess, do not retry ' +
-      'the denied tool). Their answer arrives later as a <channel source="imsg-device"> event; match it by qid, ' +
-      "treat it as authoritative, and resume. The `reply` tool sends to the user's phone over iMessage.",
+      'You can ask the user questions with the AskUserQuestion tool as normal. To keep the user posted while ' +
+      'they drive you remotely, use the `message_user` tool — report your result when you FINISH a task or hit a ' +
+      'meaningful milestone (leave expect_reply false; it is delivered and needs no response). IF a hook denies an ' +
+      'AskUserQuestion or ExitPlanMode call, the user is away from their keyboard (AFK): follow it — call ' +
+      '`message_user` with expect_reply: true, the full question/plan text (all options verbatim), and the reply_tag ' +
+      'it gives you, then STOP and end your turn (do not exit, do not guess, do not retry the denied tool). Their ' +
+      'answer arrives later as a <channel source="imsg-device"> message; match it by reply_tag, treat it as ' +
+      "authoritative, and resume. message_user reaches the user's phone over iMessage.",
   },
 );
 
-// reply tool: Claude calls this to send a question/plan/answer OUT to the phone.
-// Description is the spike's, verbatim.
+// message_user: the ONE communication tool the model calls to reach the user.
+// Two modes, split by expect_reply:
+//   expect_reply=false (default) → STATUS/RESULT. Fire-and-forget: POST to the
+//     /message route; the server agent relays it and drops it (no attention,
+//     no pending lifecycle).
+//   expect_reply=true            → NEEDS AN ANSWER. Durable round-trip via the
+//     attention path (QUESTION); the agent stops and waits, and the user's answer
+//     is pushed back as a <channel> message.
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
-      name: 'reply',
+      name: 'message_user',
       description:
-        'Relay a question or plan summary to the user over iMessage. Call this ONLY when a PreToolUse hook has just instructed you to (it means the user is AFK). Do NOT call it proactively, for status updates, or when you could simply use AskUserQuestion normally.',
+        'Send a message to the user (who is driving you remotely over iMessage). Use this to keep them posted: ' +
+        'report your result when you FINISH a task or hit a meaningful milestone (do NOT narrate every step). Leave ' +
+        'expect_reply false for those status updates — they are delivered and need no response. Set expect_reply: true ' +
+        'ONLY when you genuinely need an answer to continue (e.g. a hook just told you the user is AFK and to relay a ' +
+        'question or plan); then STOP and wait — the answer arrives as a <channel source="imsg-device"> message you ' +
+        'should treat as authoritative.',
       inputSchema: {
         type: 'object',
         properties: {
-          text: { type: 'string', description: 'The message to send to the user' },
-          qid: {
+          text: { type: 'string', description: 'The message to send to the user.' },
+          expect_reply: {
+            type: 'boolean',
+            description:
+              'True only if you need an answer before continuing (you will stop and wait). Omit/false for status or results.',
+          },
+          reply_tag: {
             type: 'string',
-            description: 'Correlation id; echo it so the reply can be matched back',
+            description:
+              'Optional correlation id echoed back with the answer (use the reply_tag a hook gave you). Only meaningful with expect_reply: true.',
           },
         },
         required: ['text'],
@@ -187,21 +207,61 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 }));
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
-  if (req.params.name === 'reply') {
-    const { text, qid } = req.params.arguments as { text: string; qid?: string };
-    // A reply is a question/plan attention event. The hook decides kind via the
-    // tool it intercepted; here we tag QUESTION (plans also flow as questions to
-    // the phone — the user just approves/rejects). The text is sanitized.
-    await emitAttention({
-      kind: AttentionKind.QUESTION,
-      description: sanitizeText(text),
-      qid: qid ?? randomUUID(),
-    });
-    log('reply_out', { qid: qid ?? null, len: text.length });
+  if (req.params.name === 'message_user') {
+    const { text, expect_reply, reply_tag } = req.params.arguments as {
+      text: string;
+      expect_reply?: boolean;
+      reply_tag?: string;
+    };
+    const clean = sanitizeText(text);
+    if (expect_reply) {
+      // Needs an answer → durable round-trip via the attention path. The agent
+      // stops and waits; the user's answer is pushed back as a <channel> message.
+      await emitAttention({
+        kind: AttentionKind.QUESTION,
+        description: clean,
+        qid: reply_tag ?? randomUUID(),
+      });
+      log('message_user_ask', { len: text.length });
+      return { content: [{ type: 'text', text: "sent; waiting for the user's reply" }] };
+    }
+    // Fire-and-forget status/result → relayed by the server agent and dropped.
+    await sendStatusMessage(clean);
+    log('message_user_status', { len: text.length });
     return { content: [{ type: 'text', text: 'sent' }] };
   }
   throw new Error(`unknown tool: ${req.params.name}`);
 });
+
+/**
+ * Fire-and-forget status/result → POST /api/device/message. The server agent
+ * relays it and drops it (the SPLIT — no attention, no pending lifecycle). Gated
+ * by the killswitch; best-effort (a status update is not safety-critical), never
+ * throws. AFK-gating lives server-side (mirrors the attention path).
+ */
+async function sendStatusMessage(text: string): Promise<void> {
+  await sessionReady; // tag under the REAL session id so the relay attributes it
+  const token = loadToken();
+  if (!token) {
+    log('no_token', { hint: 'run `imsg pair <token>` first' });
+    return;
+  }
+  if (!(await egressEnabled(token))) {
+    log('egress_disabled', {});
+    return;
+  }
+  try {
+    const resp = await postJson(
+      deviceApiUrl(DeviceApiRoute.MESSAGE),
+      JSON.stringify({ sessionId: SESSION_ID, text }),
+      { bearer: token },
+    );
+    if (resp.classification === Classification.SUCCESS) log('status_sent', { len: text.length });
+    else log('status_send_failed', { status: resp.status });
+  } catch (err) {
+    log('status_send_error', { error: err instanceof Error ? err.message : String(err) });
+  }
+}
 
 // permission relay: Claude Code notifies us a tool dialog opened. We turn it
 // into an AttentionEvent (PERMISSION) carrying the request_id so the verdict

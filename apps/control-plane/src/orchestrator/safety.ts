@@ -24,6 +24,7 @@
  */
 import {
   AttentionKind,
+  RequestAction,
   type AttentionEvent,
   type InboundMessage,
 } from '@imsg/shared';
@@ -54,6 +55,30 @@ export function isDestructiveTool(toolName: string | undefined): boolean {
 /** Is this attention event a permission prompt (the gated kind)? */
 export function isPermissionAttention(e: AttentionEvent): boolean {
   return e.kind === AttentionKind.PERMISSION;
+}
+
+/**
+ * Which request kinds a `respond_to_request` action may target. The two gated
+ * actions are constrained by kind; answer/deny apply to any pending request:
+ *   - APPROVE → plans only.
+ *   - ALLOW   → permissions only (the destructive-allow gate applies ON TOP).
+ *   - ANSWER  → any (answering a permission just resolves it with text).
+ *   - DENY    → any (always safe).
+ * Pure + total: an unknown action returns false (fail-closed). Keeps the action↔kind
+ * rules in one tested place instead of inlined in the async dispatcher.
+ */
+export function actionAllowedForKind(action: RequestAction, kind: AttentionKind): boolean {
+  switch (action) {
+    case RequestAction.APPROVE:
+      return kind === AttentionKind.PLAN;
+    case RequestAction.ALLOW:
+      return kind === AttentionKind.PERMISSION;
+    case RequestAction.ANSWER:
+    case RequestAction.DENY:
+      return true;
+    default:
+      return false;
+  }
 }
 
 /**

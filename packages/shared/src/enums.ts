@@ -233,6 +233,7 @@ export type SessionState = (typeof SessionState)[keyof typeof SessionState];
 /** Which coding agent a session is running. */
 export const AgentKind = {
   CLAUDE_CODE: 'claude-code',
+  CODEX: 'codex',
 } as const;
 export type AgentKind = (typeof AgentKind)[keyof typeof AgentKind];
 

@@ -15,7 +15,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { DeviceApiRoute } from '@imsg/shared';
+import { AgentKind, DeviceApiRoute, isAgentKind } from '@imsg/shared';
 
 export const PLUGIN_NAME = 'imsg-device';
 
@@ -232,6 +232,18 @@ export function pickEagerSessionId(env: NodeJS.ProcessEnv = process.env): string
   const native = env.CLAUDE_CODE_SESSION_ID?.trim();
   if (native && UUID_RE.test(native)) return native;
   return null;
+}
+
+/**
+ * Which coding agent this device session is running, for the heartbeat / session
+ * row. Read from IMSG_AGENT_KIND (set by the Codex launcher; unset under Claude
+ * Code) and validated against AgentKind, so an unknown / garbage value can't
+ * mislabel a session. Defaults to AgentKind.CLAUDE_CODE — the byte-for-byte prior
+ * behavior — when unset or invalid. Pure (env injectable) for testing.
+ */
+export function agentKind(env: NodeJS.ProcessEnv = process.env): AgentKind {
+  const v = env.IMSG_AGENT_KIND?.trim();
+  return isAgentKind(v) ? v : AgentKind.CLAUDE_CODE;
 }
 
 /**

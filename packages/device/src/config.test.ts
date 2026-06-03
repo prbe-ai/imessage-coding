@@ -16,7 +16,9 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { AgentKind } from '@imsg/shared';
 import {
+  agentKind,
   defaultDeviceDir,
   deviceDir,
   legacyDeviceDir,
@@ -95,6 +97,33 @@ describe('pickEagerSessionId', () => {
 
   test('explicit IMSG_SESSION_ID override is honored as-is (not UUID-validated)', () => {
     expect(pickEagerSessionId({ IMSG_SESSION_ID: 'manual-test-id' })).toBe('manual-test-id');
+  });
+});
+
+describe('agentKind', () => {
+  test('IMSG_AGENT_KIND=codex resolves to CODEX', () => {
+    expect(agentKind({ IMSG_AGENT_KIND: 'codex' })).toBe(AgentKind.CODEX);
+  });
+
+  test('IMSG_AGENT_KIND=claude-code resolves to CLAUDE_CODE', () => {
+    expect(agentKind({ IMSG_AGENT_KIND: 'claude-code' })).toBe(AgentKind.CLAUDE_CODE);
+  });
+
+  test('unset defaults to CLAUDE_CODE (byte-for-byte prior behavior)', () => {
+    expect(agentKind({})).toBe(AgentKind.CLAUDE_CODE);
+  });
+
+  test('a garbage / unknown value defaults to CLAUDE_CODE', () => {
+    expect(agentKind({ IMSG_AGENT_KIND: 'not-an-agent' })).toBe(AgentKind.CLAUDE_CODE);
+    expect(agentKind({ IMSG_AGENT_KIND: 'CODEX' })).toBe(AgentKind.CLAUDE_CODE); // case-sensitive
+  });
+
+  test('whitespace-padded value is trimmed before validation', () => {
+    expect(agentKind({ IMSG_AGENT_KIND: '  codex  ' })).toBe(AgentKind.CODEX);
+  });
+
+  test('blank / whitespace-only value defaults to CLAUDE_CODE', () => {
+    expect(agentKind({ IMSG_AGENT_KIND: '   ' })).toBe(AgentKind.CLAUDE_CODE);
   });
 });
 

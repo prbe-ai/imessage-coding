@@ -27,11 +27,11 @@ const STATE_LABEL: Record<SessionState, string> = {
   [SessionState.ENDED]: "Ended",
 };
 
-/** Coding-agent → brand icon, served from `public/icons`. Keyed by AgentKind so
- *  adding an agent is a compile error here until its asset is mapped. `agent` is
- *  an unchecked DB string at the edge, so reads fall back to the Claude mark
- *  rather than render a broken <img> for an unmapped value. */
-const AGENT_ICON: Record<AgentKind, string> = {
+/** Coding-agent → brand icon, served from `public/icons`. Partial: an agent
+ *  without its own asset (e.g. a freshly-added AgentKind, or an unchecked DB
+ *  string at the edge) falls back to the Claude mark below rather than render a
+ *  broken <img>. Add a key here once the agent's brand SVG lands in `public/icons`. */
+const AGENT_ICON: Partial<Record<AgentKind, string>> = {
   [AgentKind.CLAUDE_CODE]: "/icons/claude-code.svg",
 };
 

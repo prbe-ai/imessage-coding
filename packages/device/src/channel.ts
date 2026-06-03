@@ -37,7 +37,6 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import {
-  AgentKind,
   AttentionKind,
   ChannelMethod,
   DeviceApiRoute,
@@ -49,6 +48,7 @@ import {
 } from '@imsg/shared';
 import {
   HEARTBEAT_INTERVAL_MS,
+  agentKind,
   deviceApiUrl,
   deviceIdFile,
   logDir,
@@ -562,7 +562,7 @@ async function heartbeatLoop(): Promise<void> {
       const body = JSON.stringify({
         sessionId: SESSION_ID,
         deviceId: DEVICE_ID,
-        agent: AgentKind.CLAUDE_CODE,
+        agent: agentKind(),
         hostname: hostname(),
         // CLAUDE_PROJECT_DIR (the real project dir), NOT process.cwd() — the MCP
         // server's cwd is forced to CLAUDE_PLUGIN_ROOT by .mcp.json's --cwd.

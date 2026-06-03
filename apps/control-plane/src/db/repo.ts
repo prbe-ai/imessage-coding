@@ -15,6 +15,7 @@ import {
   DecisionBehavior,
   SessionState,
   isAfkState,
+  isAgentKind,
   type ActivityEvent,
   type ActivityKind,
   type AttentionEvent,
@@ -342,7 +343,12 @@ export async function upsertSession(args: {
   title?: string | undefined;
   state?: SessionState | undefined;
   reviveIfEnded?: boolean | undefined;
+  /** Which coding agent the device reports for this session. Old plugins don't
+   *  send it (and a forged value is untrusted), so an absent/invalid value
+   *  defaults to AgentKind.CLAUDE_CODE — the prior hardcoded behavior. */
+  agent?: AgentKind | undefined;
 }): Promise<SessionInfo> {
+  const agent = isAgentKind(args.agent) ? args.agent : AgentKind.CLAUDE_CODE;
   const row = await queryOne<SessionRow>(
     `INSERT INTO sessions (id, device_id, account_id, cwd, title, agent, state, last_event_at)
      VALUES ($1, $2, $3, $4, $7, $5, COALESCE($6, 'active'), now())
@@ -375,7 +381,7 @@ export async function upsertSession(args: {
       args.deviceId,
       args.accountId,
       args.cwd ?? null,
-      AgentKind.CLAUDE_CODE,
+      agent,
       args.state ?? null,
       args.title ?? null,
       args.reviveIfEnded ?? true,

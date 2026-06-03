@@ -34,6 +34,7 @@ import {
   SseEvent,
   isActivityBatchBody,
   isAfkState,
+  isAgentKind,
   isAttentionEvent,
   isUuid,
   type AttentionEvent,
@@ -500,6 +501,7 @@ deviceRoutes.post(DeviceApiRoute.HEARTBEAT, async (c) => {
     sessionId?: unknown;
     cwd?: unknown;
     title?: unknown;
+    agent?: unknown;
   };
   const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
   if (!sessionId) {
@@ -517,6 +519,10 @@ deviceRoutes.post(DeviceApiRoute.HEARTBEAT, async (c) => {
   // row. The empty string maps to undefined so it never overwrites a real title.
   const rawTitle = typeof body.title === 'string' ? body.title.slice(0, SESSION_TITLE_MAX_LEN) : '';
   const title = rawTitle.trim() ? rawTitle : undefined;
+  // Which coding agent reported this heartbeat. Validate at the trust boundary;
+  // an absent (old plugin) or invalid value falls through to undefined so
+  // upsertSession applies the AgentKind.CLAUDE_CODE default — back-compat intact.
+  const agent = isAgentKind(body.agent) ? body.agent : undefined;
 
   // Upsert so a heartbeat can register a brand-new session, then touch it.
   await upsertSession({
@@ -525,6 +531,7 @@ deviceRoutes.post(DeviceApiRoute.HEARTBEAT, async (c) => {
     accountId: auth.accountId,
     cwd,
     title,
+    agent,
   });
   const ok = await touchSession({
     sessionId,

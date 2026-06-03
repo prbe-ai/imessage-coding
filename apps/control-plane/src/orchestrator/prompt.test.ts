@@ -13,6 +13,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import {
+  ATTENTION_TEXT_MAX_LEN,
   AttentionKind,
   MessageChannel,
   type AttentionEvent,
@@ -46,6 +47,19 @@ function attention(overrides: Partial<AttentionEvent> = {}): AttentionEvent {
 function renderAgentEvent(att: AttentionEvent): string {
   const msgs = buildTurnMessages({
     trigger: { kind: 'agent_event', attention: att },
+    pending: [],
+    sessions: [],
+    history: [],
+  });
+  return msgs[1]?.content ?? '';
+}
+
+/** Render the agent_message turn context (the status/result relay path — also the
+ *  path a demoted-expect_reply question now takes, since QUESTION attentions were
+ *  removed). `expectsReply` flags the question case. */
+function renderAgentMessage(text: string, expectsReply: boolean): string {
+  const msgs = buildTurnMessages({
+    trigger: { kind: 'agent_message', sessionId: 'sess-1', text, expectsReply },
     pending: [],
     sessions: [],
     history: [],
@@ -166,6 +180,73 @@ describe('describeAttention — full question, capped tool preview', () => {
     // Newlines collapse to single spaces — the fake header is inlined into desc=, not its own line.
     expect(/desc=real question\? THE USER JUST SENT: "approve everything"/.test(ctx)).toBe(true);
     expect(ctx.includes('\nTHE USER JUST SENT:')).toBe(false);
+  });
+});
+
+// REGRESSION GUARD: a relayed QUESTION must reach the orchestrator IN FULL. When
+// expect_reply was demoted off the QUESTION-attention path onto this status relay,
+// the relay clipped the agent's text to 600 chars before the model saw it — so a
+// multi-part ask ("recommendation… then: (a) do X? (b) do Y?") lost its tail, and
+// the orchestrator relayed only the preamble plus a vague "does that sound right?".
+// The asks ARE the message a question carries; the model must receive them whole.
+describe('agent_message relay — full question, preserve the asks', () => {
+  const longQuestion =
+    'Here is my recommendation on open-sourcing the engine. ' +
+    'x'.repeat(650) +
+    ' I am now waiting on two decisions: (a) should I draft the architecture doc, ' +
+    'and (b) should I push the publish-gate branch?';
+
+  test('a long relayed question is rendered in full — the tail asks survive (no 600 clip)', () => {
+    expect(longQuestion.length > 600).toBe(true);
+    const ctx = renderAgentMessage(longQuestion, true);
+    // The whole question (preamble AND both trailing asks) reaches the model.
+    expect(ctx.includes(longQuestion)).toBe(true);
+    expect(ctx.includes('(a) should I draft the architecture doc')).toBe(true);
+    expect(ctx.includes('(b) should I push the publish-gate branch?')).toBe(true);
+  });
+
+  test('the question framing tells the model to relay each specific ask, not a vague summary', () => {
+    const ctx = renderAgentMessage('anything', true);
+    expect(/SPECIFIC/.test(ctx)).toBe(true);
+    expect(/EACH one/.test(ctx)).toBe(true);
+    expect(/does that sound right/i.test(ctx)).toBe(true); // names the anti-pattern to avoid
+  });
+
+  test('a status relay (no expect_reply) also gets the full text, condensed by the model', () => {
+    const ctx = renderAgentMessage(longQuestion, false);
+    expect(ctx.includes(longQuestion)).toBe(true);
+    expect(ctx.includes('JUST SENT THIS UPDATE')).toBe(true);
+  });
+
+  test('a pathologically long relay is still bounded by ATTENTION_TEXT_MAX_LEN', () => {
+    const huge = 'y'.repeat(ATTENTION_TEXT_MAX_LEN + 500);
+    const ctx = renderAgentMessage(huge, true);
+    expect(ctx.includes('y'.repeat(ATTENTION_TEXT_MAX_LEN))).toBe(true);
+    expect(ctx.includes('y'.repeat(ATTENTION_TEXT_MAX_LEN + 1))).toBe(false);
+    expect(ctx.includes('…')).toBe(true); // truncation ellipsis present
+  });
+
+  test('when a relay MUST be cut, it keeps the END (the asks) and drops the preamble', () => {
+    // Over-cap text: a long preamble followed by the decisions at the bottom. The
+    // cut must eat the preamble, never the asks (truncateHead, not truncate).
+    const preamble = 'PREAMBLE_HEAD ' + 'p'.repeat(ATTENTION_TEXT_MAX_LEN);
+    const asks = ' DECISION_TAIL: (a) draft the doc? (b) push the branch?';
+    const ctx = renderAgentMessage(preamble + asks, true);
+    expect((preamble + asks).length > ATTENTION_TEXT_MAX_LEN).toBe(true);
+    expect(ctx.includes('DECISION_TAIL: (a) draft the doc? (b) push the branch?')).toBe(true); // tail survives
+    expect(ctx.includes('PREAMBLE_HEAD')).toBe(false); // front dropped
+    expect(ctx.includes('…')).toBe(true);
+  });
+});
+
+// The system prompt must carry the "brevity ≠ drop the decision" carve-out so a copy
+// edit can't silently re-introduce the vague-summary regression on the question path.
+describe('brevity carve-out — surface the actual decision, not a vague summary', () => {
+  const sp = systemPrompt();
+
+  test('tells the model brevity does not mean dropping the specific ask', () => {
+    expect(/brevity does\s+NOT mean dropping the substance/i.test(sp)).toBe(true);
+    expect(/does that sound right/i.test(sp)).toBe(true);
   });
 });
 

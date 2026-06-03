@@ -33,12 +33,14 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
   ActivityKind,
+  AgentKind,
   DeviceApiRoute,
   SESSION_TITLE_MAX_LEN,
   type ActivityBatchBody,
   type ActivityEvent,
 } from '@imsg/shared';
 import {
+  agentKind,
   deviceApiUrl,
   logDir,
   migrateLegacyDeviceDir,
@@ -52,7 +54,8 @@ import { loadToken } from '../src/creds.ts';
 import { egressEnabled } from '../src/killswitch.ts';
 import { Classification, backoffMs, postJson } from '../src/httpclient.ts';
 import { readNew } from '../src/transcript.ts';
-import { extractActivity } from '../src/activity.ts';
+import { extractActivity, type ExtractedActivity } from '../src/activity.ts';
+import { extractCodexActivity } from '../src/transcript-codex.ts';
 
 // --- cadence + safety constants ----------------------------------------------
 const ACTIVE_INTERVAL_MS = 10_000; // transcript advancing → near-real-time
@@ -72,6 +75,22 @@ function arg(name: string): string {
 const SESSION_ID = arg('session-id');
 const TRANSCRIPT = arg('transcript');
 const CWD = arg('cwd');
+
+// Which agent's transcript are we tailing? Set by the spawning SessionStart hook
+// via IMSG_AGENT_KIND (codex for the Codex hook; unset/claude-code for CC). The
+// byte-offset cursor tailing (readNew) is format-agnostic and SHARED; only the
+// per-line reduction (CC's extractActivity vs Codex's extractCodexActivity) and
+// the title source (CC ai-title/custom-title vs Codex first-user-message) differ.
+const AGENT = agentKind();
+const IS_CODEX = AGENT === AgentKind.CODEX;
+
+/** Reduce one parsed transcript/rollout line to coarse activity units, using the
+ *  reducer for the active agent. The output {@link ExtractedActivity} shape is
+ *  identical for both, so everything downstream (buildEvents, blockIdx, the
+ *  provisional first-message title) is agent-agnostic. */
+function reduceLine(parsed: unknown): ExtractedActivity[] {
+  return IS_CODEX ? extractCodexActivity(parsed) : extractActivity(parsed);
+}
 
 // Relocate pre-0.1.7 state into ~/.imsg before reading this session's cursor.
 migrateLegacyDeviceDir();
@@ -205,7 +224,7 @@ function buildEvents(lines: string[], baseLineNo: number, at: string): ActivityE
     } catch {
       continue; // non-JSON line (shouldn't happen) — skip, cursor still advances
     }
-    const extracted = extractActivity(parsed);
+    const extracted = reduceLine(parsed);
     for (let b = 0; b < extracted.length; b++) {
       const e = extracted[b]!;
       const ev: ActivityEvent = { lineNo: baseLineNo + i, blockIdx: b, kind: e.kind, at };
@@ -325,9 +344,11 @@ function scanForTitle(lines: string[]): void {
       continue;
     }
     // Provisional fallback only — stop looking at user messages once we hold any
-    // real title, and only ever take the FIRST one.
+    // real title, and only ever take the FIRST one. For Codex (no ai-title/
+    // custom-title entries) this provisional first user message IS the title,
+    // matching firstCodexUserMessage's contract.
     if (titleRank === TitleRank.NONE) {
-      for (const a of extractActivity(parsed)) {
+      for (const a of reduceLine(parsed)) {
         if (a.kind === ActivityKind.USER_MESSAGE && a.text && a.text.trim()) {
           offerTitle(TitleRank.FIRST_MESSAGE, firstMessageTitle(a.text));
           break;

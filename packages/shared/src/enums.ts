@@ -150,6 +150,14 @@ export const DeviceApiRoute = {
   /** Fire-and-forget agent→user message (status/result). The server agent relays
    *  it and drops it — it is NEVER an attention and has no `resolved` lifecycle. */
   MESSAGE: '/api/device/message',
+  /** BLOCKING approve-and-resume for agents with no native verdict-push channel
+   *  (Codex). A PreToolUse/PermissionRequest hook POSTs the pending destructive
+   *  tool here and the request HANGS until the user's tap-back verdict arrives or
+   *  the server's own deadline fires (which returns an explicit deny — never a
+   *  lapse), then the hook allows/denies the parked command. The control-plane
+   *  deadline MUST be shorter than the hook's timeout so a timeout is a clean deny,
+   *  not a fall-through to the unattended local prompt. */
+  PERMISSION: '/api/device/permission',
 } as const;
 export type DeviceApiRoute = (typeof DeviceApiRoute)[keyof typeof DeviceApiRoute];
 

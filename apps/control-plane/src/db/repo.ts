@@ -1019,6 +1019,42 @@ export async function markInboxDelivered(args: {
   return rows.map((r) => r.id);
 }
 
+/**
+ * Look up the VERDICT (allow/deny) the user issued for a Codex-originated
+ * permission, by the server-minted request_id the attention carried. The CC
+ * tap-back path (orchestrator → resolveAttention) writes a `session_inbox` row
+ * kind='verdict' with that request_id + behavior — the SAME row CC relays on the
+ * permission channel; here the blocking /api/device/permission endpoint reads it
+ * directly instead of pushing it down the SSE inbox. Scoped to session +
+ * account so a device can only read its own session's verdict. Returns the
+ * behavior once the verdict row exists, else undefined (still pending).
+ *
+ * No `delivered_at` dependency: the verdict's EXISTENCE is the signal (the
+ * blocking hook is the consumer, not the device's inbox injector), so this never
+ * waits on an ACK that won't come for the Codex path.
+ */
+export async function findVerdictForRequest(args: {
+  sessionId: string;
+  accountId: string;
+  requestId: string;
+}): Promise<DecisionBehavior | undefined> {
+  const row = await queryOne<{ behavior: string | null }>(
+    `SELECT behavior
+       FROM session_inbox
+      WHERE session_id = $1
+        AND account_id = $2
+        AND request_id = $3
+        AND kind = 'verdict'
+      ORDER BY created_at ASC
+      LIMIT 1`,
+    [args.sessionId, args.accountId, args.requestId],
+  );
+  if (!row) return undefined;
+  // Fail-CLOSED: a verdict row with a null/unexpected behavior reads as DENY
+  // rather than a lying cast — never an accidental allow on a malformed row.
+  return row.behavior === DecisionBehavior.ALLOW ? DecisionBehavior.ALLOW : DecisionBehavior.DENY;
+}
+
 /** True once the device has ACKed injection of the inbox row `id`
  *  (session_inbox.delivered_at set). Account-scoped. Backs the orchestrator's
  *  30s delivery-confirmation watcher (see waitForDelivered's park-before-query). */

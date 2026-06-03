@@ -198,6 +198,12 @@ CREATE INDEX IF NOT EXISTS idx_attention_notify_message_id  ON attention_events(
 --   kind='verdict' → `{request_id, behavior}` is relayed on the Channels
 --                    permission channel to release a native permission prompt
 --                    (the one structured path; text can't release a parked dialog).
+--                    For Codex (no native verdict-push channel) the SAME verdict
+--                    row is read DIRECTLY by the BLOCKING POST /api/device/permission
+--                    handler (matched by request_id via findVerdictForRequest) to
+--                    release its parked HTTP call — no SSE/ACK round-trip. The row is
+--                    produced by the UNCHANGED tap-back path (orchestrator →
+--                    resolveAttention); only the reader differs. No schema change.
 -- attention_id is the attention this delivers the consequence of (NULL for a free
 -- steer). delivered_at is set ONLY when the device ACKs injection (POST
 -- /api/device/ack); the SSE stream serves rows WHERE delivered_at IS NULL and

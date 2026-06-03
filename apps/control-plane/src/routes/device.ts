@@ -24,10 +24,12 @@
  * the remote killswitch probe: enabled = (revoked_at IS NULL AND disabled_at IS
  * NULL) for the device.
  */
+import { randomUUID } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import {
   AfkState,
   AttentionKind,
+  DecisionBehavior,
   DeviceApiRoute,
   SESSION_TITLE_MAX_LEN,
   SessionState,
@@ -50,23 +52,32 @@ import {
 import {
   consumePairingTokenAndCreateDevice,
   applySessionStatePing,
+  findVerdictForRequest,
   getDeviceState,
   getSessionForDevice,
   insertAttentionEvent,
   insertSessionActivity,
   listUndeliveredInbox,
   markInboxDelivered,
+  resolveAttention,
   setDeviceAfk,
   touchSession,
   upsertSession,
 } from '../db/repo.ts';
 import {
   ensureListener,
+  waitForSessionEvent,
   waitForSessionOrDeviceEvent,
 } from '../db/listener.ts';
 import { streamSSE } from 'hono/streaming';
 import { getTransport } from '../transport.ts';
 import { relayAgentMessage, runAgentEventTurn } from '../orchestrator/index.ts';
+import {
+  PERMISSION_DEADLINE_MS,
+  assertDeadlineBelowHookTimeout,
+  deadlineDenyResponse,
+  verdictResponse,
+} from './permission.ts';
 
 /** SSE keepalive cadence (ms) — ping well under the Fly proxy idle ceiling
  *  (~60s) so an idle stream isn't dropped mid-flight (the recurring "operation
@@ -152,6 +163,7 @@ deviceRoutes.use(`${DeviceApiRoute.EVENTS}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.ACK}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.HEARTBEAT}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.STATE}`, requireDevice);
+deviceRoutes.use(`${DeviceApiRoute.PERMISSION}`, requireDevice);
 
 function device(c: Context<DeviceHonoEnv>): DeviceAuth {
   return c.get(DEVICE_CTX_KEY);
@@ -308,6 +320,156 @@ deviceRoutes.post(DeviceApiRoute.MESSAGE, async (c) => {
     },
   );
   return c.json({ relayed: true });
+});
+
+// --- PERMISSION (BLOCKING approve-and-resume for Codex) ------------------------
+// Codex has NO native verdict-push channel (unlike CC's Channels permission
+// capability). Its `PermissionRequest` hook POSTs the pending destructive tool
+// here and BLOCKS on the HTTP response: when we return {behavior}, the hook
+// allows/denies the parked command. We do NOT decide allow ourselves — we SURFACE
+// the request through the SAME machinery CC uses (a PERMISSION attention + the
+// orchestrator's tap-back-able notification) and WAIT for the user's verdict,
+// which the UNCHANGED CC path (orchestrator → resolveAttention) writes as a
+// session_inbox row kind='verdict'. The deterministic binding gate (safety.ts)
+// applies identically.
+//
+// Sequence: surface (insertAttentionEvent + runAgentEventTurn) → wait (park on
+// the session's NOTIFY, re-query for the verdict) → return verdict / deadline.
+//
+// DEADLINE INVARIANT: if no verdict lands within PERMISSION_DEADLINE_MS we return
+// an EXPLICIT deny — never a hang, never an allow. That deadline MUST be shorter
+// than the Codex hook's own timeout (see permission.ts) so a no-answer is a clean
+// remote deny rather than the hook lapsing into the unattended LOCAL prompt.
+deviceRoutes.post(DeviceApiRoute.PERMISSION, async (c) => {
+  const auth = device(c);
+  const body = (await c.req.json().catch(() => ({}))) as {
+    sessionId?: unknown;
+    toolName?: unknown;
+    summary?: unknown;
+  };
+  const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+  if (!sessionId) return c.json({ error: 'missing_session_id' }, 400);
+  if (!isUuid(sessionId)) return c.json({ error: 'invalid_session_id' }, 400);
+  const toolName = typeof body.toolName === 'string' ? body.toolName.trim() : '';
+  if (!toolName) return c.json({ error: 'missing_tool_name' }, 400);
+  // `summary` is the one-line description of what the tool will do (the device
+  // already reduces it). Optional; clamped at the write path (insertAttentionEvent).
+  const summary = typeof body.summary === 'string' ? body.summary.trim() : '';
+
+  // Ensure the session exists (the Codex hook may name a session the heartbeat
+  // hasn't registered yet), like the ATTENTION route. WAITING: the agent is
+  // parked on this permission until the verdict lands.
+  await upsertSession({
+    sessionId,
+    deviceId: auth.deviceId,
+    accountId: auth.accountId,
+    state: SessionState.WAITING,
+  });
+
+  // SURFACE: record a PERMISSION attention via the SAME write path CC uses. The
+  // server mints request_id — the binding the verdict row carries back (CC's
+  // request_id is the Channels protocol id; for Codex there is no such channel,
+  // so the server owns it and reads its own verdict by it). This is what lets the
+  // unchanged orchestrator/resolveAttention produce a matchable verdict.
+  const requestId = randomUUID();
+  let attention: AttentionEvent;
+  try {
+    attention = await insertAttentionEvent({
+      deviceId: auth.deviceId,
+      accountId: auth.accountId,
+      event: {
+        id: randomUUID(), // overwritten by the DB default; required by the type
+        deviceId: auth.deviceId,
+        sessionId,
+        kind: AttentionKind.PERMISSION,
+        toolName,
+        ...(summary ? { description: summary } : {}),
+        requestId,
+        createdAt: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    console.error('[device/permission] store failed', err);
+    return c.json({ error: 'store_failed' }, 500);
+  }
+
+  // Surface to the phone through the orchestrator — the EXACT CC path: a
+  // destructive permission gets the code-generated composeNotification with a
+  // notify_message_id binding (notifyStatic → setAttentionNotifyMessageId), so a
+  // tap-back binds deterministically and resolves through safety.ts. NOT
+  // AFK-gated: the Codex hook blocks unconditionally, so the verdict must always
+  // be surfaced. Fire-and-forget (the turn owns its own errors); we then WAIT for
+  // the verdict the user issues, independent of how it was surfaced.
+  void runAgentEventTurn(attention, auth.accountId, getTransport()).catch((err) => {
+    console.error('[device/permission] surface turn failed', err);
+  });
+
+  // WAIT: block until the verdict row (kind='verdict', this request_id) lands or
+  // the deadline fires. Reuse the listener's session waiter (woken by the
+  // session_inbox INSERT NOTIFY that resolveAttention's verdict triggers),
+  // park-before-query against findVerdictForRequest — the same pattern as
+  // waitForDelivered, but the verdict's EXISTENCE is the signal (no ACK needed:
+  // the blocking hook is the consumer, not the device inbox injector).
+  //
+  // The wait is driven off ONE AbortController so a client disconnect tears the
+  // waiter down immediately (no leak); the deadline is a hard floor; and on every
+  // path we re-query the DB (the arbiter of truth) rather than trust the NOTIFY.
+  await ensureListener();
+  // Guard the deadline invariant at the call site (throws loud if a future edit
+  // raises the deadline above the hook timeout). Returns the validated deadline.
+  const deadlineMs = assertDeadlineBelowHookTimeout(PERMISSION_DEADLINE_MS);
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const onClientAbort = (): void => controller.abort();
+  c.req.raw.signal.addEventListener('abort', onClientAbort, { once: true });
+
+  try {
+    // Park the waiter BEFORE the first re-check (park-before-query: a verdict that
+    // lands between two checks must not be missed).
+    while (!controller.signal.aborted && !c.req.raw.signal.aborted) {
+      const remaining = deadlineMs - (Date.now() - startedAt);
+      if (remaining <= 0) break; // deadline → explicit deny below
+      const parked = waitForSessionEvent(sessionId, remaining, controller.signal);
+      const existing = await findVerdictForRequest({
+        sessionId,
+        accountId: auth.accountId,
+        requestId,
+      });
+      if (existing) {
+        controller.abort(); // tear down the parked waiter
+        return c.json(verdictResponse(existing));
+      }
+      // No verdict yet: wait for the next session NOTIFY (or the remaining
+      // deadline / a client disconnect), then re-query.
+      await parked;
+      const after = await findVerdictForRequest({
+        sessionId,
+        accountId: auth.accountId,
+        requestId,
+      });
+      if (after) {
+        controller.abort();
+        return c.json(verdictResponse(after));
+      }
+    }
+
+    // DEADLINE (or client disconnect): return an EXPLICIT deny — never a hang,
+    // never an allow. Resolve the now-orphaned attention as DENY so it doesn't
+    // linger in the pending pile and a late tap-back can't approve a command that
+    // already returned (idempotent: resolveAttention only the first resolve wins,
+    // so a verdict that beat us to it has already returned above).
+    await resolveAttention({
+      accountId: auth.accountId,
+      attentionId: attention.id,
+      behavior: DecisionBehavior.DENY,
+    }).catch((err) => {
+      console.error('[device/permission] deadline deny cleanup failed', err);
+    });
+    return c.json(deadlineDenyResponse());
+  } finally {
+    controller.abort(); // no leaked waiter on any path (verdict, deadline, abort)
+    c.req.raw.signal.removeEventListener('abort', onClientAbort);
+  }
 });
 
 // --- ACTIVITY (the transcript tap) --------------------------------------------

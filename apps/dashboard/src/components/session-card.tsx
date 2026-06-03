@@ -33,6 +33,7 @@ const STATE_LABEL: Record<SessionState, string> = {
  *  broken <img>. Add a key here once the agent's brand SVG lands in `public/icons`. */
 const AGENT_ICON: Partial<Record<AgentKind, string>> = {
   [AgentKind.CLAUDE_CODE]: "/icons/claude-code.svg",
+  [AgentKind.CODEX]: "/icons/codex.svg",
 };
 
 export function SessionCard({ session }: { session: SessionInfo }) {

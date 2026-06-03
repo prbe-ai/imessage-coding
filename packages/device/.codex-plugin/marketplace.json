@@ -1,0 +1,16 @@
+{
+  "name": "imsg",
+  "description": "iMessage-driven remote control + steering for Codex CLI sessions.",
+  "owner": {
+    "name": "imessage-coding"
+  },
+  "plugins": [
+    {
+      "name": "imsg-device",
+      "description": "Drive Codex from iMessage. While you're away from the keyboard, destructive-tool approvals and questions are relayed to your phone; reply to approve, deny, answer, or steer. Destructive operations stay fail-closed.",
+      "source": ".",
+      "category": "productivity",
+      "tags": ["imessage", "remote", "codex", "afk"]
+    }
+  ]
+}

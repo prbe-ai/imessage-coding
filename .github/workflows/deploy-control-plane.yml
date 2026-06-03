@@ -1,0 +1,45 @@
+name: deploy-control-plane
+
+# Auto-deploy the control plane to Fly (imsg-control-plane) on push to main.
+# Path-filtered: only runs when the control-plane app, the shared package it
+# imports, the lockfile, or this workflow change. Gated on typecheck so a
+# broken build never ships. There is no release_command / migration step in
+# fly.toml — deploy is pure app rollout.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/control-plane/**'
+      - 'packages/shared/**'
+      - 'bun.lock'
+      - 'package.json'
+      - '.github/workflows/deploy-control-plane.yml'
+  workflow_dispatch: {}
+
+# Never let two control-plane deploys overlap (Fly release lease contention).
+concurrency:
+  group: deploy-control-plane
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: typecheck + deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: install
+        run: bun install --frozen-lockfile
+      - name: typecheck (shared + control-plane)
+        run: |
+          bun run --filter '@imsg/shared' typecheck
+          bun run --filter '@imsg/control-plane' typecheck
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: deploy
+        # Build context is the monorepo root (the Dockerfile resolves the Bun
+        # workspace), so deploy from root with -c + --dockerfile.
+        run: flyctl deploy --remote-only -c apps/control-plane/fly.toml --dockerfile apps/control-plane/Dockerfile
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

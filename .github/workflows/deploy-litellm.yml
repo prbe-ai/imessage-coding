@@ -1,0 +1,32 @@
+name: deploy-litellm
+
+# Auto-deploy the private LiteLLM proxy to Fly (imsg-litellm) on push to main.
+# Path-filtered: only runs when the litellm app or this workflow change — the
+# proxy is the upstream litellm-database image + config.yaml, so it rolls
+# rarely and independently of the Bun workspace. Build context is apps/litellm/.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/litellm/**'
+      - '.github/workflows/deploy-litellm.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-litellm
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: deploy
+        working-directory: apps/litellm
+        # Redeploy preserves the existing private flycast IP (no --no-public-ips,
+        # which is first-time only).
+        run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_LITELLM }}

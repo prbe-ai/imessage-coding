@@ -21,7 +21,9 @@ MARKETPLACE_NAME="imsg"
 CLAUDE_DIR="${HOME}/.claude"
 SETTINGS="${CLAUDE_DIR}/settings.json"
 BACKUP="${SETTINGS}.imsg-backup"
-DEVICE_DIR="${IMSG_DEVICE_DIR:-${CLAUDE_DIR}/plugins/${PLUGIN_NAME}}"
+DEVICE_DIR="${IMSG_DEVICE_DIR:-${HOME}/.imsg}"
+# Pre-0.1.7 state lived nested under Claude Code's plugin dir; sweep it too.
+LEGACY_DEVICE_DIR="${CLAUDE_DIR}/plugins/${PLUGIN_NAME}"
 MARKETPLACE_DIR="${CLAUDE_DIR}/plugins/marketplaces/${MARKETPLACE_NAME}"
 RC_BLOCK_ID="imsg-device channels alias"
 
@@ -75,7 +77,7 @@ else
 fi
 
 # --- 4. remove staged code + local device state ----------------------------
-rm -rf "$MARKETPLACE_DIR" "$DEVICE_DIR"
+rm -rf "$MARKETPLACE_DIR" "$DEVICE_DIR" "$LEGACY_DEVICE_DIR"
 say "removed plugin files + local device state (token, outbox)"
 
 say "done. Restart Claude Code. Re-install anytime from the dashboard."

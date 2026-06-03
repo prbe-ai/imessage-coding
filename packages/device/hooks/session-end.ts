@@ -7,8 +7,11 @@
  * it, which is why the daemon ALSO self-exits via its own lsof orphan check.
  */
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { sessionPidFile, sessionShutdownFile } from '../src/config.ts';
+import { migrateLegacyDeviceDir, sessionPidFile, sessionShutdownFile } from '../src/config.ts';
 import { clearHandshakeForProject } from '../src/handshake.ts';
+
+// Relocate pre-0.1.7 state into ~/.imsg before touching session files.
+migrateLegacyDeviceDir();
 
 const raw = await Bun.stdin.text();
 let input: Record<string, unknown> = {};

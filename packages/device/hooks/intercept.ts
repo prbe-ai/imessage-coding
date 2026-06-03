@@ -31,10 +31,12 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { AfkState, AttentionKind } from '@imsg/shared';
-import { logDir, pickEagerSessionId } from '../src/config.ts';
+import { logDir, migrateLegacyDeviceDir, pickEagerSessionId } from '../src/config.ts';
 import { readAfk } from '../src/state.ts';
 import { postState } from './state-ping.ts';
 
+// Relocate pre-0.1.7 state (incl. afk.state) into ~/.imsg before any read below.
+migrateLegacyDeviceDir();
 mkdirSync(logDir(), { recursive: true });
 const HOOK_LOG = join(logDir(), 'pretooluse.log');
 

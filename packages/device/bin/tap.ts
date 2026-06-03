@@ -41,6 +41,7 @@ import {
 import {
   deviceApiUrl,
   logDir,
+  migrateLegacyDeviceDir,
   sessionCursorFile,
   sessionOutboxFile,
   sessionShutdownFile,
@@ -72,6 +73,8 @@ const SESSION_ID = arg('session-id');
 const TRANSCRIPT = arg('transcript');
 const CWD = arg('cwd');
 
+// Relocate pre-0.1.7 state into ~/.imsg before reading this session's cursor.
+migrateLegacyDeviceDir();
 mkdirSync(sessionsDir(), { recursive: true });
 mkdirSync(logDir(), { recursive: true });
 const LOG = join(logDir(), `tap-${SESSION_ID}.log`);

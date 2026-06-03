@@ -12,8 +12,19 @@
  *   precedence: IMSG_CONTROL_PLANE_URL > CONTROL_PLANE_URL > baked > localhost
  */
 import { describe, expect, test } from 'bun:test';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { pickEagerSessionId, resolveControlPlaneUrl } from './config.ts';
+import {
+  defaultDeviceDir,
+  deviceDir,
+  legacyDeviceDir,
+  pickEagerSessionId,
+  relocateLegacyState,
+  resolveControlPlaneUrl,
+  shouldMigrateLegacy,
+} from './config.ts';
 
 const DEFAULT = 'http://localhost:8080';
 const BAKED = { controlPlaneUrl: 'https://baked.example.com' };
@@ -84,5 +95,103 @@ describe('pickEagerSessionId', () => {
 
   test('explicit IMSG_SESSION_ID override is honored as-is (not UUID-validated)', () => {
     expect(pickEagerSessionId({ IMSG_SESSION_ID: 'manual-test-id' })).toBe('manual-test-id');
+  });
+});
+
+describe('device dir', () => {
+  test('default is the neutral, agent-agnostic ~/.imsg', () => {
+    expect(defaultDeviceDir()).toBe(join(homedir(), '.imsg'));
+  });
+
+  test('legacy dir is the pre-0.1.7 location under ~/.claude/plugins', () => {
+    expect(legacyDeviceDir()).toBe(join(homedir(), '.claude', 'plugins', 'imsg-device'));
+  });
+
+  test('IMSG_DEVICE_DIR overrides the default (trimmed)', () => {
+    const prev = process.env.IMSG_DEVICE_DIR;
+    try {
+      process.env.IMSG_DEVICE_DIR = '  /tmp/custom-imsg  ';
+      expect(deviceDir()).toBe('/tmp/custom-imsg');
+    } finally {
+      if (prev === undefined) delete process.env.IMSG_DEVICE_DIR;
+      else process.env.IMSG_DEVICE_DIR = prev;
+    }
+  });
+
+  test('falls back to the default when IMSG_DEVICE_DIR is unset', () => {
+    const prev = process.env.IMSG_DEVICE_DIR;
+    try {
+      delete process.env.IMSG_DEVICE_DIR;
+      expect(deviceDir()).toBe(defaultDeviceDir());
+    } finally {
+      if (prev !== undefined) process.env.IMSG_DEVICE_DIR = prev;
+    }
+  });
+});
+
+describe('shouldMigrateLegacy', () => {
+  const NEW = join(homedir(), '.imsg');
+  const LEGACY = join(homedir(), '.claude', 'plugins', 'imsg-device');
+  const base = {
+    target: NEW,
+    newDefault: NEW,
+    legacyDir: LEGACY,
+    targetHasSentinel: false,
+    legacyExists: true,
+  };
+
+  test('migrates the default relocation when legacy exists and no sentinel', () => {
+    expect(shouldMigrateLegacy(base)).toBe(true);
+  });
+
+  test('skips an explicit custom dir (target !== newDefault) — never auto-populated', () => {
+    expect(shouldMigrateLegacy({ ...base, target: '/tmp/custom-imsg' })).toBe(false);
+  });
+
+  test('skips when already migrated (sentinel present)', () => {
+    expect(shouldMigrateLegacy({ ...base, targetHasSentinel: true })).toBe(false);
+  });
+
+  test('skips when there is nothing to migrate (legacy absent)', () => {
+    expect(shouldMigrateLegacy({ ...base, legacyExists: false })).toBe(false);
+  });
+
+  test('skips the degenerate case where target equals the legacy dir', () => {
+    expect(shouldMigrateLegacy({ ...base, target: LEGACY, newDefault: LEGACY })).toBe(false);
+  });
+});
+
+describe('relocateLegacyState', () => {
+  test('non-destructively copies the legacy tree, stamps the sentinel, and never clobbers', () => {
+    const sb = mkdtempSync(join(tmpdir(), 'imsg-relocate-'));
+    try {
+      const legacy = join(sb, 'legacy');
+      const target = join(sb, 'newdir');
+      const sentinel = join(target, '.migrated');
+      mkdirSync(join(legacy, 'sessions'), { recursive: true });
+      writeFileSync(join(legacy, 'afk.state'), 'on');
+      writeFileSync(join(legacy, '.token'), 'secret');
+      writeFileSync(join(legacy, 'sessions', 's1.cursor.json'), '{"byteOffset":42}');
+
+      // 1) first copy brings everything over + stamps the sentinel; legacy intact.
+      expect(relocateLegacyState(legacy, target, sentinel)).toBe(true);
+      expect(readFileSync(join(target, 'afk.state'), 'utf8')).toBe('on');
+      expect(readFileSync(join(target, '.token'), 'utf8')).toBe('secret');
+      expect(readFileSync(join(target, 'sessions', 's1.cursor.json'), 'utf8')).toBe('{"byteOffset":42}');
+      expect(existsSync(sentinel)).toBe(true);
+      expect(existsSync(join(legacy, 'afk.state'))).toBe(true);
+
+      // 2) fresher state already in target must NOT be clobbered (force:false).
+      writeFileSync(join(target, 'afk.state'), 'off');
+      relocateLegacyState(legacy, target, sentinel);
+      expect(readFileSync(join(target, 'afk.state'), 'utf8')).toBe('off');
+
+      // 3) a file present only in legacy is filled in on a later run.
+      writeFileSync(join(legacy, 'newfile'), 'added-later');
+      relocateLegacyState(legacy, target, sentinel);
+      expect(readFileSync(join(target, 'newfile'), 'utf8')).toBe('added-later');
+    } finally {
+      rmSync(sb, { recursive: true, force: true });
+    }
   });
 });

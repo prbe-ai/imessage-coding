@@ -14,10 +14,19 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { pluginRoot, sessionPidFile, sessionShutdownFile, sessionsDir } from '../src/config.ts';
+import {
+  migrateLegacyDeviceDir,
+  pluginRoot,
+  sessionPidFile,
+  sessionShutdownFile,
+  sessionsDir,
+} from '../src/config.ts';
 import { loadToken } from '../src/creds.ts';
 import { localDisabled } from '../src/killswitch.ts';
 import { writeHandshake } from '../src/handshake.ts';
+
+// Relocate pre-0.1.7 state into ~/.imsg before the handshake / tap touch it.
+migrateLegacyDeviceDir();
 
 const raw = await Bun.stdin.text();
 let input: Record<string, unknown> = {};

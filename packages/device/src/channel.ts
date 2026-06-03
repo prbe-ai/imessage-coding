@@ -53,6 +53,7 @@ import {
   deviceApiUrl,
   deviceIdFile,
   logDir,
+  migrateLegacyDeviceDir,
   pickEagerSessionId,
   sessionTitleFile,
 } from './config.ts';
@@ -63,6 +64,9 @@ import { HaltError, drain, enqueue } from './outbox.ts';
 import { egressEnabled } from './killswitch.ts';
 import { sanitizeOptional, sanitizeText } from './sanitize.ts';
 import { readAfk, writeAfk, writePending } from './state.ts';
+
+// Relocate pre-0.1.7 state from ~/.claude/plugins/imsg-device → ~/.imsg (once).
+migrateLegacyDeviceDir();
 
 // --- logging (stderr + file; never the token) -------------------------------
 mkdirSync(logDir(), { recursive: true });
@@ -143,7 +147,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.6' },
+  { name: 'imsg-device', version: '0.1.7' },
   {
     capabilities: {
       experimental: {

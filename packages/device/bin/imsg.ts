@@ -11,6 +11,7 @@
  * Thin dispatcher over src/cli.ts so the command logic stays testable and the
  * channel server / hook can import the same helpers.
  */
+import { migrateLegacyDeviceDir } from '../src/config.ts';
 import { afk, pair, status, statusline } from '../src/cli.ts';
 
 const USAGE = `imsg — imessage-coding device CLI
@@ -22,6 +23,9 @@ const USAGE = `imsg — imessage-coding device CLI
 `;
 
 async function main(): Promise<number> {
+  // Relocate pre-0.1.7 state into ~/.imsg before any command reads/writes it
+  // (statusline runs on every prompt; pair runs during install).
+  migrateLegacyDeviceDir();
   const [cmd, ...rest] = process.argv.slice(2);
   switch (cmd) {
     case 'pair':

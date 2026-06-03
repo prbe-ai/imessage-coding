@@ -15,8 +15,11 @@
  * rationale (state pings direct-post; only the activity transcript is batched).
  */
 import { AttentionKind } from '@imsg/shared';
-import { pickEagerSessionId } from '../src/config.ts';
+import { migrateLegacyDeviceDir, pickEagerSessionId } from '../src/config.ts';
 import { postState } from './state-ping.ts';
+
+// Relocate pre-0.1.7 state into ~/.imsg (UserPromptSubmit fires early in a session).
+migrateLegacyDeviceDir();
 
 const USER_PROMPT_SUBMIT = 'UserPromptSubmit';
 const STOP = 'Stop';

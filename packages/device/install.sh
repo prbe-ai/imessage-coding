@@ -54,8 +54,11 @@ PLUGIN_NAME="imsg-device"
 MARKETPLACE_NAME="imsg"
 CLAUDE_DIR="${HOME}/.claude"
 SETTINGS="${CLAUDE_DIR}/settings.json"
-# Mutable state dir (matches src/config.ts deviceDir()); survives reinstalls.
-DEVICE_DIR="${IMSG_DEVICE_DIR:-${CLAUDE_DIR}/plugins/${PLUGIN_NAME}}"
+# Mutable state dir (matches src/config.ts deviceDir()): the neutral,
+# agent-agnostic ~/.imsg so Claude Code + other agents (e.g. Codex) share one
+# machine-wide AFK switch + logs location. Survives reinstalls. The plugin's own
+# migrateLegacyDeviceDir() relocates pre-0.1.7 state from ~/.claude/plugins/.
+DEVICE_DIR="${IMSG_DEVICE_DIR:-${HOME}/.imsg}"
 # Where we stage the plugin code as a local single-plugin marketplace.
 MARKETPLACE_DIR="${CLAUDE_DIR}/plugins/marketplaces/${MARKETPLACE_NAME}"
 # Claude Code requires a marketplace plugin `source` to be a SUBDIRECTORY

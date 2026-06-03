@@ -2,12 +2,17 @@
  * @imsg/device — configuration: paths, env, control-plane URL.
  *
  * Every path derives from a single
- * IMSG_DEVICE_DIR (env override) or ~/.claude/plugins/imsg-device/, so the
- * install script, the channel server, the hook, and the CLI all agree on
- * where state lives WITHOUT coordinating. The plugin root (CLAUDE_PLUGIN_ROOT)
- * holds code; the device dir holds mutable state (token, outbox, state files).
+ * IMSG_DEVICE_DIR (env override) or the neutral, agent-agnostic ~/.imsg/, so the
+ * install script, the channel server, the hook, and the CLI all agree on where
+ * state lives WITHOUT coordinating. The neutral folder (NOT ~/.claude/...) lets
+ * Claude Code AND other agents (e.g. Codex) share one machine-wide AFK switch +
+ * one logs/sessions location. The plugin root (CLAUDE_PLUGIN_ROOT) holds code;
+ * the device dir holds mutable state (token, outbox, logs, state files).
+ *
+ * State written by pre-0.1.7 versions under ~/.claude/plugins/imsg-device/ is
+ * relocated on first run by migrateLegacyDeviceDir() (non-destructive copy).
  */
-import { readFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DeviceApiRoute } from '@imsg/shared';
@@ -28,15 +33,104 @@ export const HEARTBEAT_INTERVAL_MS = 10_000;
 /** Killswitch poll TTL (fail-OPEN disable check). Matches tap-plugin's 300s. */
 export const KILLSWITCH_TTL_MS = 300_000;
 
+/** Default neutral, agent-agnostic state dir (shared by Claude Code, Codex, …). */
+export function defaultDeviceDir(): string {
+  return join(homedir(), '.imsg');
+}
+
+/** Pre-0.1.7 location, nested under Claude Code's plugin dir. We migrate AWAY from
+ *  this so the folder is no longer Claude-Code-specific (see migrateLegacyDeviceDir). */
+export function legacyDeviceDir(): string {
+  return join(homedir(), '.claude', 'plugins', PLUGIN_NAME);
+}
+
 /**
- * Mutable-state directory. IMSG_DEVICE_DIR overrides; otherwise the canonical
- * per-user location under ~/.claude/plugins. NOTE: deliberately separate from
- * CLAUDE_PLUGIN_ROOT (code) so a marketplace reinstall never clobbers the token.
+ * Mutable-state directory. IMSG_DEVICE_DIR overrides; otherwise the neutral
+ * ~/.imsg/. NOTE: deliberately separate from CLAUDE_PLUGIN_ROOT (code) so a
+ * marketplace reinstall never clobbers the token.
  */
 export function deviceDir(): string {
   const env = process.env.IMSG_DEVICE_DIR;
   if (env && env.trim()) return env.trim();
-  return join(homedir(), '.claude', 'plugins', PLUGIN_NAME);
+  return defaultDeviceDir();
+}
+
+/** Sentinel written into the new dir once the one-time legacy relocation ran. */
+const MIGRATION_SENTINEL = '.migrated';
+
+/**
+ * Pure decision: should we relocate the legacy dir's contents into `target`?
+ * Only the DEFAULT relocation (~/.claude/plugins/imsg-device → ~/.imsg) is
+ * automatic — an explicit custom IMSG_DEVICE_DIR is honored as-is and never
+ * auto-populated from legacy. Skips when already migrated (sentinel present) or
+ * there is nothing to migrate. Pure (inputs injected) so it's unit-testable.
+ */
+export function shouldMigrateLegacy(opts: {
+  target: string;
+  newDefault: string;
+  legacyDir: string;
+  targetHasSentinel: boolean;
+  legacyExists: boolean;
+}): boolean {
+  const { target, newDefault, legacyDir, targetHasSentinel, legacyExists } = opts;
+  if (target !== newDefault) return false; // explicit custom dir — leave it alone
+  if (target === legacyDir) return false; // nothing to relocate
+  if (targetHasSentinel) return false; // already done
+  return legacyExists;
+}
+
+let _migrated = false;
+
+/**
+ * NON-DESTRUCTIVE copy of `legacyDir`'s contents into `target`, then stamp
+ * `sentinelPath`. force:false + errorOnExist:false → fill in what's missing,
+ * NEVER clobber state already in the new dir (a partial prior run, or fresh state
+ * written first). Returns true iff it ran without error. Never throws. Split out
+ * from path/env resolution so it's exercisable with explicit sandbox paths.
+ *
+ * The user runs many concurrent CC sessions, so the MCP server + several hooks
+ * can race this on first upgrade (the sentinel is written last). That's tolerated:
+ * per-file copy is idempotent and force:false guarantees no writer clobbers
+ * another's bytes (or fresh state), so the merged result is identical either way.
+ */
+export function relocateLegacyState(legacyDir: string, target: string, sentinelPath: string): boolean {
+  try {
+    mkdirSync(target, { recursive: true });
+    cpSync(legacyDir, target, { recursive: true, force: false, errorOnExist: false });
+    writeFileSync(sentinelPath, `migrated from ${legacyDir} at ${new Date().toISOString()}\n`, 'utf8');
+    return true;
+  } catch {
+    return false; // best-effort — legacy dir is untouched; a later process retries
+  }
+}
+
+/**
+ * One-time, idempotent, NON-DESTRUCTIVE relocation of pre-0.1.7 state from
+ * ~/.claude/plugins/imsg-device/ into the neutral ~/.imsg/. Copies (never moves)
+ * so the legacy dir stays intact and recovery is trivial. Memoized per process —
+ * a migration failure must never crash a hook or the MCP server (the token is
+ * also in the macOS keychain, so a missed token file self-heals). Call this early
+ * at every executable entrypoint, before any state read.
+ */
+export function migrateLegacyDeviceDir(): void {
+  if (_migrated) return;
+  _migrated = true; // one attempt per process, whatever the outcome
+  const target = deviceDir();
+  const legacyDir = legacyDeviceDir();
+  const sentinel = join(target, MIGRATION_SENTINEL);
+  let shouldRun = false;
+  try {
+    shouldRun = shouldMigrateLegacy({
+      target,
+      newDefault: defaultDeviceDir(),
+      legacyDir,
+      targetHasSentinel: existsSync(sentinel),
+      legacyExists: existsSync(legacyDir),
+    });
+  } catch {
+    return; // a stat failure must not crash the caller
+  }
+  if (shouldRun) relocateLegacyState(legacyDir, target, sentinel);
 }
 
 /** Plugin code root (set by Claude Code when invoking hooks / MCP server). */

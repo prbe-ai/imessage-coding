@@ -55,22 +55,27 @@ tool so relaying never prompts, and exchanges the pairing token for a
 
 ## State + config
 
-All mutable state lives under `IMSG_DEVICE_DIR` (default
-`~/.claude/plugins/imsg-device/`), separate from the plugin code root
-(`CLAUDE_PLUGIN_ROOT`) so a reinstall never clobbers your token:
+All mutable state lives under `IMSG_DEVICE_DIR` (default `~/.imsg/`) — a neutral,
+agent-agnostic folder (NOT nested under `~/.claude/`) so Claude Code and other
+agents (e.g. Codex) share one machine-wide AFK switch and one logs location. It's
+separate from the plugin code root (`CLAUDE_PLUGIN_ROOT`) so a reinstall never
+clobbers your token. State written by versions before 0.1.7 under
+`~/.claude/plugins/imsg-device/` is relocated here on first run (non-destructive
+copy; the legacy dir is left intact).
 
 - `.token` (0600) + Keychain — the `device_token`
 - `afk.state` / `pending.state` — fast local state the hook +
   statusline read
 - `outbox.jsonl` — durable attention-event queue (exponential backoff, cap 300s)
-- `logs/` — channel + hook logs (token never logged)
+- `sessions/` — per-session tap state (cursor, activity outbox, title, pid)
+- `logs/` — channel + hook + per-session tap logs (token never logged)
 
 ### Env
 
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `IMSG_CONTROL_PLANE_URL` | `http://localhost:8080` | control plane base URL |
-| `IMSG_DEVICE_DIR` | `~/.claude/plugins/imsg-device` | mutable state dir |
+| `IMSG_DEVICE_DIR` | `~/.imsg` | mutable state dir (neutral, agent-agnostic) |
 | `IMSG_DEVICE_TOKEN` | — | override the device token (CI/testing) |
 | `IMSG_SESSION_ID` | random uuid | session id for the channel server |
 

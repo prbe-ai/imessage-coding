@@ -37,8 +37,12 @@ primary_region = "sjc"
   path = "/health/liveliness"
   interval = "15s"
   timeout = "5s"
-  grace_period = "30s"
+  # Cold start is ~2min (heavy import); give it room before checks count so a
+  # deploy doesn't flap the proxy unhealthy mid-boot.
+  grace_period = "120s"
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "512mb"
+  # litellm-database boots heavy: it OOM-loops at 512MB and even 1GB (peaks
+  # ~870MB RSS on startup before it's listening). 2GB boots clean. Do not lower.
+  memory = "2048mb"

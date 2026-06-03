@@ -93,8 +93,10 @@ export interface SessionInfo {
 export const SESSION_TITLE_MAX_LEN = 80;
 
 /**
- * One surfaced unit of session activity (the AFK transcript tap). The device
- * derives these from the Claude Code transcript and ships them ONLY while AFK.
+ * One surfaced unit of session activity (the transcript tap). The device derives
+ * these from the Claude Code transcript and ships them in REALTIME whenever the
+ * killswitch permits (no longer AFK-gated) — so the control plane's activity log
+ * stays current for get_session_data and the orchestrator snapshot.
  * `lineNo`+`blockIdx` is the transcript position — a stable idempotency key so a
  * re-read (crash before cursor commit) never double-inserts server-side.
  *

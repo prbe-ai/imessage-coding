@@ -4,8 +4,8 @@
  *
  * The assistant runs a coding-agent-style TURN: triggered by an event (a user
  * text, a coding-agent attention, or a coding-agent status message), it loops —
- * calling tools and sending messages via the `text_user` tool — until it emits a
- * model turn with NO tool calls (the turn is over). A per-turn round cap bounds runaway loops.
+ * calling tools and sending messages via the `message_user` tool — until it emits
+ * a model turn with NO tool calls (the turn is over). A per-turn round cap bounds runaway loops.
  *
  * Transport is OpenAI-compatible tool-calling Chat Completions over env
  * LLM_API_BASE / LLM_MODEL / LLM_API_KEY — in production a private LiteLLM proxy
@@ -16,6 +16,7 @@
  * that into a safe outcome (a clarify text to the user, or the static fallback
  * notification on the agent-event path), never an unsafe action.
  */
+import { ToolName } from '@imsg/shared';
 import { loadEnv } from '../env.ts';
 
 /** An OpenAI-style tool call emitted by the model. */
@@ -97,8 +98,8 @@ export async function runAssistantTurn(args: {
   execTool: ToolExecutor;
   /**
    * Called with terminal assistant text when the turn ends with prose instead
-   * of a `text_user` call — a safety net so a stray final message is not
-   * silently dropped. Only invoked when the turn produced no `text_user`.
+   * of a `message_user` call — a safety net so a stray final message is not
+   * silently dropped. Only invoked when the turn produced no `message_user`.
    */
   onUnsentText?: (text: string) => Promise<void>;
   /**
@@ -126,7 +127,7 @@ export async function runAssistantTurn(args: {
   const { messages, tools, user, execTool, signal } = args;
   const commit = args.commit ?? { committed: false };
   let toolCalls = 0;
-  let sawTextUser = false;
+  let sawMessageUser = false;
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
     // Interrupt point — only reachable while uncommitted (no side effect yet).
@@ -148,10 +149,10 @@ export async function runAssistantTurn(args: {
     const calls = msg.tool_calls ?? [];
 
     if (calls.length === 0) {
-      // Turn over. If the model ended with prose and never used text_user,
+      // Turn over. If the model ended with prose and never used message_user,
       // surface it so the user isn't left hanging (best-effort).
       const text = (msg.content ?? '').trim();
-      if (text && !sawTextUser && args.onUnsentText) {
+      if (text && !sawMessageUser && args.onUnsentText) {
         // COMMIT before the first (and only) side-effecting await on this path.
         commit.committed = true;
         await args.onUnsentText(text);
@@ -167,7 +168,7 @@ export async function runAssistantTurn(args: {
 
     for (const tc of calls) {
       toolCalls++;
-      if (tc.function?.name === 'text_user') sawTextUser = true;
+      if (tc.function?.name === ToolName.MESSAGE_USER) sawMessageUser = true;
       let result: string;
       try {
         const parsed =

@@ -308,12 +308,13 @@ deviceRoutes.post(DeviceApiRoute.MESSAGE, async (c) => {
   return c.json({ relayed: true });
 });
 
-// --- ACTIVITY (the AFK transcript tap) ----------------------------------------
+// --- ACTIVITY (the transcript tap) --------------------------------------------
 // A lightweight, per-block stream of what a session is DOING — shipped by the
-// device's tap daemon ONLY while AFK. We register/refresh the session (the tap
-// may report a brand-new one before the heartbeat) and bulk-insert the events
-// (idempotent on transcript position). No phone routing: this is pull-only
-// context the orchestrator reads at turn time, not an attention to surface.
+// device's tap daemon in realtime (killswitch-gated, not AFK-gated). We
+// register/refresh the session (the tap may report a brand-new one before the
+// heartbeat) and bulk-insert the events (idempotent on transcript position). No
+// phone routing: this is pull-only context the orchestrator reads (the snapshot +
+// get_session_data), not an attention to surface.
 deviceRoutes.post(DeviceApiRoute.ACTIVITY, async (c) => {
   const auth = device(c);
   const body = await c.req.json().catch(() => null);

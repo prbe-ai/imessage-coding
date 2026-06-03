@@ -5,9 +5,10 @@
  * Spawned (detached) by the SessionStart hook with the session's real id +
  * transcript path. It tails the Claude Code `.jsonl` transcript, reduces each
  * new block to a lightweight ActivityEvent (see activity.ts), and ships batches
- * to POST /api/device/activity — but ONLY while the device is AFK. At the
- * keyboard it still advances its byte cursor (so flipping AFK on never dumps a
- * backlog of at-keyboard activity), it just ships nothing.
+ * to POST /api/device/activity in REALTIME whenever the killswitch permits — at
+ * the keyboard or AFK — so the control plane's activity log is always current for
+ * get_session_data. Only the device killswitch gates shipping; the byte cursor
+ * advances regardless, so a killswitched stretch is skipped, not queued.
  *
  * One daemon per session (keyed by CC's real session id). State (cursor, outbox)
  * is per-session, so concurrent sessions never share a writer — unlike the MCP
@@ -32,7 +33,6 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
   ActivityKind,
-  AfkState,
   DeviceApiRoute,
   SESSION_TITLE_MAX_LEN,
   type ActivityBatchBody,
@@ -49,7 +49,6 @@ import {
 } from '../src/config.ts';
 import { loadToken } from '../src/creds.ts';
 import { egressEnabled } from '../src/killswitch.ts';
-import { readAfk } from '../src/state.ts';
 import { Classification, backoffMs, postJson } from '../src/httpclient.ts';
 import { readNew } from '../src/transcript.ts';
 import { extractActivity } from '../src/activity.ts';
@@ -401,13 +400,14 @@ async function main(): Promise<number> {
     tick += 1;
 
     // Killswitch (device-level egress, fails OPEN on network error). We still TAIL
-    // and advance the cursor when disabled — we just don't ship or drain. Pairing
-    // that with the AFK gate below means a later killswitch-off / AFK-on never
-    // dumps the backlog that accumulated meanwhile.
+    // and advance the cursor when disabled — we just don't ship or drain, so a
+    // killswitched stretch is skipped (not queued for a later dump).
     const enabled = await egressEnabled(token).catch(() => true);
-    // Ship ONLY while egress is on AND the user is away. Always advance the cursor
-    // regardless, so at-keyboard / killswitched activity is skipped, not queued.
-    const shipping = enabled && readAfk() === AfkState.ON;
+    // Ship the activity log in REALTIME whenever egress is on — NOT gated on AFK —
+    // so the control plane's session_activity is always current for the orchestrator
+    // (get_session_data and the live snapshot), at the keyboard or away. The
+    // killswitch is the only gate; the cursor still advances regardless.
+    const shipping = enabled;
 
     let hadLines = false;
     try {
@@ -416,8 +416,8 @@ async function main(): Promise<number> {
       if (res.lines.length > 0) {
         hadLines = true;
         // Upgrade the session title (CC ai-title/custom-title, else provisional
-        // first message) regardless of AFK — it's a local write, not egress, so
-        // it's outside the ship-gate below.
+        // first message) regardless of the ship gate — it's a local write, not
+        // egress, so it stays outside the killswitch gate below.
         scanForTitle(res.lines);
         // lineNo is a MONOTONIC per-session event index (never reset), so it stays
         // a stable, unique dedup key derived from the (uncommitted-until-success)
@@ -446,8 +446,8 @@ async function main(): Promise<number> {
       }
     }
 
-    // Drain only while egress is enabled — the killswitch pauses delivery, and a
-    // batch enqueued while AFK still ships (it's AFK-era activity).
+    // Drain only while egress is enabled — the killswitch pauses delivery; anything
+    // already enqueued ships on the next enabled tick.
     if (enabled) {
       try {
         const shipped = await drain(token);

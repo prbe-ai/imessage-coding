@@ -9,7 +9,7 @@
  * FULL grant" (Contract #1). A bug here lets a model auto-allow everything while
  * the user is AFK. (It replaces the old validateAction grant cap after the
  * orchestrator moved to tool-calling — the cap is now applied in the
- * respond_to_request handler (action='approve') via this function.)
+ * message_agent action='approve' path via this function.)
  */
 import { describe, expect, test } from 'bun:test';
 import { GrantLevel, MessageChannel, type InboundMessage } from '@imsg/shared';

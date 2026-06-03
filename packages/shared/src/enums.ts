@@ -80,8 +80,9 @@ export type AttentionKind = (typeof AttentionKind)[keyof typeof AttentionKind];
 
 // -----------------------------------------------------------------------------
 // How the server agent resolves a pending request (permission / question / plan)
-// the coding agent is blocked on. One capable `respond_to_request` tool takes one
-// of these actions; the control plane validates it against the request kind.
+// the coding agent is blocked on — the underlying decision vocabulary. The
+// orchestrator exposes a SUBSET on `message_agent`'s `action` (allow/deny/approve);
+// answering is just sending text. The control plane validates against the kind.
 // -----------------------------------------------------------------------------
 export const RequestAction = {
   /** Answer a question/plan with free text (becomes the agent's prompt input). */
@@ -96,7 +97,29 @@ export const RequestAction = {
 export type RequestAction = (typeof RequestAction)[keyof typeof RequestAction];
 
 // -----------------------------------------------------------------------------
-// Session activity (the AFK transcript tap). One per surfaced transcript block:
+// Orchestrator (assistant turn) tool surface. The model talks to the user and to
+// the coding agents through exactly these five tools — two messaging, two read,
+// one write. Reference these names in the schema (prompt.ts) and the dispatcher
+// (orchestrator/index.ts); never hardcode the literal strings.
+//   - MESSAGE_USER         text the user (multiple short messages welcome; can
+//                          surface a pending request as a tap-backable message)
+//   - MESSAGE_AGENT        send text to a coding agent (steer OR answer — it's all
+//                          text), or an allow/deny/approve verdict on a blocked one
+//   - GET_SESSION_STATE    read: what each agent is doing + what it's blocked on
+//   - GET_SESSION_DATA     read: an agent's activity log (recent / grep / line range)
+//   - UPDATE_SESSION_STATE write: change a session setting (afk only, for now)
+// -----------------------------------------------------------------------------
+export const ToolName = {
+  MESSAGE_USER: 'message_user',
+  MESSAGE_AGENT: 'message_agent',
+  GET_SESSION_STATE: 'get_session_state',
+  GET_SESSION_DATA: 'get_session_data',
+  UPDATE_SESSION_STATE: 'update_session_state',
+} as const;
+export type ToolName = (typeof ToolName)[keyof typeof ToolName];
+
+// -----------------------------------------------------------------------------
+// Session activity (the realtime transcript tap). One per surfaced transcript block:
 // a user message, an assistant reply, a tool call marker, or a failed tool call.
 // Deliberately coarse — it captures WHAT a session is doing, not the full data.
 // -----------------------------------------------------------------------------
@@ -122,7 +145,7 @@ export const DeviceApiRoute = {
   ACK: '/api/device/ack',
   HEARTBEAT: '/api/device/heartbeat',
   STATE: '/api/device/state',
-  /** Lightweight, AFK-gated session-transcript activity batches (the tap). */
+  /** Lightweight, realtime (killswitch-gated) session-transcript activity batches (the tap). */
   ACTIVITY: '/api/device/activity',
   /** Fire-and-forget agent→user message (status/result). The server agent relays
    *  it and drops it — it is NEVER an attention and has no `resolved` lifecycle. */

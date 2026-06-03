@@ -14,25 +14,28 @@
  * SAFETY (unchanged contract, enforced in code — never on the model's say-so):
  *   - A destructive permission is allowed ONLY via a deterministic binding
  *     (a tap-back reaction, or a single pending — a typed reply carries no link)
- *     — `respond_to_request` (action `allow`) checks `deterministicTarget()` +
+ *     — `message_agent` (action `allow`) checks `deterministicTarget()` +
  *     `checkDestructiveAllow()`, refuses else.
  *   - The model can never mint a FULL grant (`capGrant` caps to EDITS).
- *   - The agent-driven turns expose only `text_user` (notify; the human resolves).
+ *   - The agent-driven turns expose only `message_user` (notify; the human resolves).
  * Fail-closed everywhere: a turn error sends a safe clarify (user path) or falls
  * back to the static notification (agent-event path) — never an unsafe action.
  */
 import {
+  ActivityKind,
   AfkState,
   AttentionKind,
   DecisionBehavior,
   DecisionSource,
   GrantLevel,
   RequestAction,
+  ToolName,
   isAfkState,
   isGrantLevel,
   isUuid,
   type AttentionEvent,
   type InboundMessage,
+  type SessionInfo,
 } from '@imsg/shared';
 import type { Transport } from '@imsg/transport';
 import {
@@ -40,26 +43,21 @@ import {
   findAccountByPhone,
   findVerifiedPhoneForAccount,
   getAttentionForAccount,
+  getSessionActivity,
   insertSessionMessage,
   listLiveSessionsForAccount,
   listPendingAttentionForAccount,
   logMessage,
   recentMessages,
-  recentSessionActivity,
   resolveAttention,
   setAttentionNotifyMessageId,
   setSessionsAfkForAccount,
+  type SessionActivityLine,
 } from '../db/repo.ts';
 import { hashToken } from '../auth/device.ts';
 import { runAssistantTurn, type ToolExecutor } from './llm.ts';
+import { assistantTools, buildTurnMessages, type TurnMode } from './prompt.ts';
 import {
-  assistantTools,
-  buildTurnMessages,
-  type SessionActivityMap,
-  type TurnMode,
-} from './prompt.ts';
-import {
-  actionAllowedForKind,
   checkDestructiveAllow,
   deterministicTarget,
   isDestructiveTool,
@@ -67,28 +65,6 @@ import {
 } from './safety.ts';
 
 const HISTORY_LIMIT = 20;
-
-/** Per-session activity surfaced into the turn snapshot (bounded to keep the
- *  prompt small): the N most-recent live sessions, last M events each. */
-const ACTIVITY_PER_SESSION = 8;
-const MAX_ACTIVITY_SESSIONS = 5;
-
-/** Recent AFK-tap activity for the most-recent live sessions, keyed by id. */
-async function loadSessionActivity(
-  accountId: string,
-  sessions: ReadonlyArray<{ id: string }>,
-): Promise<SessionActivityMap> {
-  const top = sessions.slice(0, MAX_ACTIVITY_SESSIONS);
-  const entries = await Promise.all(
-    top.map(
-      async (s) =>
-        [s.id, await recentSessionActivity({ sessionId: s.id, accountId, limit: ACTIVITY_PER_SESSION })] as const,
-    ),
-  );
-  const map: SessionActivityMap = {};
-  for (const [id, acts] of entries) if (acts.length > 0) map[id] = acts;
-  return map;
-}
 
 /** Outcome of one turn (for logging/tests). */
 export interface TurnResult {
@@ -195,17 +171,16 @@ async function runUserTurn(
       transport,
       inbound: last,
       pending,
+      sessions,
       boundTarget,
       actions,
       sent,
     };
-    const activity = await loadSessionActivity(accountId, sessions);
     const messages = buildTurnMessages({
       trigger: { kind: 'user_message', inbounds: batch },
       pending,
       sessions,
       history,
-      activity,
     });
 
     const outcome = await runAssistantTurn({
@@ -287,18 +262,17 @@ async function runAgentEventTurnLocked(
       accountId,
       transport,
       pending,
+      sessions,
       // Default the tap-back binding to the triggering attention.
       triggerAttentionId: attention.id,
       actions,
       sent,
     };
-    const activity = await loadSessionActivity(accountId, sessions);
     const messages = buildTurnMessages({
       trigger: { kind: 'agent_event', attention },
       pending,
       sessions,
       history,
-      activity,
     });
     const outcome = await runAssistantTurn({
       messages,
@@ -360,16 +334,15 @@ async function relayAgentMessageLocked(
       accountId,
       transport,
       pending,
+      sessions,
       actions,
       sent,
     };
-    const activity = await loadSessionActivity(accountId, sessions);
     const messages = buildTurnMessages({
       trigger: { kind: 'agent_message', sessionId: message.sessionId, text: message.text },
       pending,
       sessions,
       history,
-      activity,
     });
     const outcome = await runAssistantTurn({
       messages,
@@ -381,12 +354,11 @@ async function relayAgentMessageLocked(
         if (id) sent.count += 1;
       },
     });
-    // Guarantee the user hears back: if the model relayed nothing (silent turn),
-    // fall back to forwarding the agent's own text. The whole point is that every
-    // command gets a response — better to over-relay than silently drop the answer.
-    if (sent.count === 0) {
-      await sendToUser(transport, accountId, message.text);
-    }
+    // A status relay is NOT guaranteed delivery: the assistant may judge an update
+    // trivial and stay silent (the user asked for "don't text unless necessary").
+    // So no forced forward on a silent happy-path turn — only the catch below
+    // raw-forwards, and only when a turn ERROR (not a deliberate silence) would
+    // otherwise eat a real update.
     return { handled: true, accountId, rounds: outcome.rounds, toolCalls: outcome.toolCalls };
   } catch (err) {
     // Best-effort: forward the raw status so a turn-engine error never eats the
@@ -410,9 +382,11 @@ interface DispatchCtx {
   /** Present on user-message turns (for reply addressing). */
   inbound?: InboundMessage;
   pending: ReadonlyArray<AttentionEvent>;
+  /** Live sessions snapshot for this account (backs get_session_state). */
+  sessions: ReadonlyArray<SessionInfo>;
   /** Deterministic binding for the destructive-allow gate (user-message turns). */
   boundTarget?: AttentionEvent;
-  /** Default tap-back binding target for text_user (agent-event turns). */
+  /** Default tap-back binding target for message_user (agent-event turns). */
   triggerAttentionId?: string;
   /** Recorded action notes (folded into history for multi-turn coherence). */
   actions: string[];
@@ -421,193 +395,341 @@ interface DispatchCtx {
 }
 
 /** Build the tool executor for one turn. Tools never throw — they return `error:`.
- *  Capable tools: text_user (any turn), send_to_session + respond_to_request +
- *  set_afk (user-message turns only). */
+ *  message_user is available on every turn; message_agent / get_session_state /
+ *  get_session_data / update_session_state are user-message turns only. */
 function makeExecTool(ctx: DispatchCtx): ToolExecutor {
   return async (name, args) => {
-    if (name === 'text_user') {
-      const text = typeof args.text === 'string' ? args.text.trim() : '';
-      if (!text) return 'error: text is required';
-      const id = await sendToUser(ctx.transport, ctx.accountId, text, {
-        replyToMessageId: ctx.inbound?.messageId,
-        fallbackTo: ctx.inbound?.from,
-      });
-      // Count only ACTUAL deliveries: a failed send (no verified phone / transport
-      // error) must not suppress the agent-event static fallback (sent.count === 0).
-      if (id) ctx.sent.count += 1;
-      const about =
-        typeof args.about_request_id === 'string' && args.about_request_id
-          ? args.about_request_id
-          : ctx.triggerAttentionId;
-      // about is LLM-provided. The write is account-scoped (repo) so it can't
-      // touch another tenant. AND we refuse to bind a tap-back to a DESTRUCTIVE
-      // permission: that deterministic binding must only ever front a
-      // code-generated, accurate notification (see runAgentEventTurnLocked),
-      // never LLM-authored prose — otherwise the model could make the user
-      // approve a destructive op it misdescribed. Non-destructive binds are safe.
-      if (about && id) {
-        const a = ctx.pending.find((e) => e.id === about);
-        if (!a || !isPermissionAttention(a) || !isDestructiveTool(a.toolName)) {
-          await setAttentionNotifyMessageId(about, id, ctx.accountId).catch(() => {});
-        }
-      }
-      return id ? 'sent' : 'error: could not deliver (no verified phone on file)';
-    }
+    // message_user is the one tool available on every turn (the only one on the
+    // two notify-only agent-driven turns).
+    if (name === ToolName.MESSAGE_USER) return execMessageUser(ctx, args);
 
-    // Steering + resolution are user-message only — the human drives these. Both
-    // agent-driven turns (attention + status relay) are notify-only.
+    // Messaging an agent, reading state/log, and changing a setting are user-message
+    // only — the human drives these. Both agent-driven turns are notify-only.
     if (ctx.mode !== 'user_message') {
-      return 'error: only text_user is available here; notify the user and let them decide';
+      return 'error: only message_user is available here; notify the user and let them decide';
     }
 
-    if (name === 'surface_request') {
-      const requestId = typeof args.request_id === 'string' ? args.request_id : '';
-      if (!requestId) return 'error: request_id is required';
-      const target = await resolveTarget(requestId, ctx.accountId, ctx.pending);
-      if (!target) return 'error: no such pending request';
-      const id = await surfaceRequestMessage(ctx, target);
-      if (!id) return 'error: could not deliver (no verified phone on file)';
-      ctx.actions.push(`surfaced ${target.kind} ${shortId(target.id)} for tap-back`);
-      return 'surfaced — the user can now tap-back 👍 (allow) / 👎 (deny) on the message I just posted';
+    switch (name) {
+      case ToolName.MESSAGE_AGENT:
+        return execMessageAgent(ctx, args);
+      case ToolName.GET_SESSION_STATE:
+        return execGetSessionState(ctx, args);
+      case ToolName.GET_SESSION_DATA:
+        return execGetSessionData(ctx, args);
+      case ToolName.UPDATE_SESSION_STATE:
+        return execUpdateSessionState(ctx, args);
+      default:
+        return `error: unknown tool ${name}`;
     }
-
-    if (name === 'send_to_session') {
-      const sessionId = typeof args.session_id === 'string' ? args.session_id : '';
-      const text = typeof args.text === 'string' ? args.text.trim() : '';
-      if (!sessionId || !text) return 'error: session_id and text are required';
-      // Tenant-scoped insert: only succeeds for a live session in this account.
-      const res = await insertSessionMessage({ sessionId, accountId: ctx.accountId, body: text });
-      if (!res) return 'error: no such live session for this account';
-      ctx.actions.push(`steered session ${shortId(sessionId)}`);
-      return queuedForSession('instruction sent');
-    }
-
-    if (name === 'set_afk') {
-      if (!isAfkState(args.afk)) {
-        return `error: afk must be '${AfkState.ON}' or '${AfkState.OFF}'`;
-      }
-      // Filter to well-formed UUIDs BEFORE the ::uuid[] cast (a bad id would 500
-      // the query). The account_id predicate in the repo is the tenant boundary.
-      const ids = Array.isArray(args.session_ids)
-        ? args.session_ids.filter(isUuid)
-        : [];
-      if (ids.length === 0) {
-        return 'error: session_ids must be a non-empty array of session ids from LIVE SESSIONS';
-      }
-      const updated = await setSessionsAfkForAccount({
-        accountId: ctx.accountId,
-        sessionIds: ids,
-        afk: args.afk,
-      });
-      if (updated.length === 0) {
-        return 'error: none of those ids match a live session for this account';
-      }
-      ctx.actions.push(`set afk=${args.afk} on ${updated.length} session(s)`);
-      const missed = ids.length - updated.length;
-      const missedNote = missed > 0 ? `; ${missed} id(s) matched no live session` : '';
-      return `set afk=${args.afk} on ${updated.length} session(s)${missedNote}`;
-    }
-
-    if (name === 'respond_to_request') {
-      const requestId = typeof args.request_id === 'string' ? args.request_id : '';
-      if (!requestId) return 'error: request_id is required';
-      const target = await resolveTarget(requestId, ctx.accountId, ctx.pending);
-      if (!target) return 'error: no such pending request';
-
-      switch (args.action) {
-        case RequestAction.ANSWER: {
-          const text = typeof args.text === 'string' ? args.text.trim() : '';
-          const dec = await resolveAttention({
-            accountId: ctx.accountId,
-            attentionId: target.id,
-            answerText: text,
-            source: DecisionSource.PHONE,
-          });
-          if (!dec) return 'error: that request is already resolved';
-          ctx.actions.push(`answered ${target.kind} ${shortId(target.id)}`);
-          return queuedForSession('answer recorded');
-        }
-
-        case RequestAction.APPROVE: {
-          if (!actionAllowedForKind(RequestAction.APPROVE, target.kind)) {
-            return "error: action='approve' is for plans only (use answer/allow/deny otherwise)";
-          }
-          const grant = capGrant(args.grant);
-          const dec = await resolveAttention({
-            accountId: ctx.accountId,
-            attentionId: target.id,
-            behavior: DecisionBehavior.ALLOW,
-            grant,
-            source: DecisionSource.PHONE,
-          });
-          if (!dec) return 'error: that plan is already resolved';
-          ctx.actions.push(`approved plan ${shortId(target.id)}${grant ? ` grant=${grant}` : ''}`);
-          return queuedForSession(grant ? `plan approved (standing grant: ${grant})` : 'plan approved');
-        }
-
-        case RequestAction.DENY: {
-          const dec = await resolveAttention({
-            accountId: ctx.accountId,
-            attentionId: target.id,
-            behavior: DecisionBehavior.DENY,
-            source: DecisionSource.PHONE,
-          });
-          if (!dec) return 'error: that request is already resolved';
-          ctx.actions.push(`denied ${target.kind} ${shortId(target.id)}`);
-          return queuedForSession('denial recorded');
-        }
-
-        case RequestAction.ALLOW: {
-          if (!actionAllowedForKind(RequestAction.ALLOW, target.kind)) {
-            return "error: action='allow' is for permissions (use answer for a question, approve for a plan)";
-          }
-          // A destructive allow requires PROOF the user was shown a code-generated,
-          // accurate notification for THIS request: notify_message_id is set only by
-          // the system (notifyStatic / surfaceRequestMessage), never by LLM prose
-          // (see text_user). If it's missing (notification lost on a restart, or
-          // never sent because the user wasn't AFK at creation), don't approve an op
-          // the user never saw described — instead SURFACE it now (posts the accurate
-          // description AND sets notify_message_id), then have them tap-back it. That
-          // both shows the description and bootstraps the binding — strictly better
-          // than dead-ending at "use the keyboard" when the user is away.
-          if (isDestructiveTool(target.toolName) && !target.notifyMessageId) {
-            await surfaceRequestMessage(ctx, target);
-            return 'refused: that request had not been shown to you with a description yet — I just posted it as a fresh message. Ask the user to TAP-BACK 👍 (allow) / 👎 (deny) on THAT message to approve it.';
-          }
-          // THE GATE: destructive allows require a deterministic binding. The model
-          // names a target; we only treat it as deterministic if it IS the bound one.
-          const binding =
-            ctx.boundTarget && ctx.boundTarget.id === target.id ? 'deterministic' : 'inferred';
-          const check = checkDestructiveAllow(target, binding);
-          if (!check.permitted) {
-            // CODE BACKSTOP for the approve-loop: the only tap-backable target
-            // for a destructive permission is a system-posted notification, and
-            // the original one has usually scrolled away. Re-post it now (and
-            // move the binding onto the fresh message) so a tap-back has
-            // something to land on — don't rely on the model remembering to call
-            // surface_request. Then point the user at THAT message; never tell
-            // them to "reply" (a typed reply carries no link — see safety.ts).
-            await surfaceRequestMessage(ctx, target);
-            return `refused: ${check.reason}. I re-posted that exact request as a fresh message — ask the user to TAP-BACK 👍 (allow) / 👎 (deny) on THAT message (not your prose; a typed reply cannot bind).`;
-          }
-          const dec = await resolveAttention({
-            accountId: ctx.accountId,
-            attentionId: target.id,
-            behavior: DecisionBehavior.ALLOW,
-            source: DecisionSource.PHONE,
-          });
-          if (!dec) return 'error: that permission is already resolved';
-          ctx.actions.push(`allowed ${target.toolName ?? 'permission'} ${shortId(target.id)}`);
-          return queuedForSession('permission allowed');
-        }
-
-        default:
-          return `error: unknown action ${String(args.action)} (use answer/approve/deny/allow)`;
-      }
-    }
-
-    return `error: unknown tool ${name}`;
   };
+}
+
+/**
+ * message_user: text the user, and/or surface a pending request as a fresh,
+ * tap-backable message. At least one of `text` / `surface_request` is required.
+ * Surfacing posts the CODE-generated notification (never LLM prose) and moves the
+ * tap-back binding onto it — the only way a destructive permission can be approved.
+ */
+async function execMessageUser(ctx: DispatchCtx, args: Record<string, unknown>): Promise<string> {
+  const text = typeof args.text === 'string' ? args.text.trim() : '';
+  const surfaceId = typeof args.surface_request === 'string' ? args.surface_request.trim() : '';
+  if (!text && !surfaceId) return 'error: pass text and/or surface_request';
+
+  const out: string[] = [];
+
+  if (surfaceId) {
+    const target = await resolveTarget(surfaceId, ctx.accountId, ctx.pending);
+    if (!target) {
+      out.push('surface_request: no such pending request');
+    } else {
+      const id = await surfaceRequestMessage(ctx, target);
+      if (!id) {
+        out.push('surface_request: could not deliver (no verified phone on file)');
+      } else {
+        ctx.actions.push(`surfaced ${target.kind} ${shortId(target.id)} for tap-back`);
+        out.push('surfaced — ask the user to TAP-BACK 👍 allow / 👎 deny on that message');
+      }
+    }
+  }
+
+  if (text) {
+    const id = await sendToUser(ctx.transport, ctx.accountId, text, {
+      replyToMessageId: ctx.inbound?.messageId,
+      fallbackTo: ctx.inbound?.from,
+    });
+    // Count only ACTUAL deliveries: a failed send must not suppress the agent-event
+    // static fallback (sent.count === 0).
+    if (id) ctx.sent.count += 1;
+    // about_request is LLM-provided; the write is account-scoped (repo) so it can't
+    // touch another tenant. We refuse to bind a tap-back to a DESTRUCTIVE permission:
+    // that binding must only ever front a code-generated, accurate notification
+    // (surfaceRequestMessage), never LLM prose. Non-destructive binds are safe.
+    const about =
+      typeof args.about_request === 'string' && args.about_request
+        ? args.about_request
+        : ctx.triggerAttentionId;
+    if (about && id) {
+      const a = ctx.pending.find((e) => e.id === about);
+      if (!a || !isPermissionAttention(a) || !isDestructiveTool(a.toolName)) {
+        await setAttentionNotifyMessageId(about, id, ctx.accountId).catch(() => {});
+      }
+    }
+    out.push(id ? 'sent' : 'error: could not deliver (no verified phone on file)');
+  }
+
+  return out.join('; ');
+}
+
+/**
+ * message_agent: send a message to a coding agent. Plain text is "just text back
+ * and forth" — if the agent is blocked on a question/plan that text IS the answer
+ * (resolve it, so it leaves the pending pile and the agent's expect_reply matches),
+ * otherwise it's a steer. An `action` is the one structured path: a permission
+ * verdict (allow/deny) or a plan approval, gated in code for destructive allows.
+ */
+async function execMessageAgent(ctx: DispatchCtx, args: Record<string, unknown>): Promise<string> {
+  const sessionId = typeof args.session === 'string' ? args.session.trim() : '';
+  if (!sessionId) return 'error: session is required';
+  const text = typeof args.text === 'string' ? args.text.trim() : '';
+  const action = typeof args.action === 'string' ? args.action : '';
+
+  if (action) return resolveSessionAction(ctx, sessionId, action, args.grant);
+
+  if (!text) return 'error: pass text (a message to the agent) or an action';
+
+  const answerable = pickSessionTarget(ctx, sessionId, [AttentionKind.QUESTION, AttentionKind.PLAN]);
+  if (answerable) {
+    const dec = await resolveAttention({
+      accountId: ctx.accountId,
+      attentionId: answerable.id,
+      answerText: text,
+      source: DecisionSource.PHONE,
+    });
+    if (dec) {
+      ctx.actions.push(`answered ${answerable.kind} ${shortId(answerable.id)}`);
+      return queuedForSession('answer recorded');
+    }
+    // Raced to resolved between snapshot and now — fall through to a plain steer.
+  }
+
+  // Tenant-scoped insert: only succeeds for a live session in this account.
+  const res = await insertSessionMessage({ sessionId, accountId: ctx.accountId, body: text });
+  if (!res) return 'error: no such live session for this account';
+  ctx.actions.push(`messaged session ${shortId(sessionId)}`);
+  return queuedForSession('message sent');
+}
+
+/**
+ * The structured verdicts on message_agent: allow/deny a permission, approve a plan.
+ * Keyed by SESSION (no request id): the target is the tap-back-bound one if a
+ * reaction picked it, else the session's single candidate of that kind, else
+ * ambiguous (ask). A destructive allow additionally passes the binding gate.
+ */
+async function resolveSessionAction(
+  ctx: DispatchCtx,
+  sessionId: string,
+  action: string,
+  grantArg: unknown,
+): Promise<string> {
+  if (action === RequestAction.ALLOW) {
+    const perms = ctx.pending.filter((e) => e.sessionId === sessionId && isPermissionAttention(e));
+    if (perms.length === 0) return 'error: that agent has no permission waiting to allow';
+    const target = pickStrict(ctx, perms);
+    if (!target) {
+      return 'error: more than one permission is pending for that agent — ask the user which, and surface each for a tap-back';
+    }
+    return allowPermission(ctx, target);
+  }
+
+  if (action === RequestAction.DENY) {
+    // Deny is always safe — target the bound/single pending, else the most-recent
+    // (a deny can never approve the wrong thing).
+    const cands = ctx.pending.filter((e) => e.sessionId === sessionId);
+    if (cands.length === 0) return 'error: that agent has nothing pending to deny';
+    const target = pickStrict(ctx, cands) ?? cands[cands.length - 1]!;
+    const dec = await resolveAttention({
+      accountId: ctx.accountId,
+      attentionId: target.id,
+      behavior: DecisionBehavior.DENY,
+      source: DecisionSource.PHONE,
+    });
+    if (!dec) return 'error: that request is already resolved';
+    ctx.actions.push(`denied ${target.kind} ${shortId(target.id)}`);
+    return queuedForSession('denial recorded');
+  }
+
+  if (action === RequestAction.APPROVE) {
+    const plans = ctx.pending.filter((e) => e.sessionId === sessionId && e.kind === AttentionKind.PLAN);
+    if (plans.length === 0) {
+      return 'error: that agent has no plan to approve (just send text to answer a question, or use action=allow for a permission)';
+    }
+    const target = pickStrict(ctx, plans) ?? plans[plans.length - 1]!;
+    const grant = capGrant(grantArg);
+    const dec = await resolveAttention({
+      accountId: ctx.accountId,
+      attentionId: target.id,
+      behavior: DecisionBehavior.ALLOW,
+      grant,
+      source: DecisionSource.PHONE,
+    });
+    if (!dec) return 'error: that plan is already resolved';
+    ctx.actions.push(`approved plan ${shortId(target.id)}${grant ? ` grant=${grant}` : ''}`);
+    return queuedForSession(grant ? `plan approved (standing grant: ${grant})` : 'plan approved');
+  }
+
+  return `error: unknown action ${String(action)} (use allow, deny, or approve — or just send text)`;
+}
+
+/**
+ * The destructive-allow gate, keyed to a specific permission attention. A
+ * destructive allow goes through ONLY with a deterministic tap-back binding; else
+ * we re-surface the exact request and ask the user to tap-back. (Unchanged contract.)
+ */
+async function allowPermission(ctx: DispatchCtx, target: AttentionEvent): Promise<string> {
+  // Require PROOF the user saw a code-generated, accurate notification for THIS
+  // request (notify_message_id is set only by the system — notifyStatic /
+  // surfaceRequestMessage — never by LLM prose). If it's missing, surface it now
+  // rather than approving an op the user never saw described.
+  if (isDestructiveTool(target.toolName) && !target.notifyMessageId) {
+    await surfaceRequestMessage(ctx, target);
+    return 'refused: I had not shown the user this exact request with a description yet — I just posted it as a fresh message. Ask them to TAP-BACK 👍 allow / 👎 deny on THAT message.';
+  }
+  // THE GATE: destructive allows require a deterministic binding. The model names a
+  // target; we only treat it as deterministic if it IS the bound one.
+  const binding =
+    ctx.boundTarget && ctx.boundTarget.id === target.id ? 'deterministic' : 'inferred';
+  const check = checkDestructiveAllow(target, binding);
+  if (!check.permitted) {
+    // CODE BACKSTOP for the approve-loop: re-post the request as a fresh, tap-backable
+    // message (move the binding onto it) so a tap-back has something to land on, then
+    // point the user at THAT message — never tell them to "reply" (a typed reply
+    // carries no link — see safety.ts).
+    await surfaceRequestMessage(ctx, target);
+    return `refused: ${check.reason}. I re-posted that exact request as a fresh message — ask the user to TAP-BACK 👍 allow / 👎 deny on THAT message (a typed reply cannot bind).`;
+  }
+  const dec = await resolveAttention({
+    accountId: ctx.accountId,
+    attentionId: target.id,
+    behavior: DecisionBehavior.ALLOW,
+    source: DecisionSource.PHONE,
+  });
+  if (!dec) return 'error: that permission is already resolved';
+  ctx.actions.push(`allowed ${target.toolName ?? 'permission'} ${shortId(target.id)}`);
+  return queuedForSession('permission allowed');
+}
+
+/** Pick the unambiguous target among candidates: the deterministically-bound one if
+ *  a tap-back chose it, else the lone candidate, else undefined (ambiguous). */
+function pickStrict(ctx: DispatchCtx, candidates: AttentionEvent[]): AttentionEvent | undefined {
+  const bound = ctx.boundTarget && candidates.find((c) => c.id === ctx.boundTarget!.id);
+  if (bound) return bound;
+  if (candidates.length === 1) return candidates[0];
+  return undefined;
+}
+
+/** Pick the target a plain-text message resolves: the bound one, the lone candidate,
+ *  else the most-recent of the given kinds (answering text is safe to apply to the
+ *  latest question/plan; the destructive gate guards the only unsafe path). */
+function pickSessionTarget(
+  ctx: DispatchCtx,
+  sessionId: string,
+  kinds: AttentionKind[],
+): AttentionEvent | undefined {
+  const candidates = ctx.pending.filter(
+    (e) => e.sessionId === sessionId && kinds.includes(e.kind),
+  );
+  if (candidates.length === 0) return undefined;
+  return pickStrict(ctx, candidates) ?? candidates[candidates.length - 1];
+}
+
+/** get_session_state: a compact state line per session (one, or all live). */
+async function execGetSessionState(ctx: DispatchCtx, args: Record<string, unknown>): Promise<string> {
+  const sessionId = typeof args.session === 'string' ? args.session.trim() : '';
+  const sessions = sessionId ? ctx.sessions.filter((s) => s.id === sessionId) : ctx.sessions;
+  if (sessions.length === 0) {
+    return sessionId ? 'no such live session for this account' : 'no live sessions';
+  }
+  return sessions
+    .map((s) => {
+      const blocked = ctx.pending.filter((p) => p.sessionId === s.id);
+      const blockedNote = blocked.length
+        ? `blocked on ${blocked
+            .map((b) => `${b.kind}${b.toolName ? `(${b.toolName})` : ''} [id=${b.id}]`)
+            .join(', ')}`
+        : 'not blocked';
+      const title = s.title ? JSON.stringify(clip(s.title, 80)) : '(untitled)';
+      return (
+        `- id=${s.id} title=${title} state=${s.state} afk=${s.afk} grant=${s.grant}` +
+        `${s.cwd ? ` cwd=${clip(s.cwd, 80)}` : ''}; ${blockedNote}`
+      );
+    })
+    .join('\n');
+}
+
+/** get_session_data: read an agent's activity log (recent / grep / line range). */
+async function execGetSessionData(ctx: DispatchCtx, args: Record<string, unknown>): Promise<string> {
+  const sessionId = typeof args.session === 'string' ? args.session.trim() : '';
+  if (!sessionId) return 'error: session is required';
+  const rows = await getSessionActivity({
+    sessionId,
+    accountId: ctx.accountId,
+    ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+    ...(typeof args.grep === 'string' && args.grep.trim() ? { grep: args.grep } : {}),
+    ...(typeof args.from_line === 'number' ? { fromLine: args.from_line } : {}),
+    ...(typeof args.to_line === 'number' ? { toLine: args.to_line } : {}),
+  });
+  if (rows.length === 0) return 'no matching activity for that session';
+  return rows.map(formatActivityLine).join('\n');
+}
+
+/** update_session_state: change a session setting (afk only, for now). */
+async function execUpdateSessionState(ctx: DispatchCtx, args: Record<string, unknown>): Promise<string> {
+  if (!isAfkState(args.afk)) {
+    return `error: afk must be '${AfkState.ON}' or '${AfkState.OFF}'`;
+  }
+  // Filter to well-formed UUIDs BEFORE the ::uuid[] cast (a bad id would 500 the
+  // query). The account_id predicate in the repo is the tenant boundary.
+  const ids = Array.isArray(args.session_ids) ? args.session_ids.filter(isUuid) : [];
+  if (ids.length === 0) {
+    return 'error: session_ids must be a non-empty array of session ids';
+  }
+  const updated = await setSessionsAfkForAccount({
+    accountId: ctx.accountId,
+    sessionIds: ids,
+    afk: args.afk,
+  });
+  if (updated.length === 0) {
+    return 'error: none of those ids match a live session for this account';
+  }
+  ctx.actions.push(`set afk=${args.afk} on ${updated.length} session(s)`);
+  const missed = ids.length - updated.length;
+  const missedNote = missed > 0 ? `; ${missed} id(s) matched no live session` : '';
+  return `set afk=${args.afk} on ${updated.length} session(s)${missedNote}`;
+}
+
+/** One line per activity event for get_session_data, line-numbered for citing/re-slicing. */
+function formatActivityLine(a: SessionActivityLine): string {
+  const head = `[${a.lineNo}] `;
+  switch (a.kind) {
+    case ActivityKind.USER_MESSAGE:
+      return `${head}user: ${clip(a.body ?? '', 200)}`;
+    case ActivityKind.ASSISTANT_TEXT:
+      return `${head}assistant: ${clip(a.body ?? '', 200)}`;
+    case ActivityKind.TOOL_USE:
+      return a.summary
+        ? `${head}tool ${a.toolName}: ${clip(a.summary, 160)}`
+        : `${head}tool ${a.toolName ?? ''}`.trimEnd();
+    case ActivityKind.TOOL_RESULT:
+      return `${head}${a.isError ? 'tool failed' : 'tool ok'}`;
+    default:
+      return `${head}${a.kind}`;
+  }
+}
+
+/** Collapse whitespace and truncate — keeps tool results compact and single-line. */
+function clip(s: string, n: number): string {
+  const flat = s.replace(/\s+/g, ' ').trim();
+  return flat.length > n ? `${flat.slice(0, n)}…` : flat;
 }
 
 // --- helpers ------------------------------------------------------------------
@@ -698,7 +820,7 @@ async function notifyStatic(
  * user-message turn and move its tap-back binding onto that new message. The
  * user-turn analog of notifyStatic: the body is the CODE-generated
  * composeNotification (an accurate description — the safety invariant that a
- * destructive tap-back only ever fronts code-generated prose, see text_user),
+ * destructive tap-back only ever fronts code-generated prose, see execMessageUser),
  * NOT anything the model wrote. This is what lets a destructive permission be
  * approved by tap-back at all — the original notification scrolls away, and the
  * model's own "tap-back this" prose is deliberately unbindable, so without a
@@ -747,9 +869,9 @@ function shortId(id: string): string {
 
 /**
  * Honest tool-result for an action whose EFFECT reaches the coding agent
- * ASYNCHRONOUSLY. `respond_to_request` and `send_to_session` only write the
- * decision/steer row and fire the LISTEN/NOTIFY that the device's SSE stream
- * reacts to — they return the instant that row is durable, NOT when the agent
+ * ASYNCHRONOUSLY. `message_agent` (a steer, an answer, or a verdict) only writes
+ * the decision/steer row and fires the LISTEN/NOTIFY that the device's SSE stream
+ * reacts to — it returns the instant that row is durable, NOT when the agent
  * has received or acted on it (no delivery ack is awaited here; the device's
  * `delivered_at`/ACK loop is a separate dedup mechanism). So the record is
  * durable NOW but receipt is unconfirmed. This wording keeps the model from

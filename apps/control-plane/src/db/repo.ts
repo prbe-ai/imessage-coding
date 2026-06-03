@@ -534,7 +534,7 @@ export async function listLiveSessionsForAccount(
   return rows.map(toSessionInfo);
 }
 
-// --- session activity (the AFK transcript tap) --------------------------------
+// --- session activity (the realtime transcript tap) ---------------------------
 
 interface SessionActivityRow {
   line_no: number;
@@ -570,7 +570,7 @@ function toSessionActivity(r: SessionActivityRow): SessionActivity {
 }
 
 /**
- * Bulk-insert a batch of session-activity events (the AFK tap). Tenant-scoped:
+ * Bulk-insert a batch of session-activity events (the realtime tap). Tenant-scoped:
  * rows are inserted ONLY if the session belongs to this device + account (the
  * WHERE EXISTS guard, like insertAttentionEvent), so a device can never write
  * activity into another tenant's session. Idempotent via ON CONFLICT on the
@@ -627,23 +627,83 @@ export async function insertSessionActivity(args: {
   return rows.length;
 }
 
-/** Recent activity for a session (most-recent-first), capped — orchestrator context. */
-export async function recentSessionActivity(args: {
+/** A session-activity row carrying its transcript position (for get_session_data). */
+export interface SessionActivityLine extends SessionActivity {
+  lineNo: number;
+  blockIdx: number;
+}
+
+/** Hard cap on rows a single get_session_data read can return (prompt-size guard). */
+const SESSION_DATA_MAX_ROWS = 200;
+
+/**
+ * Query a session's activity log for the `get_session_data` orchestrator tool.
+ * Tenant-scoped. Three modes, composable:
+ *   - default: the most-recent `limit` events (default 20), returned OLDEST-first.
+ *   - grep:    case-insensitive substring over body / tool summary / tool name.
+ *   - range:   only events whose monotonic line_no is within [fromLine, toLine].
+ * Always returns OLDEST-first (ascending line_no) for readable display, and
+ * carries each event's lineNo so the model can cite / re-slice a range.
+ */
+export async function getSessionActivity(args: {
   sessionId: string;
   accountId: string;
-  limit: number;
-}): Promise<SessionActivity[]> {
-  // Order by transcript position (line_no, block_idx), NOT insert time: a retried
-  // outbox batch can land out of order, so created_at would misrepresent the trail.
+  limit?: number;
+  grep?: string;
+  fromLine?: number;
+  toLine?: number;
+}): Promise<SessionActivityLine[]> {
+  // Normalize the LLM-supplied numbers up front: a junk value (NaN/Infinity/float)
+  // must never reach a `LIMIT`/`line_no` clause and error the query.
+  const intOrUndef = (v: number | undefined): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.floor(v) : undefined;
+  const fromLine = intOrUndef(args.fromLine);
+  const toLine = intOrUndef(args.toLine);
+  const grep = args.grep && args.grep.trim() ? args.grep.trim() : undefined;
+
+  const params: unknown[] = [args.sessionId, args.accountId];
+  const where: string[] = ['session_id = $1', 'account_id = $2'];
+
+  if (grep) {
+    params.push(`%${grep}%`);
+    const p = `$${params.length}`;
+    where.push(`(body ILIKE ${p} OR summary ILIKE ${p} OR tool_name ILIKE ${p})`);
+  }
+  const hasRange = fromLine !== undefined || toLine !== undefined;
+  if (fromLine !== undefined) {
+    params.push(fromLine);
+    where.push(`line_no >= $${params.length}`);
+  }
+  if (toLine !== undefined) {
+    params.push(toLine);
+    where.push(`line_no <= $${params.length}`);
+  }
+
+  // A line range reads a specific slice ascending; otherwise take the most-recent
+  // `limit` (descending) and reverse to oldest-first below. Either way, cap rows.
+  const wantLimit = intOrUndef(args.limit) ?? 20;
+  const limit = hasRange
+    ? SESSION_DATA_MAX_ROWS
+    : Math.min(Math.max(1, wantLimit), SESSION_DATA_MAX_ROWS);
+  params.push(limit);
+  const order = hasRange ? 'ASC' : 'DESC';
+
   const rows = await query<SessionActivityRow>(
     `SELECT line_no, block_idx, kind, tool_name, summary, body, is_error, created_at
        FROM session_activity
-      WHERE session_id = $1 AND account_id = $2
-      ORDER BY line_no DESC, block_idx DESC
-      LIMIT $3`,
-    [args.sessionId, args.accountId, args.limit],
+      WHERE ${where.join(' AND ')}
+      ORDER BY line_no ${order}, block_idx ${order}
+      LIMIT $${params.length}`,
+    params,
   );
-  return rows.map(toSessionActivity);
+
+  // Non-range mode fetched newest-first to honor `limit`; flip to oldest-first.
+  const ordered = hasRange ? rows : [...rows].reverse();
+  return ordered.map((r) => ({
+    ...toSessionActivity(r),
+    lineNo: r.line_no,
+    blockIdx: r.block_idx,
+  }));
 }
 
 // --- attention events ---------------------------------------------------------
@@ -753,9 +813,9 @@ export async function setAttentionNotifyMessageId(
   messageId: string,
   accountId: string,
 ): Promise<boolean> {
-  // Account-scoped: the assistant's send_message tool passes an LLM-provided
-  // attentionId, so the write MUST be constrained to the caller's account — a
-  // hallucinated/foreign id matches 0 rows rather than touching another tenant.
+  // Account-scoped: message_user passes an LLM-provided attentionId (about_request
+  // / surface_request), so the write MUST be constrained to the caller's account —
+  // a hallucinated/foreign id matches 0 rows rather than touching another tenant.
   const rows = await query<{ id: string }>(
     `UPDATE attention_events
         SET notify_message_id = $2

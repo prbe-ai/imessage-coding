@@ -479,7 +479,7 @@ function makeExecTool(ctx: DispatchCtx): ToolExecutor {
       const res = await insertSessionMessage({ sessionId, accountId: ctx.accountId, body: text });
       if (!res) return 'error: no such live session for this account';
       ctx.actions.push(`steered session ${shortId(sessionId)}`);
-      return 'sent to the session';
+      return queuedForSession('instruction sent');
     }
 
     if (name === 'set_afk') {
@@ -525,7 +525,7 @@ function makeExecTool(ctx: DispatchCtx): ToolExecutor {
           });
           if (!dec) return 'error: that request is already resolved';
           ctx.actions.push(`answered ${target.kind} ${shortId(target.id)}`);
-          return 'answered';
+          return queuedForSession('answer recorded');
         }
 
         case RequestAction.APPROVE: {
@@ -542,7 +542,7 @@ function makeExecTool(ctx: DispatchCtx): ToolExecutor {
           });
           if (!dec) return 'error: that plan is already resolved';
           ctx.actions.push(`approved plan ${shortId(target.id)}${grant ? ` grant=${grant}` : ''}`);
-          return grant ? `approved (standing grant: ${grant})` : 'approved';
+          return queuedForSession(grant ? `plan approved (standing grant: ${grant})` : 'plan approved');
         }
 
         case RequestAction.DENY: {
@@ -554,7 +554,7 @@ function makeExecTool(ctx: DispatchCtx): ToolExecutor {
           });
           if (!dec) return 'error: that request is already resolved';
           ctx.actions.push(`denied ${target.kind} ${shortId(target.id)}`);
-          return 'denied';
+          return queuedForSession('denial recorded');
         }
 
         case RequestAction.ALLOW: {
@@ -598,7 +598,7 @@ function makeExecTool(ctx: DispatchCtx): ToolExecutor {
           });
           if (!dec) return 'error: that permission is already resolved';
           ctx.actions.push(`allowed ${target.toolName ?? 'permission'} ${shortId(target.id)}`);
-          return 'allowed';
+          return queuedForSession('permission allowed');
         }
 
         default:
@@ -743,6 +743,21 @@ function composeNotification(event: AttentionEvent): string {
 
 function shortId(id: string): string {
   return id.slice(0, 8);
+}
+
+/**
+ * Honest tool-result for an action whose EFFECT reaches the coding agent
+ * ASYNCHRONOUSLY. `respond_to_request` and `send_to_session` only write the
+ * decision/steer row and fire the LISTEN/NOTIFY that the device's SSE stream
+ * reacts to — they return the instant that row is durable, NOT when the agent
+ * has received or acted on it (no delivery ack is awaited here; the device's
+ * `delivered_at`/ACK loop is a separate dedup mechanism). So the record is
+ * durable NOW but receipt is unconfirmed. This wording keeps the model from
+ * telling the user the agent is already "unblocked"/"resumed" — see the
+ * RELAYING IS NOT CONFIRMATION rule in the system prompt.
+ */
+function queuedForSession(recorded: string): string {
+  return `${recorded}; queued for delivery to the session (the agent has NOT confirmed receipt yet)`;
 }
 
 // --- per-account serialization (in-process) -----------------------------------

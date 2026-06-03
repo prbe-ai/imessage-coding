@@ -12,6 +12,8 @@ import { createApp } from './app.ts';
 import { loadEnv } from './env.ts';
 import { ensureListener } from './db/listener.ts';
 import { reapStaleSessions } from './db/repo.ts';
+import { notifyEndedSessions } from './orchestrator/index.ts';
+import { getTransport } from './transport.ts';
 
 const env = loadEnv();
 const app = createApp();
@@ -29,15 +31,21 @@ ensureListener().catch((err) => {
 // stays tight. Idempotent, so running on every instance is fine; errors
 // are logged, never thrown out of the timer.
 const REAP_INTERVAL_MS = 10_000;
-function sweepStaleSessions(): void {
+// `notify`: text the user (AFK-gated) that their session stopped. OFF for the
+// boot sweep — a deploy restart leaves healthy devices unable to heartbeat for
+// the downtime window, so the first post-restart reap would false-positive on
+// sessions that reconnect seconds later. Boot stays cleanup-only; live detection
+// (interval sweeps) is where a genuine stop gets surfaced.
+function sweepStaleSessions(notify: boolean): void {
   reapStaleSessions()
-    .then((n) => {
-      if (n > 0) console.log(`[reaper] ended ${n} stale session(s)`);
+    .then(async (reaped) => {
+      if (reaped.length > 0) console.log(`[reaper] ended ${reaped.length} stale session(s)`);
+      if (notify && reaped.length > 0) await notifyEndedSessions(getTransport(), reaped);
     })
     .catch((err) => console.error('[reaper] sweep failed (will retry)', err));
 }
-sweepStaleSessions(); // once at boot to clear anything stale from before restart
-setInterval(sweepStaleSessions, REAP_INTERVAL_MS);
+sweepStaleSessions(false); // once at boot to clear anything stale from before restart
+setInterval(() => sweepStaleSessions(true), REAP_INTERVAL_MS);
 
 console.log(`[control-plane] listening on :${env.port}`);
 

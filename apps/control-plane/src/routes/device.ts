@@ -325,13 +325,18 @@ deviceRoutes.post(DeviceApiRoute.ACTIVITY, async (c) => {
     return c.json({ error: 'batch_too_large' }, 400);
   }
   try {
-    // Ensure the session exists (cwd = the project dir). No state override — keep
-    // a WAITING/IDLE state set by an attention event; only revive if reaped.
+    // Ensure the session exists (cwd = the project dir) — the tap may report a
+    // brand-new session before its first heartbeat. No state override (keep a
+    // WAITING/IDLE set by an attention event), and reviveIfEnded:false so a late
+    // tail-flush from a dying tap can't resurrect a reaped session — that would
+    // re-arm the reaper and double-fire the "session stopped" notice. A genuine
+    // return-from-dead comes back via the heartbeat, which does revive.
     await upsertSession({
       sessionId: body.sessionId,
       deviceId: auth.deviceId,
       accountId: auth.accountId,
       cwd: body.cwd,
+      reviveIfEnded: false,
     });
     const accepted = await insertSessionActivity({
       deviceId: auth.deviceId,

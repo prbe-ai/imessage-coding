@@ -49,6 +49,7 @@ import {
   resolveAttention,
   setAttentionNotifyMessageId,
   setDevicesAfkForSessions,
+  type ReapedSession,
   type SessionActivityLine,
 } from '../db/repo.ts';
 import { waitForDelivered } from '../db/listener.ts';
@@ -927,6 +928,119 @@ function composeNotification(event: AttentionEvent): string {
 
 function shortId(id: string): string {
   return id.slice(0, 8);
+}
+
+// -----------------------------------------------------------------------------
+// "Your session stopped" notification (reaper-driven).
+// -----------------------------------------------------------------------------
+
+/** One ended session, resolved to its label + last-activity summary, ready to
+ *  render into the coalesced "stopped" message. */
+export interface EndedSessionItem {
+  id: string;
+  title: string | null;
+  /** One-line summary of the last thing the session sent us; null if it shipped
+   *  no activity (e.g. afk was just toggled on, or it died before the tap flushed). */
+  summary: string | null;
+}
+
+/** Build the coalesced "session(s) stopped" iMessage. Pure + deterministic (no
+ *  LLM) — the activity tap already reduces blocks to one-liners, so "summarize
+ *  the last message" is just surfacing that line. Exported for unit tests. */
+export function composeSessionsEndedMessage(items: ReadonlyArray<EndedSessionItem>): string {
+  // clip the title too: it's device-sanitized but keep the notification on one
+  // line per session (a stray newline would split a bullet).
+  const label = (it: EndedSessionItem): string =>
+    it.title?.trim() ? clip(it.title, 80) : shortId(it.id);
+  const [first] = items;
+  if (items.length === 1 && first) {
+    const head = `Session "${label(first)}" stopped.`;
+    return first.summary ? `${head}\nLast: ${first.summary}` : head;
+  }
+  const lines = items.map((it) => (it.summary ? `• ${label(it)} — ${it.summary}` : `• ${label(it)}`));
+  return `${items.length} sessions stopped:\n${lines.join('\n')}`;
+}
+
+/** A user-facing one-liner for an activity line (no `[lineNo]` prefix — that's
+ *  for the LLM turn context, not the phone). */
+function activityOneLiner(a: SessionActivityLine): string {
+  switch (a.kind) {
+    case ActivityKind.ASSISTANT_TEXT:
+      return clip(a.body ?? '', 200);
+    case ActivityKind.USER_MESSAGE:
+      return `you: ${clip(a.body ?? '', 180)}`;
+    case ActivityKind.TOOL_USE:
+      return a.summary
+        ? `running ${a.toolName}: ${clip(a.summary, 140)}`
+        : `running ${a.toolName ?? 'a tool'}`;
+    case ActivityKind.TOOL_RESULT:
+      return a.isError ? 'a tool errored' : 'a tool finished';
+    default:
+      return clip(a.kind, 60);
+  }
+}
+
+/** The "last message the session sent us": prefer the most recent assistant_text
+ *  within the last few lines (the most human-meaningful), else a one-liner of the
+ *  very last line. null on no activity or a read error (best-effort). */
+async function lastActivitySummary(sessionId: string, accountId: string): Promise<string | null> {
+  let lines: SessionActivityLine[];
+  try {
+    lines = await getSessionActivity({ sessionId, accountId, limit: 5 });
+  } catch {
+    return null;
+  }
+  // getSessionActivity returns oldest-first; scan from the newest.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i];
+    if (l && l.kind === ActivityKind.ASSISTANT_TEXT && (l.body ?? '').trim()) {
+      return clip(l.body ?? '', 200);
+    }
+  }
+  const last = lines[lines.length - 1];
+  return last ? activityOneLiner(last) : null;
+}
+
+/**
+ * Notify the user that one or more of their sessions ENDED while AFK. Driven by
+ * the liveness reaper — the authoritative server-side death detector, because the
+ * device can't announce a SIGKILL / crash / sleep. AFK-gated: a session is
+ * surfaced only if its device is afk='on' (at the keyboard the dashboard already
+ * shows live state). Coalesced into ONE iMessage per account, so closing a laptop
+ * running N worktree-sessions is a single text, not N. Code-generated +
+ * deterministic (no LLM turn, no attention row). Best-effort — never throws into
+ * the reaper timer.
+ */
+export async function notifyEndedSessions(
+  transport: Transport,
+  reaped: ReadonlyArray<ReapedSession>,
+): Promise<void> {
+  const afkEnded = reaped.filter((s) => s.afk === AfkState.ON);
+  if (afkEnded.length === 0) return;
+
+  // afk is machine-wide, but the user (and their phone number) is per-account.
+  const byAccount = new Map<string, ReapedSession[]>();
+  for (const s of afkEnded) {
+    const list = byAccount.get(s.accountId);
+    if (list) list.push(s);
+    else byAccount.set(s.accountId, [s]);
+  }
+
+  for (const [accountId, sessions] of byAccount) {
+    try {
+      const items: EndedSessionItem[] = await Promise.all(
+        sessions.map(async (s) => ({
+          id: s.id,
+          title: s.title,
+          summary: await lastActivitySummary(s.id, accountId),
+        })),
+      );
+      // sendToUser is itself best-effort (logs + swallows transport errors).
+      await sendToUser(transport, accountId, composeSessionsEndedMessage(items));
+    } catch (err) {
+      console.error('[reaper] notify ended sessions failed', err);
+    }
+  }
 }
 
 /**

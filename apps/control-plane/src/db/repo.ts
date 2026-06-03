@@ -14,6 +14,7 @@ import {
   AttentionKind,
   DecisionBehavior,
   SessionState,
+  isAfkState,
   type ActivityEvent,
   type ActivityKind,
   type AttentionEvent,
@@ -325,6 +326,13 @@ export async function findDeviceByTokenHash(
  * Upsert a session by id, scoped to the device + account. Used by the device
  * API so attention/heartbeat/state can reference a session that the device
  * names. Returns the resulting SessionInfo.
+ *
+ * `reviveIfEnded` (default true): on conflict, flip a reaper-`ended` session back
+ * to `active`. The heartbeat path wants this (a slept device that beats again is
+ * alive). The activity tap does NOT — a late transcript tail-flush from a dying
+ * session is not proof of life; reviving on it would re-arm the staleness reaper
+ * (double-firing the "session stopped" notice) and resurrect a dashboard ghost.
+ * An explicit `state` always wins over both (COALESCE on $6).
  */
 export async function upsertSession(args: {
   sessionId: string;
@@ -333,6 +341,7 @@ export async function upsertSession(args: {
   cwd?: string | undefined;
   title?: string | undefined;
   state?: SessionState | undefined;
+  reviveIfEnded?: boolean | undefined;
 }): Promise<SessionInfo> {
   const row = await queryOne<SessionRow>(
     `INSERT INTO sessions (id, device_id, account_id, cwd, title, agent, state, last_event_at)
@@ -353,8 +362,10 @@ export async function upsertSession(args: {
             -- final title is idempotent, so this converges and stays put.
             title         = COALESCE(EXCLUDED.title, sessions.title),
             -- A heartbeat revives a session the staleness reaper had ended (e.g.
-            -- the device slept past the window, then woke and beat again).
-            state         = COALESCE($6, CASE WHEN sessions.state = 'ended'
+            -- the device slept past the window, then woke and beat again) — but
+            -- only when $8 (reviveIfEnded). The activity tap passes false so a
+            -- late tail-flush can't resurrect a dead session.
+            state         = COALESCE($6, CASE WHEN sessions.state = 'ended' AND $8
                                               THEN 'active' ELSE sessions.state END),
             last_event_at = now()
       WHERE sessions.account_id = $3
@@ -367,6 +378,7 @@ export async function upsertSession(args: {
       AgentKind.CLAUDE_CODE,
       args.state ?? null,
       args.title ?? null,
+      args.reviveIfEnded ?? true,
     ],
   );
   if (!row) {
@@ -399,6 +411,16 @@ export async function touchSession(args: {
  */
 export const SESSION_STALE_SECONDS = 30;
 
+/** A session the reaper just transitioned to `ended`, carrying enough to notify
+ *  the user it stopped: its account, human title, and its device's machine-wide
+ *  afk (joined from `devices` — afk gates whether we surface it to the phone). */
+export interface ReapedSession {
+  id: string;
+  accountId: string;
+  title: string | null;
+  afk: AfkState;
+}
+
 /**
  * Server-side liveness reaper: mark sessions `ended` once their last heartbeat
  * is older than the staleness window. This is the AUTHORITATIVE cleanup — the
@@ -407,20 +429,39 @@ export const SESSION_STALE_SECONDS = 30;
  * control plane must not depend on a goodbye message. Both live-session reads
  * already filter `state <> 'ended'`, so reaping here hides dead sessions from the
  * dashboard + orchestrator. Idempotent — safe to run on every control-plane
- * instance. Returns the number of sessions reaped.
+ * instance.
+ *
+ * Returns the sessions THIS call transitioned (joined to their device's afk +
+ * title). The `state <> 'ended'` guard + `RETURNING` make that set exactly-once
+ * across instances — only the instance whose UPDATE wins the row sees it — so a
+ * multi-machine deploy notifies the user about a stopped session exactly once.
  */
 export async function reapStaleSessions(
   staleSeconds: number = SESSION_STALE_SECONDS,
-): Promise<number> {
-  const rows = await query<{ id: string }>(
-    `UPDATE sessions
+): Promise<ReapedSession[]> {
+  const rows = await query<{
+    id: string;
+    account_id: string;
+    title: string | null;
+    afk: string;
+  }>(
+    `UPDATE sessions s
         SET state = 'ended'
-      WHERE state <> 'ended'
-        AND last_event_at < now() - ($1::int * interval '1 second')
-      RETURNING id`,
+       FROM devices d
+      WHERE s.device_id = d.id
+        AND s.state <> 'ended'
+        AND s.last_event_at < now() - ($1::int * interval '1 second')
+      RETURNING s.id, s.account_id, s.title, d.afk`,
     [staleSeconds],
   );
-  return rows.length;
+  return rows.map((r) => ({
+    id: r.id,
+    accountId: r.account_id,
+    title: r.title,
+    // Fail closed: an unexpected afk value reads as OFF (no notification) rather
+    // than a lying cast that could slip a junk string into the afk='on' filter.
+    afk: isAfkState(r.afk) ? r.afk : AfkState.OFF,
+  }));
 }
 
 // afk is MACHINE-WIDE and lives on `devices`. These RETURNING columns +

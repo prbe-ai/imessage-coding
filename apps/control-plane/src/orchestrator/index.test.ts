@@ -9,9 +9,11 @@ import { describe, expect, test } from 'bun:test';
 import { MessageChannel, type InboundMessage } from '@imsg/shared';
 import {
   composeDeliveryFollowup,
+  composeSessionsEndedMessage,
   extractOnboardingToken,
   shouldInterrupt,
   takeBatch,
+  type EndedSessionItem,
 } from './index.ts';
 
 function inbound(overrides: Partial<InboundMessage> = {}): InboundMessage {
@@ -144,5 +146,42 @@ describe('composeDeliveryFollowup — warn-only, silent on success', () => {
   test('joins multiple labels naturally with "and"', () => {
     const msg = composeDeliveryFollowup(['a', 'b', 'c']) ?? '';
     expect(msg.includes('a, b and c')).toBe(true);
+  });
+});
+
+describe('composeSessionsEndedMessage', () => {
+  const item = (o: Partial<EndedSessionItem> = {}): EndedSessionItem => ({
+    id: '0123456789abcdef',
+    title: 'fix the reaper',
+    summary: 'done — all tests green',
+    ...o,
+  });
+
+  test('single session: title + last-activity summary', () => {
+    const msg = composeSessionsEndedMessage([item()]);
+    expect(msg).toBe('Session "fix the reaper" stopped.\nLast: done — all tests green');
+  });
+
+  test('single session with no activity: omits the "Last:" line', () => {
+    const msg = composeSessionsEndedMessage([item({ summary: null })]);
+    expect(msg).toBe('Session "fix the reaper" stopped.');
+    expect(msg.includes('Last:')).toBe(false);
+  });
+
+  test('null/blank title falls back to the short id', () => {
+    expect(composeSessionsEndedMessage([item({ title: null, summary: null })])).toBe(
+      'Session "01234567" stopped.',
+    );
+    expect(composeSessionsEndedMessage([item({ title: '   ', summary: null })])).toBe(
+      'Session "01234567" stopped.',
+    );
+  });
+
+  test('multiple sessions coalesce into one bulleted message', () => {
+    const msg = composeSessionsEndedMessage([
+      item({ id: 'aaaaaaaa1111', title: 'A', summary: 'wrote the docs' }),
+      item({ id: 'bbbbbbbb2222', title: 'B', summary: null }),
+    ]);
+    expect(msg).toBe('2 sessions stopped:\n• A — wrote the docs\n• B');
   });
 });

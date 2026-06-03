@@ -8,24 +8,21 @@
  *   POST /api/device/pair       {pairingToken, os?, hostname?} -> {deviceToken}
  *   POST /api/device/attention  AttentionEvent[]               -> {accepted}
  *   POST /api/device/message    {sessionId, text}              -> {relayed}   (fire-and-forget status)
- *   GET  /api/device/events     ?sessionId&since (SSE)         -> decisions + steers
- *   POST /api/device/ack        {sessionId, attentionIds}      -> {acked}
- *   GET  /api/device/decisions  ?sessionId&since               -> LONG-POLL (legacy)
+ *   GET  /api/device/events     ?sessionId (SSE)               -> session inbox + afk
+ *   POST /api/device/ack        {sessionId, ids}               -> {acked}
  *   POST /api/device/heartbeat  {sessionId, cwd?}              -> {ok}
  *   POST /api/device/state      {afk?}                         -> {device:{enabled,afk}}
  *   GET  /api/device/state                                     -> {enabled, afk}
  *
- * The device subscribes to EVENTS (SSE) for pushed decisions + steers, then
- * confirms it injected decisions via ACK so the server marks them delivered and
- * stops re-serving them (at-least-once + idempotent). afk is MACHINE-WIDE
- * (stored on the device, not the session): POST /state writes the authenticated
- * device's afk (the CLI `imsg afk` toggle); any sessionId in the body is ignored.
- * GET /state is the remote killswitch probe: enabled = (revoked_at IS NULL AND
- * disabled_at IS NULL) for the device.
- *
- * The (legacy) decisions long-poll waits on LISTEN/NOTIFY 'decision_ready' (or
- * ~25s) and returns resolved Decisions for the device's session. FAIL-CLOSED: a
- * timeout returns an empty list, never a default allow.
+ * The device subscribes to EVENTS (SSE), which pushes the session inbox — one
+ * row per thing to deliver into the session (a `reply` to inject, or a permission
+ * `verdict` to relay) — plus afk on change. The device injects each row and
+ * confirms via ACK; the server sets delivered_at on that ACK and re-serves until
+ * then (at-least-once + idempotent dedup by id). afk is MACHINE-WIDE (stored on
+ * the device, not the session): POST /state writes the authenticated device's afk
+ * (the CLI `imsg afk` toggle); any sessionId in the body is ignored. GET /state is
+ * the remote killswitch probe: enabled = (revoked_at IS NULL AND disabled_at IS
+ * NULL) for the device.
  */
 import { Hono, type Context } from 'hono';
 import {
@@ -56,29 +53,24 @@ import {
   getSessionForDevice,
   insertAttentionEvent,
   insertSessionActivity,
-  listDecisionsForSession,
-  listUndeliveredSessionMessages,
-  markDecisionsDelivered,
-  markSessionMessagesAcked,
-  markSessionMessagesDelivered,
+  listUndeliveredInbox,
+  markInboxDelivered,
   setDeviceAfk,
   touchSession,
   upsertSession,
 } from '../db/repo.ts';
 import {
   ensureListener,
-  waitForDecision,
   waitForSessionOrDeviceEvent,
 } from '../db/listener.ts';
 import { streamSSE } from 'hono/streaming';
 import { getTransport } from '../transport.ts';
 import { relayAgentMessage, runAgentEventTurn } from '../orchestrator/index.ts';
 
-/** Long-poll ceiling (ms). Below typical 30s proxy/client timeouts. */
-const LONG_POLL_MS = 25_000;
-
-/** SSE keepalive cadence (ms) — ping under proxy idle timeouts. */
-const SSE_HEARTBEAT_MS = 25_000;
+/** SSE keepalive cadence (ms) — ping well under the Fly proxy idle ceiling
+ *  (~60s) so an idle stream isn't dropped mid-flight (the recurring "operation
+ *  timed out" reconnects). Also bounds worst-case re-flush latency to one beat. */
+const SSE_HEARTBEAT_MS = 15_000;
 
 /** Max activity events accepted in one POST /api/device/activity (device chunks at 500). */
 const MAX_ACTIVITY_BATCH = 2_000;
@@ -155,7 +147,6 @@ deviceRoutes.post(DeviceApiRoute.PAIR, async (c) => {
 deviceRoutes.use(`${DeviceApiRoute.ATTENTION}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.MESSAGE}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.ACTIVITY}`, requireDevice);
-deviceRoutes.use(`${DeviceApiRoute.DECISIONS}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.EVENTS}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.ACK}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.HEARTBEAT}`, requireDevice);
@@ -355,72 +346,14 @@ deviceRoutes.post(DeviceApiRoute.ACTIVITY, async (c) => {
   }
 });
 
-// --- DECISIONS (LONG-POLL) — LEGACY, superseded by EVENTS (SSE) ---------------
-// The device no longer polls this; it uses the EVENTS stream + ACK. Kept only
-// for backward compat. WARNING: this path has NO ack/markDecisionsDelivered, so
-// listDecisionsForSession (now filtered `delivered_at IS NULL`) would re-serve
-// the same decision on every poll. Do NOT route a device here without first
-// giving it an ack path — use EVENTS.
-deviceRoutes.get(DeviceApiRoute.DECISIONS, async (c) => {
-  const auth = device(c);
-  const sessionId = c.req.query('sessionId');
-  const since = c.req.query('since');
-  if (!sessionId) {
-    return c.json({ error: 'missing_session_id' }, 400);
-  }
-  if (!isUuid(sessionId)) {
-    return c.json({ error: 'invalid_session_id' }, 400);
-  }
-
-  // Scope check: the session must belong to this device/account.
-  const session = await getSessionForDevice({
-    sessionId,
-    deviceId: auth.deviceId,
-    accountId: auth.accountId,
-  });
-  if (!session) {
-    return c.json({ error: 'unknown_session' }, 404);
-  }
-
-  // Fast path: already-resolved decisions since the cursor. The response
-  // carries the requestIds map (attentionId -> Channels request_id) the device
-  // needs to relay a permission verdict, plus an advanced `since` cursor.
-  const initial = await listDecisionsForSession({
-    sessionId,
-    deviceId: auth.deviceId,
-    accountId: auth.accountId,
-    since,
-  });
-  if (initial.decisions.length > 0) {
-    return c.json(initial);
-  }
-
-  // Slow path: park on LISTEN/NOTIFY until a decision lands or we time out.
-  await ensureListener();
-  const woken = await waitForDecision(sessionId, LONG_POLL_MS);
-  if (!woken) {
-    // Timeout: fail-closed — empty list, never a default allow.
-    return c.json({ decisions: [], requestIds: {} });
-  }
-
-  // Re-query: the NOTIFY is only a wake signal; the DB is the source of truth.
-  const fresh = await listDecisionsForSession({
-    sessionId,
-    deviceId: auth.deviceId,
-    accountId: auth.accountId,
-    since,
-  });
-  return c.json(fresh);
-});
-
-// --- EVENTS (SSE push: decisions + session-message steers) --------------------
-// Replaces the device's decision polling: the plugin opens ONE long-lived stream
-// and reacts to pushed events (driven by LISTEN/NOTIFY). On (re)connect we replay
-// anything since the device's cursor, then stream live — at-least-once, fail-closed.
+// --- EVENTS (SSE push: the session inbox + afk state) -------------------------
+// The plugin opens ONE long-lived stream and reacts to pushed events (driven by
+// LISTEN/NOTIFY). On every wake it flushes the session's undelivered inbox rows
+// (a reply or a permission verdict) + afk on change; rows re-serve until the
+// device ACKs them — at-least-once, deduped to once into the session.
 deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
   const auth = device(c);
   const sessionId = c.req.query('sessionId');
-  const since0 = c.req.query('since');
   if (!sessionId) {
     return c.json({ error: 'missing_session_id' }, 400);
   }
@@ -438,7 +371,6 @@ deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
   await ensureListener();
 
   return streamSSE(c, async (stream) => {
-    let since = since0; // decisions cursor (ISO resolved_at); advances as we emit
     // Last afk pushed for THIS session; undefined → emit the current value on
     // the first flush so a reconnecting device re-syncs even if it missed a
     // change while disconnected.
@@ -448,36 +380,18 @@ deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
       aborted = true;
     });
 
-    // Emit pending decisions (since cursor) + undelivered steers (mark them
-    // delivered) + the session's current {afk} when it changed. The device's
-    // applyDecision stays the verdict arbiter; the `state` event is applied to
-    // its local afk.state file (idempotent there).
+    // Flush the session's undelivered inbox rows (a `reply` to inject, or a
+    // permission `verdict` to relay) + afk on change. Rows are NOT marked here:
+    // delivered_at is set only on the device's ACK, so a dropped frame is
+    // re-served on the next flush (at-least-once; the device dedups by id).
     const flush = async (): Promise<void> => {
-      const dec = await listDecisionsForSession({
-        sessionId,
-        deviceId: auth.deviceId,
-        accountId: auth.accountId,
-        since,
-      });
-      if (dec.decisions.length > 0) {
-        await stream.writeSSE({
-          event: SseEvent.DECISIONS,
-          data: JSON.stringify({
-            decisions: dec.decisions,
-            requestIds: dec.requestIds,
-            since: dec.since,
-          }),
-        });
-        if (dec.since) since = dec.since;
-      }
-      const msgs = await listUndeliveredSessionMessages({
+      const items = await listUndeliveredInbox({
         sessionId,
         deviceId: auth.deviceId,
         accountId: auth.accountId,
       });
-      if (msgs.length > 0) {
-        await stream.writeSSE({ event: SseEvent.SESSION_MESSAGES, data: JSON.stringify({ messages: msgs }) });
-        await markSessionMessagesDelivered(msgs.map((m) => m.id));
+      if (items.length > 0) {
+        await stream.writeSSE({ event: SseEvent.INBOX, data: JSON.stringify({ items }) });
       }
       // Push afk on change so a dashboard/CLI toggle reaches the device's
       // PreToolUse hook (which reads the local state file). Re-query for the
@@ -496,7 +410,7 @@ deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
       }
     };
 
-    // Catch-up on connect, then stream live. Wake on a decision/steer for THIS
+    // Catch-up on connect, then stream live. Wake on a new inbox row for THIS
     // session OR a machine-wide afk toggle on THIS device (device_state),
     // so a dashboard/CLI device toggle reaches every session's hook sub-second.
     // On timeout we ping to stay alive.
@@ -525,38 +439,30 @@ deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
 });
 
 // --- ACK ----------------------------------------------------------------------
-// The device confirms it injected decisions into the session (by attentionId).
-// We mark them delivered so the SSE flush stops re-serving them — turning
-// decision delivery from at-most-once (a dropped frame lost the answer) into
-// at-least-once + idempotent dedup (the device skips re-injection, the server
-// skips re-send). Session-scoped: an ack can only touch this device's own
-// decisions. Always 200 with the subset actually flipped (idempotent).
+// The device confirms it injected inbox rows into the session (by id). We set
+// delivered_at so the SSE flush stops re-serving them — turning delivery from
+// at-most-once (a dropped frame lost the row) into at-least-once + idempotent
+// dedup (the device skips re-injection, the server skips re-send). Session-scoped:
+// an ack can only touch this device's own rows. Always 200 with the subset
+// actually flipped (idempotent).
 deviceRoutes.post(DeviceApiRoute.ACK, async (c) => {
   const auth = device(c);
   const body = (await c.req.json().catch(() => ({}))) as {
     sessionId?: unknown;
-    attentionIds?: unknown;
-    messageIds?: unknown;
+    ids?: unknown;
   };
   const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
   if (!sessionId) {
     return c.json({ error: 'missing_session_id' }, 400);
   }
   // Validate UUIDs here: the repo casts to ::uuid[], and a malformed id
-  // (old/buggy client) would otherwise raise an unhandled 500 — the exact
-  // failure mode the heartbeat fail-soft change kills. Drop non-UUIDs silently
-  // (consistent with the idempotent "subset actually flipped" contract).
-  const attentionIds = Array.isArray(body.attentionIds)
-    ? body.attentionIds.filter((x): x is string => typeof x === 'string' && isUuid(x))
+  // (old/buggy client) would otherwise raise an unhandled 500. Drop non-UUIDs
+  // silently (consistent with the idempotent "subset actually flipped" contract).
+  const ids = Array.isArray(body.ids)
+    ? body.ids.filter((x): x is string => typeof x === 'string' && isUuid(x))
     : [];
-  // messageIds: the device confirms it injected these STEERS (sets acked_at →
-  // the delivery-confirmation signal). Optional — older plugins send only
-  // attentionIds. Both are tenant-scoped in the repo by device_id + account_id.
-  const messageIds = Array.isArray(body.messageIds)
-    ? body.messageIds.filter((x): x is string => typeof x === 'string' && isUuid(x))
-    : [];
-  if (attentionIds.length === 0 && messageIds.length === 0) {
-    return c.json({ acked: [], ackedMessages: [] });
+  if (ids.length === 0) {
+    return c.json({ acked: [] });
   }
   // Scope check: the session must belong to this device/account.
   const session = await getSessionForDevice({
@@ -567,25 +473,13 @@ deviceRoutes.post(DeviceApiRoute.ACK, async (c) => {
   if (!session) {
     return c.json({ error: 'unknown_session' }, 404);
   }
-  const acked =
-    attentionIds.length > 0
-      ? await markDecisionsDelivered({
-          sessionId,
-          deviceId: auth.deviceId,
-          accountId: auth.accountId,
-          attentionIds,
-        })
-      : [];
-  const ackedMessages =
-    messageIds.length > 0
-      ? await markSessionMessagesAcked({
-          sessionId,
-          deviceId: auth.deviceId,
-          accountId: auth.accountId,
-          messageIds,
-        })
-      : [];
-  return c.json({ acked, ackedMessages });
+  const acked = await markInboxDelivered({
+    sessionId,
+    deviceId: auth.deviceId,
+    accountId: auth.accountId,
+    ids,
+  });
+  return c.json({ acked });
 });
 
 // --- HEARTBEAT ----------------------------------------------------------------

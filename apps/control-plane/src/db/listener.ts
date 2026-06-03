@@ -1,21 +1,20 @@
 /**
- * LISTEN/NOTIFY bridge for the control plane's SSE streams (device + dashboard)
- * and the legacy decisions long-poll.
+ * LISTEN/NOTIFY bridge for the control plane's SSE streams (device + dashboard).
  *
  * The schema fires three notifications:
- *   - `decision_ready`  on a decisions INSERT (verdict/answer)        [session]
- *   - `session_message` on a session_messages INSERT (free-text steer) [session]
- *   - `session_state`   on a sessions state change                     [session + account]
+ *   - `session_inbox`  on a session_inbox INSERT (a row to deliver)   [session]
+ *   - `session_state`  on a sessions state change                     [session + account]
+ *   - `device_state`   on a device afk change (machine-wide toggle)   [device + account]
  * We hold ONE dedicated pg client LISTENing on all three channels and fan each
  * notification out to in-process waiters. Waiters subscribe by KEY — sessionId
- * (the device's per-session stream) or accountId (the dashboard's account-scoped
- * stream). A waiter is a bare wake signal; the caller re-queries Neon (the source
- * of truth) on wake. A timeout returns without a wake (fail-closed: never a
- * default allow).
+ * (the device's per-session stream), accountId (the dashboard's account-scoped
+ * stream), or deviceId (the machine-wide afk fan-out). A waiter is a bare wake
+ * signal; the caller re-queries Neon (the source of truth) on wake. A timeout
+ * returns without a wake (fail-closed: never a default allow).
  *
  * `session_state` wakes BOTH the session waiter (device → push `state`) and the
- * account waiter (dashboard → push `sessions`); the other two channels wake only
- * the session waiter.
+ * account waiter (dashboard → push `sessions`); `device_state` wakes the device
+ * waiter + the account waiter; `session_inbox` wakes only the session waiter.
  *
  * Per-process: with multiple app instances each LISTENs independently, so every
  * instance is woken; the post-wake DB re-query is the real arbiter.
@@ -25,20 +24,11 @@ import { NotifyChannel } from '@imsg/shared';
 import { loadEnv } from '../env.ts';
 
 const CHANNELS = [
-  NotifyChannel.DECISION_READY,
-  NotifyChannel.SESSION_MESSAGE,
+  NotifyChannel.SESSION_INBOX,
   NotifyChannel.SESSION_STATE,
   NotifyChannel.DEVICE_STATE,
-  NotifyChannel.DECISION_DELIVERED,
-  NotifyChannel.MESSAGE_DELIVERED,
+  NotifyChannel.INBOX_DELIVERED,
 ] as const;
-
-/** The two confirmation channels carry only a row `id` and wake the
- *  delivery-confirmation waiter (not session/account/device waiters). */
-const DELIVERED_CHANNELS: readonly string[] = [
-  NotifyChannel.DECISION_DELIVERED,
-  NotifyChannel.MESSAGE_DELIVERED,
-];
 
 /** A bare wake signal for a parked waiter. */
 type Waiter = () => void;
@@ -120,8 +110,8 @@ function makeWaiterRegistry() {
 const sessionWaiters = makeWaiterRegistry();
 const accountWaiters = makeWaiterRegistry();
 const deviceWaiters = makeWaiterRegistry();
-/** Keyed by ROW id (attention_id / message id) — woken by the *_delivered
- *  channels when the device confirms it injected that decision/steer. */
+/** Keyed by session_inbox ROW id — woken by `inbox_delivered` when the device
+ *  confirms it injected that row. Backs the 30s confirmation watcher. */
 const deliveredWaiters = makeWaiterRegistry();
 
 let client: Client | undefined;
@@ -141,13 +131,13 @@ function handleNotification(channel: string, payloadText: string | undefined): v
     console.error('[listener] unparseable payload on', channel, payloadText);
     return;
   }
-  // Confirmation channels are keyed by the row id → wake the delivery waiter.
-  if (DELIVERED_CHANNELS.includes(channel)) {
+  // inbox_delivered is keyed by the row id → wake the confirmation watcher only.
+  if (channel === NotifyChannel.INBOX_DELIVERED) {
     if (payload.id) deliveredWaiters.wake(payload.id);
     return;
   }
-  // decision_ready / session_message / session_state carry a session_id → wake
-  // the device's per-session stream.
+  // session_inbox / session_state carry a session_id → wake the device's
+  // per-session stream so it re-queries + flushes.
   if (payload.session_id) sessionWaiters.wake(payload.session_id);
   // device_state (machine-wide afk) carries a device_id → wake every live
   // stream for that device so each re-flushes its device-sourced {afk}.
@@ -281,14 +271,13 @@ export function waitForSessionOrDeviceEvent(
 }
 
 /** Max time to wait on `ensureListener` before proceeding regardless (a hung
- *  connect must not stall the caller; the post-wake re-query is the safety net). */
+ *  connect must not stall the watcher; the post-wake re-query is the safety net). */
 const ENSURE_LISTENER_BUDGET_MS = 2_000;
 
 /**
  * Resolve `p`, but never later than `ms` (then `fallback`). A rejection also
- * resolves to `fallback`. Used to bound every DB touch in waitForDelivered so a
- * hung query (pool exhaustion, partition) can NEVER hang the detached watcher —
- * the function always settles. Resolving twice is a no-op (a Promise settles once).
+ * resolves to `fallback`. Bounds every DB touch in waitForDelivered so a hung
+ * query can NEVER hang the detached watcher — it always settles.
  */
 function settleWithin<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
   return new Promise<T>((resolve) => {
@@ -307,55 +296,37 @@ function settleWithin<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 }
 
 /**
- * Wait until the device confirms delivery of the row `key` (an attention_id for
- * a decision, or a message id for a steer), or until `timeoutMs` elapses.
- * Resolves true if confirmed, false on timeout/abort. `isDone` is the caller's
- * per-kind lookup (decisions.delivered_at / session_messages.acked_at).
- *
- * Robustness (every line here defends a way the detached watcher could lie or
- * hang — it must always settle, and must never claim "unconfirmed" when the row
- * is actually delivered):
- *  - ENSURE THE LISTENER: a `*_delivered` NOTIFY only arrives if the dedicated
- *    LISTEN client is up. Boot warm-up is best-effort and never retries an
- *    initial failure, so ensure it HERE (idempotent) — else every confirmation
- *    falsely times out. Bounded so a hung connect can't stall us.
- *  - PARK-BEFORE-QUERY (TOCTOU): register the waiter BEFORE the first re-check,
- *    so a NOTIFY firing in the check→park window isn't stranded (the same hazard
- *    the device SSE loop documents).
- *  - BOUNDED CHECKS: each `isDone` runs under `settleWithin`, so a stuck query
- *    can't outlive the deadline and hang the watcher's `Promise.all`.
- *  - RE-QUERY IS THE ARBITER: after the wake/timeout, query once more — a missed
- *    or reconnect-dropped NOTIFY must not produce a false "unconfirmed" when
- *    `delivered_at`/`acked_at` is in fact set. The DB, not the NOTIFY, decides.
+ * Wait until the device confirms delivery of the session_inbox row `id` (its
+ * delivered_at flips, via the `inbox_delivered` NOTIFY), or until `timeoutMs`
+ * elapses. Resolves true if confirmed, false on timeout/abort. `isDone` is the
+ * caller's lookup (isInboxDelivered). Backs the orchestrator's 30s warn-only
+ * watcher. Defends every way it could lie or hang:
+ *  - ENSURE THE LISTENER (bounded) so the NOTIFY can actually reach us.
+ *  - PARK-BEFORE-QUERY: register the waiter before the first re-check (TOCTOU).
+ *  - BOUNDED CHECKS: each isDone runs under settleWithin.
+ *  - RE-QUERY IS THE ARBITER: after wake/timeout, the DB (not the NOTIFY) decides.
  */
 export async function waitForDelivered(
-  key: string,
+  id: string,
   timeoutMs: number,
   isDone: () => Promise<boolean>,
   signal?: AbortSignal,
 ): Promise<boolean> {
   if (signal?.aborted) return false;
-  // The NOTIFY can't reach us without the LISTEN client. Bounded + best-effort:
-  // a failure falls through to the re-query path, never throws.
   await settleWithin(ensureListener(), ENSURE_LISTENER_BUDGET_MS, undefined);
   if (signal?.aborted) return false;
 
-  // A child controller lets us cancel the parked waiter when a check short-circuits.
   const controller = new AbortController();
   const onParentAbort = (): void => controller.abort();
   signal?.addEventListener('abort', onParentAbort, { once: true });
   // Register the waiter BEFORE the first re-check (park-before-query invariant).
-  const parked = deliveredWaiters.waitFor(key, timeoutMs, controller.signal);
-  // A delivery check that can never outlive the deadline (false on hang/throw).
+  const parked = deliveredWaiters.waitFor(id, timeoutMs, controller.signal);
   const check = (): Promise<boolean> => settleWithin(isDone(), timeoutMs, false);
   try {
-    // Pre-check: already delivered → done (covers the fast ACK / warm row).
     if (await check()) {
-      controller.abort(); // unregister the (now-moot) waiter
+      controller.abort();
       return true;
     }
-    // Wait for the NOTIFY wake or the timeout, then RE-QUERY as the arbiter
-    // (handles a missed/reconnect-dropped NOTIFY and the wake→here window).
     await parked;
     return await check();
   } finally {
@@ -363,9 +334,6 @@ export async function waitForDelivered(
     signal?.removeEventListener('abort', onParentAbort);
   }
 }
-
-/** @deprecated Alias retained for the legacy decisions long-poll. */
-export const waitForDecision = waitForSessionEvent;
 
 /** Close the dedicated listener client (graceful shutdown). */
 export async function closeListener(): Promise<void> {

@@ -10,7 +10,6 @@ import {
   AgentKind,
   AttentionKind,
   DecisionBehavior,
-  DecisionSource,
   MessageChannel,
   SessionState,
 } from './enums.ts';
@@ -18,7 +17,6 @@ import type {
   ActivityBatchBody,
   ActivityEvent,
   AttentionEvent,
-  Decision,
   InboundMessage,
   OutboundMessage,
 } from './types.ts';
@@ -60,8 +58,6 @@ export const isActivityKind = (v: unknown): v is ActivityKind =>
   isEnumValue(ActivityKind, v);
 export const isDecisionBehavior = (v: unknown): v is DecisionBehavior =>
   isEnumValue(DecisionBehavior, v);
-export const isDecisionSource = (v: unknown): v is DecisionSource =>
-  isEnumValue(DecisionSource, v);
 export const isSessionState = (v: unknown): v is SessionState =>
   isEnumValue(SessionState, v);
 export const isAgentKind = (v: unknown): v is AgentKind =>
@@ -122,17 +118,6 @@ export function isActivityBatchBody(v: unknown): v is ActivityBatchBody {
   if (!isOptString(v['cwd'])) return false;
   const events = v['events'];
   return Array.isArray(events) && events.every(isActivityEvent);
-}
-
-export function isDecision(v: unknown): v is Decision {
-  if (!isRecord(v)) return false;
-  if (!isString(v['attentionId'])) return false;
-  if (v['behavior'] !== undefined && !isDecisionBehavior(v['behavior'])) {
-    return false;
-  }
-  if (!isOptString(v['answerText'])) return false;
-  if (!isString(v['resolvedAt'])) return false;
-  return isDecisionSource(v['source']);
 }
 
 export function isInboundMessage(v: unknown): v is InboundMessage {

@@ -127,35 +127,22 @@ describe('shouldInterrupt — only uncommitted free-text coalesces', () => {
   });
 });
 
-describe('composeDeliveryFollowup — honest, code-generated confirmation', () => {
-  test('nothing delivered → no message (undefined)', () => {
-    expect(composeDeliveryFollowup([], [])).toBeUndefined();
+describe('composeDeliveryFollowup — warn-only, silent on success', () => {
+  test('all confirmed (none unconfirmed) → no message (undefined)', () => {
+    expect(composeDeliveryFollowup([])).toBeUndefined();
   });
 
-  test('all confirmed → a single ✓ line', () => {
-    const msg = composeDeliveryFollowup(['your answer'], []) ?? '';
-    expect(msg.includes('✓')).toBe(true);
-    expect(msg.includes('your answer')).toBe(true);
-    expect(msg.includes('⚠️')).toBe(false);
-  });
-
-  test('all unconfirmed → a ⚠️ heads-up, never a ✓', () => {
-    const msg = composeDeliveryFollowup([], ['your answer']) ?? '';
+  test('unconfirmed → a ⚠️ heads-up that names the 30s window, never a ✓', () => {
+    const msg = composeDeliveryFollowup(['your answer']) ?? '';
     expect(msg.includes('⚠️')).toBe(true);
     expect(msg.includes("couldn't confirm")).toBe(true);
+    expect(msg.includes('your answer')).toBe(true);
+    expect(msg.includes('30s')).toBe(true);
     expect(msg.includes('✓')).toBe(false);
   });
 
-  test('mixed → both a ✓ for landed and a ⚠️ for unconfirmed', () => {
-    const msg = composeDeliveryFollowup(['the plan approval'], ['your message to abc12345']) ?? '';
-    expect(msg.includes('✓')).toBe(true);
-    expect(msg.includes('the plan approval')).toBe(true);
-    expect(msg.includes('⚠️')).toBe(true);
-    expect(msg.includes('your message to abc12345')).toBe(true);
-  });
-
   test('joins multiple labels naturally with "and"', () => {
-    const msg = composeDeliveryFollowup(['a', 'b', 'c'], []) ?? '';
+    const msg = composeDeliveryFollowup(['a', 'b', 'c']) ?? '';
     expect(msg.includes('a, b and c')).toBe(true);
   });
 });

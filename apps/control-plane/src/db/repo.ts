@@ -10,15 +10,14 @@
 import {
   AfkState,
   AgentKind,
+  AttentionKind,
+  DecisionBehavior,
   SessionState,
   type ActivityEvent,
   type ActivityKind,
   type AttentionEvent,
-  type AttentionKind,
-  type Decision,
-  type DecisionBehavior,
-  type DecisionSource,
   type DeviceInfo,
+  type InboxItem,
   type SessionInfo,
 } from '@imsg/shared';
 import { query, queryOne, withTransaction } from './pool.ts';
@@ -96,14 +95,13 @@ interface AttentionRow {
   resolved: boolean;
 }
 
-interface DecisionRow {
+interface InboxRow {
   id: string;
-  attention_id: string;
+  kind: string;
+  text: string | null;
+  request_id: string | null;
   behavior: string | null;
-  answer_text: string | null;
-  source: string;
-  resolved_at: string;
-  delivered_at: string | null;
+  attention_id: string | null;
 }
 
 interface MessageLogRow {
@@ -172,15 +170,13 @@ function toAttentionEvent(r: AttentionRow): AttentionEvent {
   return e;
 }
 
-function toDecision(r: DecisionRow): Decision {
-  const d: Decision = {
-    attentionId: r.attention_id,
-    resolvedAt: new Date(r.resolved_at).toISOString(),
-    source: r.source as DecisionSource,
-  };
-  if (r.behavior !== null) d.behavior = r.behavior as DecisionBehavior;
-  if (r.answer_text !== null) d.answerText = r.answer_text;
-  return d;
+function toInboxItem(r: InboxRow): InboxItem {
+  const item: InboxItem = { id: r.id, kind: r.kind as InboxItem['kind'] };
+  if (r.text !== null) item.text = r.text;
+  if (r.request_id !== null) item.requestId = r.request_id;
+  if (r.behavior !== null) item.behavior = r.behavior as DecisionBehavior;
+  if (r.attention_id !== null) item.attentionId = r.attention_id;
+  return item;
 }
 
 // --- accounts / conversations -------------------------------------------------
@@ -851,136 +847,141 @@ export async function setAttentionNotifyMessageId(
   return rows.length > 0;
 }
 
-// --- decisions ----------------------------------------------------------------
+// --- attention resolution + the session inbox ---------------------------------
 
 /**
- * Resolve an attention event by inserting a Decision and flipping `resolved`.
- * The decisions INSERT fires the LISTEN/NOTIFY trigger that wakes the device
- * long-poll. Scoped to account; the attention must be unresolved.
+ * Resolve an attention event: flip `resolved` (idempotent — only the first
+ * resolve wins) and enqueue the consequence onto the session inbox, atomically.
+ * A PERMISSION resolves to a `verdict` row (relayed on the permission channel to
+ * release the native prompt — the one structured path); a question/plan resolves
+ * to a `reply` row (text injected into the session). A behavior on a non-permission
+ * (approve/deny a plan) becomes a short canonical reply.
  *
- * Returns the persisted Decision, or undefined if the attention was already
- * resolved / not found (idempotent — never double-resolves).
+ * Returns the new inbox row id, or undefined if the attention was already
+ * resolved / not found (never double-resolves, never double-enqueues).
  */
 export async function resolveAttention(args: {
   accountId: string;
   attentionId: string;
   behavior?: DecisionBehavior | undefined;
   answerText?: string | undefined;
-  source: DecisionSource;
-}): Promise<Decision | undefined> {
+}): Promise<{ inboxId: string } | undefined> {
   return withTransaction(async (client) => {
-    // Claim the attention row (only if still unresolved + in this account).
-    const claim = await client.query<{ id: string }>(
+    // Claim the attention row (only if still unresolved + in this account) and
+    // read what we need to deliver the consequence.
+    const claim = await client.query<{
+      session_id: string;
+      kind: string;
+      request_id: string | null;
+    }>(
       `UPDATE attention_events
           SET resolved = true
         WHERE id = $1 AND account_id = $2 AND resolved = false
-        RETURNING id`,
+        RETURNING session_id, kind, request_id`,
       [args.attentionId, args.accountId],
     );
-    if (claim.rows.length === 0) return undefined;
+    const claimed = claim.rows[0];
+    if (!claimed) return undefined;
 
-    const decRes = await client.query<DecisionRow>(
-      `INSERT INTO decisions (attention_id, behavior, answer_text, source)
-       VALUES ($1, $2, $3, $4)
-       RETURNING *`,
-      [
-        args.attentionId,
-        args.behavior ?? null,
-        args.answerText ?? null,
-        args.source,
-      ],
-    );
-
-    const row = decRes.rows[0];
-    if (!row) throw new Error('resolveAttention: decision insert returned no row');
-    return toDecision(row);
+    let ins;
+    if (claimed.kind === AttentionKind.PERMISSION) {
+      // Fail-CLOSED: a permission with no explicit behavior is a deny.
+      const behavior = args.behavior ?? DecisionBehavior.DENY;
+      ins = await client.query<{ id: string }>(
+        `INSERT INTO session_inbox (session_id, account_id, kind, request_id, behavior, attention_id)
+         VALUES ($1, $2, 'verdict', $3, $4, $5) RETURNING id`,
+        [claimed.session_id, args.accountId, claimed.request_id, behavior, args.attentionId],
+      );
+    } else {
+      const text =
+        args.answerText ??
+        (args.behavior === DecisionBehavior.ALLOW ? 'Approved — go ahead.' : 'Denied.');
+      ins = await client.query<{ id: string }>(
+        `INSERT INTO session_inbox (session_id, account_id, kind, text, attention_id)
+         VALUES ($1, $2, 'reply', $3, $4) RETURNING id`,
+        [claimed.session_id, args.accountId, text, args.attentionId],
+      );
+    }
+    const row = ins.rows[0];
+    if (!row) throw new Error('resolveAttention: inbox insert returned no row');
+    return { inboxId: row.id };
   });
 }
 
 /**
- * Resolved decisions for a device's session, plus the data the device needs to
- * relay a permission verdict back to Claude Code.
- *
- * The device's channel server matches a permission Decision back to the open
- * Claude Code prompt by its Channels `request_id`. That id lives on the
- * originating attention_events row (request_id), so we return it as a
- * `requestIds[attentionId] -> request_id` map. We also return a `since` cursor
- * (the max resolved_at returned) so the device advances its poll cursor and
- * never re-applies (re-relays) a verdict/answer it already handled.
+ * Undelivered session-inbox rows for a device's session (oldest first). Scoped
+ * so a device can only drain its OWN session's inbox. The device injects each
+ * row (a `reply` as a <channel> message, a `verdict` on the permission channel),
+ * then ACKs it; rows are re-served until that ACK (markInboxDelivered), so a
+ * dropped SSE frame is recovered on reconnect — at-least-once + device dedup.
  */
-export interface SessionDecisions {
-  decisions: Decision[];
-  /** attentionId -> Channels request_id (only for permission attentions). */
-  requestIds: Record<string, string>;
-  /** Max resolved_at across the returned decisions (ISO-8601), if any. */
-  since: string | undefined;
-}
-
-/**
- * Fetch resolved decisions for a device's session created after `since`
- * (ISO-8601). Scoped so a device can only read decisions for its own sessions.
- */
-export async function listDecisionsForSession(args: {
+export async function listUndeliveredInbox(args: {
   sessionId: string;
   deviceId: string;
   accountId: string;
-  since: string | undefined;
-}): Promise<SessionDecisions> {
-  const rows = await query<DecisionRow & { request_id: string | null }>(
-    `SELECT d.*, ae.request_id AS request_id
-       FROM decisions d
-       JOIN attention_events ae ON ae.id = d.attention_id
-       JOIN sessions s          ON s.id  = ae.session_id
-      WHERE ae.session_id = $1
+}): Promise<InboxItem[]> {
+  const rows = await query<InboxRow>(
+    `SELECT si.id, si.kind, si.text, si.request_id, si.behavior, si.attention_id
+       FROM session_inbox si
+       JOIN sessions s ON s.id = si.session_id
+      WHERE si.session_id = $1
         AND s.device_id   = $2
         AND s.account_id  = $3
-        AND d.delivered_at IS NULL
-        AND ($4::timestamptz IS NULL OR d.resolved_at > $4::timestamptz)
-      ORDER BY d.resolved_at ASC`,
-    [args.sessionId, args.deviceId, args.accountId, args.since ?? null],
+        AND si.delivered_at IS NULL
+      ORDER BY si.created_at ASC`,
+    [args.sessionId, args.deviceId, args.accountId],
   );
-
-  const decisions = rows.map(toDecision);
-  const requestIds: Record<string, string> = {};
-  let since: string | undefined;
-  for (const r of rows) {
-    if (r.request_id !== null) requestIds[r.attention_id] = r.request_id;
-    const iso = new Date(r.resolved_at).toISOString();
-    if (since === undefined || iso > since) since = iso;
-  }
-  return { decisions, requestIds, since };
+  return rows.map(toInboxItem);
 }
 
 /**
- * Mark decisions delivered once the device confirms it injected them (by
- * attentionId, via POST /api/device/ack). Decisions are 1:1 with their
- * attention, so attentionId is a stable ack key. Scoped to the device's own
- * session so an ack can never mark another tenant's decision. Idempotent
- * (already-delivered rows are skipped). Returns the attentionIds actually
- * flipped, for logging.
+ * Mark inbox rows delivered once the device confirms it injected them (by id,
+ * via POST /api/device/ack) — the SINGLE delivery signal. The SSE stream serves
+ * only rows where delivered_at IS NULL, so this is what stops re-serving. Scoped
+ * to the device's own session so an ack can never mark another tenant's row.
+ * Idempotent (already-delivered rows skipped). Returns the ids actually flipped.
  */
-export async function markDecisionsDelivered(args: {
+export async function markInboxDelivered(args: {
   sessionId: string;
   deviceId: string;
   accountId: string;
-  attentionIds: string[];
+  ids: string[];
 }): Promise<string[]> {
-  if (args.attentionIds.length === 0) return [];
-  const rows = await query<{ attention_id: string }>(
-    `UPDATE decisions d
+  if (args.ids.length === 0) return [];
+  const rows = await query<{ id: string }>(
+    `UPDATE session_inbox si
         SET delivered_at = now()
-       FROM attention_events ae
-       JOIN sessions s ON s.id = ae.session_id
-      WHERE d.attention_id   = ae.id
-        AND ae.session_id    = $1
-        AND s.device_id      = $2
-        AND s.account_id     = $3
-        AND d.attention_id   = ANY($4::uuid[])
-        AND d.delivered_at IS NULL
-    RETURNING d.attention_id`,
-    [args.sessionId, args.deviceId, args.accountId, args.attentionIds],
+       FROM sessions s
+      WHERE si.session_id = s.id
+        AND si.session_id = $1
+        AND s.device_id   = $2
+        AND s.account_id  = $3
+        AND si.account_id = $3
+        AND si.id = ANY($4::uuid[])
+        AND si.delivered_at IS NULL
+    RETURNING si.id`,
+    [args.sessionId, args.deviceId, args.accountId, args.ids],
   );
-  return rows.map((r) => r.attention_id);
+  return rows.map((r) => r.id);
+}
+
+/** True once the device has ACKed injection of the inbox row `id`
+ *  (session_inbox.delivered_at set). Account-scoped. Backs the orchestrator's
+ *  30s delivery-confirmation watcher (see waitForDelivered's park-before-query). */
+export async function isInboxDelivered(args: {
+  id: string;
+  accountId: string;
+}): Promise<boolean> {
+  const rows = await query<{ ok: number }>(
+    `SELECT 1 AS ok
+       FROM session_inbox
+      WHERE id = $1
+        AND account_id = $2
+        AND delivered_at IS NOT NULL
+      LIMIT 1`,
+    [args.id, args.accountId],
+  );
+  return rows.length > 0;
 }
 
 // --- message log --------------------------------------------------------------
@@ -1051,143 +1052,30 @@ export async function releaseWebhook(webhookId: string): Promise<void> {
   await query(`DELETE FROM processed_webhooks WHERE webhook_id = $1`, [webhookId]);
 }
 
-// --- session messages (free-text steering INTO a running session) -------------
-
-/** A free-text steer queued for delivery into a session. */
-export interface SessionMessage {
-  id: string;
-  body: string;
-}
-
-interface SessionMessageRow {
-  id: string;
-  body: string;
-}
+// --- free-text steers (a reply with no attention to resolve) ------------------
 
 /**
- * Queue a free-text steer for a session. Tenant-scoped: the row is inserted ONLY
- * if the session exists, belongs to `accountId`, and is not ended — so a model
- * can never steer another account's (or a dead) session. Fires NOTIFY
- * 'session_message' to wake the device's event stream. Returns the new id, or
- * undefined if no matching live session.
+ * Queue a free-text steer as a `reply` inbox row for a session ("also add
+ * tests") — a message to the session that isn't answering any pending attention.
+ * Tenant-scoped: inserted ONLY if the session exists, belongs to `accountId`, and
+ * is not ended, so a model can never steer another account's (or a dead) session.
+ * The INSERT fires NOTIFY 'session_inbox' to wake the device's event stream.
+ * Returns the new id, or undefined if no matching live session.
  */
-export async function insertSessionMessage(args: {
+export async function enqueueReply(args: {
   sessionId: string;
   accountId: string;
-  body: string;
+  text: string;
 }): Promise<{ id: string } | undefined> {
   const rows = await query<{ id: string }>(
-    `INSERT INTO session_messages (session_id, account_id, body)
-       SELECT s.id, s.account_id, $3
+    `INSERT INTO session_inbox (session_id, account_id, kind, text)
+       SELECT s.id, s.account_id, 'reply', $3
          FROM sessions s
         WHERE s.id = $1 AND s.account_id = $2 AND s.state <> 'ended'
      RETURNING id`,
-    [args.sessionId, args.accountId, args.body],
+    [args.sessionId, args.accountId, args.text],
   );
   return rows[0];
-}
-
-/**
- * Undelivered steers for a device's session (oldest first). Scoped so a device
- * can only drain its own session's messages.
- */
-export async function listUndeliveredSessionMessages(args: {
-  sessionId: string;
-  deviceId: string;
-  accountId: string;
-}): Promise<SessionMessage[]> {
-  const rows = await query<SessionMessageRow>(
-    `SELECT sm.id, sm.body
-       FROM session_messages sm
-       JOIN sessions s ON s.id = sm.session_id
-      WHERE sm.session_id = $1
-        AND s.device_id   = $2
-        AND s.account_id  = $3
-        AND sm.delivered_at IS NULL
-      ORDER BY sm.created_at ASC`,
-    [args.sessionId, args.deviceId, args.accountId],
-  );
-  return rows.map((r) => ({ id: r.id, body: r.body }));
-}
-
-/** Mark steers delivered (after the SSE flush has written them to the stream).
- *  Server-side re-serve dedup — NOT a device-injection confirmation. Unscoped by
- *  design (the SSE flush already scoped the ids it wrote); never pass device
- *  input here — use markSessionMessagesAcked for that. */
-export async function markSessionMessagesDelivered(ids: string[]): Promise<void> {
-  if (ids.length === 0) return;
-  await query(`UPDATE session_messages SET delivered_at = now() WHERE id = ANY($1::uuid[])`, [ids]);
-}
-
-/**
- * Mark steers ACKED — the device confirms it INJECTED them into the session
- * (true delivery confirmation, distinct from delivered_at's SSE-write dedup).
- * Tenant-scoped via the session join (device_id + account_id) so a device can
- * only ack its OWN session's steers; this is the device-input-safe counterpart
- * to the unscoped markSessionMessagesDelivered. Idempotent (already-acked rows
- * skipped). Returns the ids actually flipped; the acked_at→non-null transition
- * fires NOTIFY 'message_delivered' to wake the orchestrator's confirmation watcher.
- */
-export async function markSessionMessagesAcked(args: {
-  sessionId: string;
-  deviceId: string;
-  accountId: string;
-  messageIds: string[];
-}): Promise<string[]> {
-  if (args.messageIds.length === 0) return [];
-  const rows = await query<{ id: string }>(
-    `UPDATE session_messages sm
-        SET acked_at = now()
-       FROM sessions s
-      WHERE sm.session_id = s.id
-        AND sm.session_id = $1
-        AND s.device_id   = $2
-        AND s.account_id  = $3
-        AND sm.account_id = $3
-        AND sm.id = ANY($4::uuid[])
-        AND sm.acked_at IS NULL
-    RETURNING sm.id`,
-    [args.sessionId, args.deviceId, args.accountId, args.messageIds],
-  );
-  return rows.map((r) => r.id);
-}
-
-/** True once the device has ACKed injection of the decision for `attentionId`
- *  (decisions.delivered_at set). Account-scoped. Used as the orchestrator's
- *  delivery-confirmation pre-check (see waitForDelivered's park-before-query). */
-export async function isDecisionDelivered(args: {
-  attentionId: string;
-  accountId: string;
-}): Promise<boolean> {
-  const rows = await query<{ ok: number }>(
-    `SELECT 1 AS ok
-       FROM decisions d
-       JOIN attention_events ae ON ae.id = d.attention_id
-      WHERE d.attention_id = $1
-        AND ae.account_id  = $2
-        AND d.delivered_at IS NOT NULL
-      LIMIT 1`,
-    [args.attentionId, args.accountId],
-  );
-  return rows.length > 0;
-}
-
-/** True once the device has ACKed injection of the steer `messageId`
- *  (session_messages.acked_at set). Account-scoped. */
-export async function isSteerAcked(args: {
-  messageId: string;
-  accountId: string;
-}): Promise<boolean> {
-  const rows = await query<{ ok: number }>(
-    `SELECT 1 AS ok
-       FROM session_messages sm
-      WHERE sm.id = $1
-        AND sm.account_id = $2
-        AND sm.acked_at IS NOT NULL
-      LIMIT 1`,
-    [args.messageId, args.accountId],
-  );
-  return rows.length > 0;
 }
 
 export type { AccountRow };

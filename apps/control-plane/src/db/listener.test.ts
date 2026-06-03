@@ -1,9 +1,10 @@
 /**
  * Unit tests for waitForDelivered's control flow — the delivery-confirmation
- * primitive the orchestrator's watcher parks on. Pure timing/short-circuit logic
- * only: the NOTIFY wake path needs a live Postgres LISTEN client and is covered
- * by the live deploy smoke, not here. Importing listener.ts opens NO connection
- * (ensureListener / loadEnv are lazy), so these run offline.
+ * primitive the orchestrator's 30s warn-only watcher parks on. Pure
+ * timing/short-circuit logic only: the NOTIFY wake path needs a live Postgres
+ * LISTEN client and is covered by the live deploy smoke, not here. Importing
+ * listener.ts opens NO connection (ensureListener / loadEnv are lazy), so these
+ * run offline.
  *
  * The invariant under test is PARK-BEFORE-QUERY: waitForDelivered must register
  * its waiter before the isDone() re-check, and must (a) short-circuit true when

@@ -40,13 +40,11 @@ import {
   AgentKind,
   AttentionKind,
   ChannelMethod,
-  DecisionBehavior,
   DeviceApiRoute,
   SseEvent,
   type AttentionEvent,
-  type Decision,
+  type InboxItem,
   isAfkState,
-  isDecisionBehavior,
 } from '@imsg/shared';
 import {
   HEARTBEAT_INTERVAL_MS,
@@ -147,7 +145,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.7' },
+  { name: 'imsg-device', version: '0.1.8' },
   {
     capabilities: {
       experimental: {
@@ -335,150 +333,91 @@ async function drainOutbox(): Promise<void> {
   }
 }
 
-// --- decision long-poll: pull verdicts/answers from the control plane --------
-// Applying a Decision (the fail-CLOSED approval path lives here on the relay
-// side: we only ever SEND a verdict we explicitly received; absence = no send).
+// --- session inbox: apply pushed rows + ACK back ------------------------------
+// The control plane pushes ONE kind of thing now: session_inbox rows. Each is
+// either a `reply` (inject into the session as a <channel> message) or a
+// `verdict` (relay on the permission channel to release a parked prompt — the
+// fail-CLOSED approval path: we only ever relay a verdict we explicitly received,
+// carrying its request_id; absence = no send).
 
-// Idempotency for decisions (mirrors appliedSteers): an attention resolves to
-// exactly ONE decision, so its attentionId is a stable key. A reconnect/restart
-// (or a lost ACK) can make the server re-serve a still-undelivered decision; we
-// inject it at most once per process — without this, the agent re-ran the same
-// answer every reconnect (the duplicate-reply loop). The server-side delivered_at
-// (set on ACK) is the durable guard; this is the in-process belt-and-suspenders.
-const appliedDecisions = new Set<string>();
-const APPLIED_DECISIONS_CAP = 500;
+// Idempotency: inject each row at most once per process. A reconnect/restart (or
+// a lost ACK) can make the server re-serve a still-undelivered row; without this
+// the agent re-ran the same answer every reconnect (the duplicate-reply loop).
+// The server-side delivered_at (set on ACK) is the durable guard; this is the
+// in-process belt-and-suspenders.
+const appliedInbox = new Set<string>();
+const APPLIED_INBOX_CAP = 500;
 
-async function applyDecision(d: Decision, requestIdByAttention: Map<string, string>): Promise<void> {
-  if (appliedDecisions.has(d.attentionId)) {
-    // Already applied in this process; the re-send means a prior ACK didn't
-    // stick. Skip re-injection — the caller still re-ACKs so the server marks it
-    // delivered and stops re-serving it.
-    log('decision_dup_skipped', { attentionId: d.attentionId });
+async function applyInbox(item: InboxItem): Promise<void> {
+  if (appliedInbox.has(item.id)) {
+    // Already applied; the re-send means a prior ACK didn't stick. Skip
+    // re-injection — the caller still re-ACKs so the server stops re-serving it.
+    log('inbox_dup_skipped', { id: item.id });
     return;
   }
 
-  // A permission verdict → relay back to Claude Code on the permission channel.
-  if (d.behavior && isDecisionBehavior(d.behavior)) {
-    const requestId = requestIdByAttention.get(d.attentionId);
-    if (requestId) {
+  if (item.kind === 'verdict') {
+    // A permission verdict → relay on the permission channel. Fail-CLOSED: relay
+    // only a fully-specified verdict (never synthesize an allow).
+    if (item.requestId && item.behavior) {
       await mcp.notification({
         method: ChannelMethod.PERMISSION,
-        params: { request_id: requestId, behavior: d.behavior },
+        params: { request_id: item.requestId, behavior: item.behavior },
       });
-      log('verdict_relayed', { request_id: requestId, behavior: d.behavior });
+      log('verdict_relayed', { request_id: item.requestId, behavior: item.behavior });
     } else {
-      // No request_id binding for this decision: it's not a permission verdict
-      // we can relay. Fail-CLOSED — do nothing (never synthesize an allow).
-      log('verdict_unbound', { attentionId: d.attentionId, behavior: d.behavior });
+      log('verdict_unbound', { id: item.id });
     }
-    if (d.behavior === DecisionBehavior.ALLOW || d.behavior === DecisionBehavior.DENY) {
-      pendingCount = Math.max(0, pendingCount - 1);
-      writePending(pendingCount);
-    }
-  }
-
-  // An answer (question/plan) → push into the session as a <channel> message.
-  if (d.answerText) {
+  } else {
+    // A reply → push into the session as a <channel> message.
     await mcp.notification({
       method: ChannelMethod.CHANNEL,
       params: {
-        content: d.answerText,
-        meta: { source_kind: 'imsg_phone', attention_id: d.attentionId },
+        content: item.text ?? '',
+        meta: { source_kind: 'imsg_phone', message_id: item.id, attention_id: item.attentionId },
       },
     });
-    log('answer_pushed', { attentionId: d.attentionId, len: d.answerText.length });
+    log('reply_pushed', { id: item.id, len: (item.text ?? '').length });
+  }
+
+  // A row that resolves a pending attention clears one from the statusline count
+  // (a free steer has no attention_id and leaves the count alone).
+  if (item.attentionId) {
     pendingCount = Math.max(0, pendingCount - 1);
     writePending(pendingCount);
   }
 
-  appliedDecisions.add(d.attentionId);
-  if (appliedDecisions.size > APPLIED_DECISIONS_CAP) {
-    const oldest = appliedDecisions.values().next().value; // Set keeps insertion order
-    if (oldest !== undefined) appliedDecisions.delete(oldest);
+  appliedInbox.add(item.id);
+  if (appliedInbox.size > APPLIED_INBOX_CAP) {
+    const oldest = appliedInbox.values().next().value; // Set keeps insertion order
+    if (oldest !== undefined) appliedInbox.delete(oldest);
   }
 }
 
 /**
- * ACK delivered decisions back to the control plane (by attentionId) so it marks
- * them delivered and stops re-serving them on the next flush. Best-effort: the
- * in-process dedup already prevents re-injection, so a failed ack only means a
- * harmless re-send later. Never throws.
+ * ACK injected inbox rows back to the control plane (by id) so it sets
+ * delivered_at and stops re-serving them. Best-effort: the in-process dedup
+ * already prevents re-injection, so a failed ack only means a harmless re-send
+ * later. Never throws.
  */
-async function ackDecisions(attentionIds: string[]): Promise<void> {
-  if (attentionIds.length === 0) return;
+async function ackInbox(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
   const token = loadToken();
   if (!token) return;
   try {
     const resp = await postJson(
       deviceApiUrl(DeviceApiRoute.ACK),
-      JSON.stringify({ sessionId: SESSION_ID, attentionIds }),
+      JSON.stringify({ sessionId: SESSION_ID, ids }),
       { bearer: token },
     );
     if (resp.classification === Classification.SUCCESS) {
-      log('decisions_acked', { count: attentionIds.length });
+      log('inbox_acked', { count: ids.length });
     } else {
       log('ack_failed', { status: resp.status });
     }
   } catch (err) {
     log('ack_error', { error: err instanceof Error ? err.message : String(err) });
   }
-}
-
-/**
- * ACK injected STEERS back to the control plane (by message id) so it sets
- * `acked_at` — the delivery-confirmation signal the orchestrator's per-turn
- * watcher waits on (distinct from `delivered_at`, which the server sets on SSE
- * write for re-serve dedup). Mirrors ackDecisions; best-effort, never throws.
- */
-async function ackSteers(messageIds: string[]): Promise<void> {
-  if (messageIds.length === 0) return;
-  const token = loadToken();
-  if (!token) return;
-  try {
-    const resp = await postJson(
-      deviceApiUrl(DeviceApiRoute.ACK),
-      JSON.stringify({ sessionId: SESSION_ID, messageIds }),
-      { bearer: token },
-    );
-    if (resp.classification === Classification.SUCCESS) {
-      log('steers_acked', { count: messageIds.length });
-    } else {
-      log('steer_ack_failed', { status: resp.status });
-    }
-  } catch (err) {
-    log('steer_ack_error', { error: err instanceof Error ? err.message : String(err) });
-  }
-}
-
-interface DecisionsResponse {
-  decisions?: Decision[];
-  /** Server maps each resolved attentionId back to its channel request_id. */
-  requestIds?: Record<string, string>;
-  since?: string;
-}
-
-// Idempotency for steers: the server marks a steer delivered after the SSE write,
-// but a failed mark (DB blip) could re-deliver it on reconnect. Dedupe by message
-// id so a steer is injected at most once. Bounded to avoid unbounded growth.
-const appliedSteers = new Set<string>();
-const APPLIED_STEERS_CAP = 500;
-
-/** A free-text steer → inject into THIS session as a <channel> message (once). */
-async function applySteer(m: { id: string; body: string }): Promise<void> {
-  if (appliedSteers.has(m.id)) {
-    log('steer_dup_skipped', { id: m.id });
-    return;
-  }
-  await mcp.notification({
-    method: ChannelMethod.CHANNEL,
-    params: { content: m.body, meta: { source_kind: 'imsg_steer', message_id: m.id } },
-  });
-  appliedSteers.add(m.id);
-  if (appliedSteers.size > APPLIED_STEERS_CAP) {
-    const oldest = appliedSteers.values().next().value; // Set keeps insertion order
-    if (oldest !== undefined) appliedSteers.delete(oldest);
-  }
-  log('steer_pushed', { id: m.id, len: m.body.length });
 }
 
 /** Parse one SSE frame's `event:` + concatenated `data:` lines (ignore comments/id). */
@@ -494,14 +433,16 @@ function parseSSEFrame(frame: string): { event: string; data: string } {
 }
 
 /**
- * Subscribe to the control plane's SSE event stream and REACT to pushed state
- * changes — no polling. Decisions are applied exactly as before (fail-closed),
- * and free-text steers are injected into the session. Reconnects with a `since`
- * cursor so nothing is missed across drops; the server's 'ping' keeps it warm.
+ * Subscribe to the control plane's SSE event stream and REACT to pushed events
+ * (session_inbox rows + afk state) — no polling. The server re-serves undelivered
+ * rows on every flush until we ACK, so a clean reconnect replays anything missed;
+ * the server's 'ping' keeps the stream warm. On a FAILED connect we back off
+ * fast-first (a transient blip must not cost 5s of dead air — a queued message
+ * would wait that long) up to a 5s cap; a clean stream-end reconnects immediately.
  */
 async function subscribeEvents(): Promise<void> {
-  await sessionReady; // subscribe under the REAL session id (so steers reach us)
-  let since = new Date(0).toISOString();
+  await sessionReady; // subscribe under the REAL session id (so rows reach us)
+  let failures = 0; // consecutive connect failures → backoff; reset on a live stream
   for (;;) {
     const token = loadToken();
     if (!token) {
@@ -511,7 +452,7 @@ async function subscribeEvents(): Promise<void> {
     try {
       const url =
         deviceApiUrl(DeviceApiRoute.EVENTS) +
-        `?sessionId=${encodeURIComponent(SESSION_ID)}&since=${encodeURIComponent(since)}`;
+        `?sessionId=${encodeURIComponent(SESSION_ID)}`;
       const resp = await fetch(url, {
         headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' },
       });
@@ -521,16 +462,21 @@ async function subscribeEvents(): Promise<void> {
         continue;
       }
       if (!resp.ok || !resp.body) {
-        await sleep(5_000);
+        await sleep(reconnectBackoffMs((failures += 1)));
         continue;
       }
 
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buf = '';
+      let sawData = false; // reset backoff only once the stream actually yields bytes
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
+        if (!sawData) {
+          sawData = true;
+          failures = 0; // a live, byte-yielding stream — clear the backoff
+        }
         buf += decoder.decode(value, { stream: true });
         let sep: number;
         while ((sep = buf.indexOf('\n\n')) >= 0) {
@@ -540,24 +486,14 @@ async function subscribeEvents(): Promise<void> {
           const { event, data } = parseSSEFrame(frame);
           if (!data) continue;
           try {
-            if (event === SseEvent.DECISIONS) {
-              const body = JSON.parse(data) as DecisionsResponse;
-              const requestIds = new Map<string, string>(Object.entries(body.requestIds ?? {}));
-              const decisions = body.decisions ?? [];
-              for (const d of decisions) await applyDecision(d, requestIds);
-              if (body.since) since = body.since;
-              // ACK every decision in the frame (applied or dup-skipped) so the
-              // server marks them delivered and stops re-serving. Fire-and-forget
-              // so the read loop isn't held on the round-trip.
-              if (decisions.length > 0) void ackDecisions(decisions.map((d) => d.attentionId));
-            } else if (event === SseEvent.SESSION_MESSAGES) {
-              const body = JSON.parse(data) as { messages?: Array<{ id: string; body: string }> };
-              const msgs = body.messages ?? [];
-              for (const m of msgs) await applySteer(m);
-              // ACK every steer in the frame (injected or dup-skipped) so the
-              // server sets acked_at and the orchestrator's watcher can confirm
-              // delivery to the user. Fire-and-forget (mirrors the decision ACK).
-              if (msgs.length > 0) void ackSteers(msgs.map((m) => m.id));
+            if (event === SseEvent.INBOX) {
+              const body = JSON.parse(data) as { items?: InboxItem[] };
+              const items = body.items ?? [];
+              for (const it of items) await applyInbox(it);
+              // ACK every row in the frame (injected or dup-skipped) so the server
+              // sets delivered_at and stops re-serving. Fire-and-forget so the read
+              // loop isn't held on the round-trip.
+              if (items.length > 0) void ackInbox(items.map((it) => it.id));
             } else if (event === SseEvent.STATE) {
               // Mirror the control plane's authoritative afk into the local
               // afk.state file the PreToolUse hook reads (guarded: write on
@@ -577,7 +513,11 @@ async function subscribeEvents(): Promise<void> {
           }
         }
       }
-      // Stream ended (server cycle / network) — reconnect promptly with the cursor.
+      // Stream ended. If it yielded data first (a healthy cycle), reconnect
+      // immediately (failures was reset). If it 200'd then EOF'd without a single
+      // byte, treat it as a failed connect and back off — else a server that
+      // accepts-then-drops would spin us in a hot reconnect loop.
+      if (!sawData) await sleep(reconnectBackoffMs((failures += 1)));
     } catch (err) {
       // Include the URL we tried: a stale process resolving the localhost
       // default vs. the baked prod host is the usual cause, and this makes the
@@ -586,9 +526,17 @@ async function subscribeEvents(): Promise<void> {
         url: deviceApiUrl(DeviceApiRoute.EVENTS),
         error: err instanceof Error ? err.message : String(err),
       });
-      await sleep(5_000);
+      await sleep(reconnectBackoffMs((failures += 1)));
     }
   }
+}
+
+/** Reconnect backoff after a FAILED connect: fast first retry (~300ms, so a
+ *  transient blip doesn't strand a queued message for 5s), exponential up to a
+ *  5s cap, with jitter to avoid synchronized reconnect storms across sessions. */
+function reconnectBackoffMs(failures: number): number {
+  const base = Math.min(300 * 2 ** Math.max(0, failures - 1), 5_000);
+  return base + Math.floor(Math.random() * 250);
 }
 
 // --- heartbeat: liveness + session touch -------------------------------------

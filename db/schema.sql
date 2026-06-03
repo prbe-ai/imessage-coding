@@ -2,7 +2,8 @@
 -- imessage-coding — Neon Postgres schema
 --
 -- Stateless app tier: ALL state lives here. Everything is account-scoped.
--- The control plane wakes long-polls via a LISTEN/NOTIFY trigger on decisions.
+-- The control plane wakes SSE streams via LISTEN/NOTIFY triggers (session_inbox,
+-- session_state, device_state).
 --
 -- Better Auth owns its own tables (better_auth_*); the dashboard creates and
 -- migrates those via the Better Auth CLI. We reference them only loosely
@@ -189,33 +190,42 @@ CREATE INDEX IF NOT EXISTS idx_attention_qid                ON attention_events(
 CREATE INDEX IF NOT EXISTS idx_attention_notify_message_id  ON attention_events(notify_message_id);
 
 -- -----------------------------------------------------------------------------
--- decisions — the resolution of an attention_event.
--- behavior ∈ allow|deny (permissions)
--- source ∈ phone|dashboard|keyboard|timeout (timeout is always fail-closed).
--- An INSERT here NOTIFYs 'decision_ready' to wake the device long-poll.
+-- session_inbox — the SINGLE queue of things to deliver INTO a coding-agent
+-- session. One row = one delivery, of one of two kinds:
+--   kind='reply'   → `text` is injected into the session as a <channel> message
+--                    (a question answer, a plan approval/denial, OR a free-text
+--                    steer — all "a simple reply" from the user's side).
+--   kind='verdict' → `{request_id, behavior}` is relayed on the Channels
+--                    permission channel to release a native permission prompt
+--                    (the one structured path; text can't release a parked dialog).
+-- attention_id is the attention this delivers the consequence of (NULL for a free
+-- steer). delivered_at is set ONLY when the device ACKs injection (POST
+-- /api/device/ack); the SSE stream serves rows WHERE delivered_at IS NULL and
+-- re-serves until that ACK — at-least-once on the wire, deduped to once into the
+-- session by the device. ONE column, ONE meaning (this replaces the old split of
+-- decisions.delivered_at + session_messages.delivered_at/acked_at).
+-- An INSERT here NOTIFYs 'session_inbox' to wake the device's event stream.
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS decisions (
+CREATE TABLE IF NOT EXISTS session_inbox (
   id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  attention_id  UUID        NOT NULL REFERENCES attention_events(id) ON DELETE CASCADE,
+  session_id    UUID        NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  account_id    UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  kind          TEXT        NOT NULL CHECK (kind IN ('reply', 'verdict')),
+  -- reply: the text to inject. verdict: NULL.
+  text          TEXT,
+  -- verdict: the permission prompt to release + the decision. reply: both NULL.
+  request_id    TEXT,
   behavior      TEXT        CHECK (behavior IN ('allow', 'deny')),
-  answer_text   TEXT,
-  source        TEXT        NOT NULL
-                  CHECK (source IN ('phone', 'dashboard', 'keyboard', 'timeout')),
-  resolved_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-  -- Set once the device ACKs that it injected this decision into the session
-  -- (POST /api/device/ack). The SSE stream only serves decisions where this is
-  -- NULL, so a resolved answer/verdict is delivered at-least-once but never
-  -- re-injected on reconnect/restart (was the duplicate-reply loop). Mirrors
-  -- session_messages.delivered_at.
+  -- The attention this resolves (NULL for a free steer). ON DELETE SET NULL so a
+  -- pruned attention never drops a still-undelivered inbox row.
+  attention_id  UUID        REFERENCES attention_events(id) ON DELETE SET NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   delivered_at  TIMESTAMPTZ
 );
--- Idempotent add for already-provisioned DBs (CREATE TABLE IF NOT EXISTS above
--- is a no-op once the table exists).
-ALTER TABLE decisions ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
-CREATE INDEX IF NOT EXISTS idx_decisions_attention ON decisions(attention_id);
--- Hot path: the SSE flush queries undelivered decisions per session.
-CREATE INDEX IF NOT EXISTS idx_decisions_undelivered
-  ON decisions(attention_id) WHERE delivered_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_session_inbox_undelivered
+  ON session_inbox(session_id) WHERE delivered_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_session_inbox_session_created
+  ON session_inbox(session_id, created_at);
 
 -- -----------------------------------------------------------------------------
 -- message_log — durable record of inbound/outbound messages, account-scoped.
@@ -250,83 +260,31 @@ CREATE TABLE IF NOT EXISTS processed_webhooks (
 );
 
 -- -----------------------------------------------------------------------------
--- session_messages — free-text steering pushed INTO a running coding-agent
--- session by the assistant ("also add tests"). Distinct from decisions (which
--- resolve a pending attention): a steer has no attention to resolve. The device
--- drains undelivered rows over its event stream and injects them into the
--- session as <channel> messages; delivered_at marks consumption.
--- An INSERT here NOTIFYs 'session_message' to wake the device's event stream.
+-- LEGACY delivery tables — replaced by session_inbox (above). Dropped here so a
+-- re-apply of this schema cleans an already-provisioned DB. They held only
+-- transient in-flight delivery state (verdicts/answers/steers), never durable
+-- user data, so the drop is safe. CASCADE also removes their NOTIFY triggers; the
+-- standalone trigger functions are dropped below (their CREATE statements are gone).
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS session_messages (
-  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id    UUID        NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  account_id    UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  body          TEXT        NOT NULL,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  -- delivered_at: set server-side in the SSE flush on WRITE (re-serve dedup).
-  -- acked_at:     set by the device AFTER it injects the steer (true delivery
-  --               confirmation, the signal the orchestrator waits on). Kept
-  --               separate so adding confirmation never disturbs the existing
-  --               delivered_at dedup (no re-serve / double-inject regression).
-  delivered_at  TIMESTAMPTZ,
-  acked_at      TIMESTAMPTZ
-);
--- Older deployments: add acked_at to an existing table (CREATE … IF NOT EXISTS
--- above does not alter a pre-existing table).
-ALTER TABLE session_messages ADD COLUMN IF NOT EXISTS acked_at TIMESTAMPTZ;
-CREATE INDEX IF NOT EXISTS idx_session_messages_undelivered
-  ON session_messages(session_id) WHERE delivered_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_session_messages_session_created
-  ON session_messages(session_id, created_at);
+DROP TABLE IF EXISTS decisions CASCADE;
+DROP TABLE IF EXISTS session_messages CASCADE;
+DROP FUNCTION IF EXISTS notify_decision_ready() CASCADE;
+DROP FUNCTION IF EXISTS notify_session_message() CASCADE;
+DROP FUNCTION IF EXISTS notify_decision_delivered() CASCADE;
+DROP FUNCTION IF EXISTS notify_message_delivered() CASCADE;
 
 -- =============================================================================
--- LISTEN/NOTIFY: wake a waiting control-plane long-poll when a decision lands.
---
--- The device API's GET /api/device/decisions long-poll runs LISTEN
--- 'decision_ready'. On every decisions INSERT this trigger NOTIFYs with a JSON
--- payload carrying the attention_id (and the session it belongs to) so the
--- waiter can re-query only the relevant session's resolved decisions.
+-- LISTEN/NOTIFY: wake the device's event stream when a session_inbox row lands.
+-- On every INSERT this NOTIFYs 'session_inbox' with the session_id so the
+-- per-session SSE stream re-queries that session's undelivered rows and flushes
+-- them. Payload carries id + session_id + account_id.
 -- =============================================================================
-CREATE OR REPLACE FUNCTION notify_decision_ready() RETURNS trigger AS $$
-DECLARE
-  v_session_id UUID;
-  v_account_id UUID;
-BEGIN
-  SELECT ae.session_id, ae.account_id
-    INTO v_session_id, v_account_id
-    FROM attention_events ae
-   WHERE ae.id = NEW.attention_id;
-
-  PERFORM pg_notify(
-    'decision_ready',
-    json_build_object(
-      'decision_id',  NEW.id,
-      'attention_id', NEW.attention_id,
-      'session_id',   v_session_id,
-      'account_id',   v_account_id
-    )::text
-  );
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trg_decision_ready ON decisions;
-CREATE TRIGGER trg_decision_ready
-  AFTER INSERT ON decisions
-  FOR EACH ROW
-  EXECUTE FUNCTION notify_decision_ready();
-
--- =============================================================================
--- LISTEN/NOTIFY: wake the device's event stream when a free-text steer lands.
--- Payload carries the session_id so the stream re-queries only that session's
--- undelivered session_messages.
--- =============================================================================
-CREATE OR REPLACE FUNCTION notify_session_message() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION notify_session_inbox() RETURNS trigger AS $$
 BEGIN
   PERFORM pg_notify(
-    'session_message',
+    'session_inbox',
     json_build_object(
-      'message_id', NEW.id,
+      'id',         NEW.id,
       'session_id', NEW.session_id,
       'account_id', NEW.account_id
     )::text
@@ -335,53 +293,31 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_session_message ON session_messages;
-CREATE TRIGGER trg_session_message
-  AFTER INSERT ON session_messages
+DROP TRIGGER IF EXISTS trg_session_inbox ON session_inbox;
+CREATE TRIGGER trg_session_inbox
+  AFTER INSERT ON session_inbox
   FOR EACH ROW
-  EXECUTE FUNCTION notify_session_message();
+  EXECUTE FUNCTION notify_session_inbox();
 
 -- =============================================================================
 -- LISTEN/NOTIFY: delivery confirmation. When the device ACKs that it injected a
--- decision (delivered_at) or a steer (acked_at), wake the orchestrator's
--- per-turn delivery-confirmation watcher so it can tell the user what actually
--- landed. Keyed by the ROW id (attention_id / message id), which is what the
--- watcher parks on — payload carries only `id`. Fires once, on the null→set
--- transition (the WHEN guard), so a re-ACK or any later UPDATE is inert.
+-- row (delivered_at flips null→set), NOTIFY 'inbox_delivered' with the row id so
+-- the orchestrator's 30s confirmation watcher wakes promptly. Fires once, on the
+-- null→set transition (the WHEN guard), so a re-ACK or any later UPDATE is inert.
 -- =============================================================================
-CREATE OR REPLACE FUNCTION notify_decision_delivered() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION notify_inbox_delivered() RETURNS trigger AS $$
 BEGIN
-  PERFORM pg_notify(
-    'decision_delivered',
-    json_build_object('id', NEW.attention_id)::text
-  );
+  PERFORM pg_notify('inbox_delivered', json_build_object('id', NEW.id)::text);
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_decision_delivered ON decisions;
-CREATE TRIGGER trg_decision_delivered
-  AFTER UPDATE OF delivered_at ON decisions
+DROP TRIGGER IF EXISTS trg_inbox_delivered ON session_inbox;
+CREATE TRIGGER trg_inbox_delivered
+  AFTER UPDATE OF delivered_at ON session_inbox
   FOR EACH ROW
   WHEN (OLD.delivered_at IS NULL AND NEW.delivered_at IS NOT NULL)
-  EXECUTE FUNCTION notify_decision_delivered();
-
-CREATE OR REPLACE FUNCTION notify_message_delivered() RETURNS trigger AS $$
-BEGIN
-  PERFORM pg_notify(
-    'message_delivered',
-    json_build_object('id', NEW.id)::text
-  );
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trg_message_delivered ON session_messages;
-CREATE TRIGGER trg_message_delivered
-  AFTER UPDATE OF acked_at ON session_messages
-  FOR EACH ROW
-  WHEN (OLD.acked_at IS NULL AND NEW.acked_at IS NOT NULL)
-  EXECUTE FUNCTION notify_message_delivered();
+  EXECUTE FUNCTION notify_inbox_delivered();
 
 -- =============================================================================
 -- LISTEN/NOTIFY: wake BOTH the device's event stream AND the dashboard's event

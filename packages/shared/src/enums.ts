@@ -127,11 +127,11 @@ export type ActivityKind = (typeof ActivityKind)[keyof typeof ActivityKind];
 export const DeviceApiRoute = {
   PAIR: '/api/device/pair',
   ATTENTION: '/api/device/attention',
-  DECISIONS: '/api/device/decisions',
-  /** SSE event stream (decisions + session-message steers) — replaces polling. */
+  /** SSE event stream: the session inbox (one row = one thing to deliver to the
+   *  session — a reply or a permission verdict) plus afk state. Replaces polling. */
   EVENTS: '/api/device/events',
-  /** Device confirms it injected decisions (by attentionId) so the server can
-   *  mark them delivered and stop re-serving them — at-least-once + dedup. */
+  /** Device confirms it injected inbox rows (by id) so the server marks them
+   *  delivered and stops re-serving them — at-least-once + dedup. */
   ACK: '/api/device/ack',
   HEARTBEAT: '/api/device/heartbeat',
   STATE: '/api/device/state',
@@ -164,10 +164,9 @@ export type DashboardApiRoute =
 // server writer (streamSSE) and the client frame-parser MUST reference these.
 // -----------------------------------------------------------------------------
 export const SseEvent = {
-  /** Device stream: resolved decisions (verdicts/answers). */
-  DECISIONS: 'decisions',
-  /** Device stream: free-text steering messages to inject. */
-  SESSION_MESSAGES: 'session_messages',
+  /** Device stream: the session inbox — rows to deliver into the session (a
+   *  `reply` to inject as a <channel> message, or a permission `verdict`). */
+  INBOX: 'inbox',
   /** Device stream: a session's current { afk } (push-down sync). */
   STATE: 'state',
   /** Dashboard stream: the account's live `sessions` list. */
@@ -184,23 +183,18 @@ export type SseEvent = (typeof SseEvent)[keyof typeof SseEvent];
 // Each notification payload carries a `session_id` and/or `account_id`.
 // -----------------------------------------------------------------------------
 export const NotifyChannel = {
-  /** Fired on a decisions INSERT (wake the device's verdict/answer waiter). */
-  DECISION_READY: 'decision_ready',
-  /** Fired on a session_messages INSERT (wake the device's steer waiter). */
-  SESSION_MESSAGE: 'session_message',
+  /** Fired on a session_inbox INSERT (wake the device's event stream to flush
+   *  the new row). Payload carries session_id + account_id. */
+  SESSION_INBOX: 'session_inbox',
   /** Fired on a sessions state change (wake device + dashboard). */
   SESSION_STATE: 'session_state',
   /** Fired on a device afk change — the machine-wide toggle (wake every
    *  live device stream + the dashboard). Payload carries device_id + account_id. */
   DEVICE_STATE: 'device_state',
-  /** Fired when a decision's delivered_at flips non-null (the device ACKed
-   *  injection). Wakes the orchestrator's delivery-confirmation waiter, keyed by
-   *  the attention_id. Payload: { id }. */
-  DECISION_DELIVERED: 'decision_delivered',
-  /** Fired when a session_message's acked_at flips non-null (the device ACKed
-   *  injection). Wakes the delivery-confirmation waiter, keyed by the message id.
-   *  Payload: { id }. (Separate from delivered_at, which stays server-side dedup.) */
-  MESSAGE_DELIVERED: 'message_delivered',
+  /** Fired when a session_inbox row's delivered_at flips non-null (the device
+   *  ACKed injection). Wakes the orchestrator's 30s confirmation watcher, keyed
+   *  by the row id. Payload: { id }. */
+  INBOX_DELIVERED: 'inbox_delivered',
 } as const;
 export type NotifyChannel = (typeof NotifyChannel)[keyof typeof NotifyChannel];
 
@@ -216,15 +210,6 @@ export type TransportEvent = (typeof TransportEvent)[keyof typeof TransportEvent
 // -----------------------------------------------------------------------------
 // Supporting enumerations referenced by the shared types below.
 // -----------------------------------------------------------------------------
-
-/** Where a decision was resolved. */
-export const DecisionSource = {
-  PHONE: 'phone',
-  DASHBOARD: 'dashboard',
-  KEYBOARD: 'keyboard',
-  TIMEOUT: 'timeout',
-} as const;
-export type DecisionSource = (typeof DecisionSource)[keyof typeof DecisionSource];
 
 /** Lifecycle state of a Claude Code session. */
 export const SessionState = {

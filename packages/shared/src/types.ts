@@ -11,7 +11,6 @@ import type {
   AgentKind,
   AttentionKind,
   DecisionBehavior,
-  DecisionSource,
   MessageChannel,
   SessionState,
 } from './enums.ts';
@@ -48,18 +47,29 @@ export interface AttentionEvent {
 }
 
 /**
- * The resolution of an AttentionEvent. A permission yields `behavior`;
- * a question/plan yields `answerText`. `source` records how it was resolved
- * (phone reply, dashboard, local keyboard, or a timeout fallback — which is
- * always fail-closed, never allow).
+ * One row of the session inbox — the SINGLE thing the control plane delivers
+ * into a coding-agent session. Two kinds, the only structural branch left:
+ *   - `reply`   → `text` is injected into the session as a <channel> message.
+ *                 Covers question answers, plan approvals/denials, AND free-text
+ *                 steers — from the user's side, "a simple reply".
+ *   - `verdict` → `{ requestId, behavior }` is relayed on the permission channel
+ *                 to release a native Claude Code permission prompt. Irreducible:
+ *                 a parked permission dialog can only be unblocked by a structured
+ *                 allow/deny carrying its request_id (text can't release it).
+ * The device injects each row at most once (dedup by `id`) and ACKs it; the
+ * server sets `delivered_at` on that ACK and re-serves until then.
  */
-export interface Decision {
-  attentionId: string;
+export interface InboxItem {
+  id: string;
+  kind: 'reply' | 'verdict';
+  /** reply: the text to inject. */
+  text?: string;
+  /** verdict: the Channels request_id of the permission prompt to release. */
+  requestId?: string;
+  /** verdict: the permission decision. */
   behavior?: DecisionBehavior;
-  answerText?: string;
-  /** ISO-8601 timestamp. */
-  resolvedAt: string;
-  source: DecisionSource;
+  /** The attention this delivers the consequence of (for <channel> meta), if any. */
+  attentionId?: string;
 }
 
 /**

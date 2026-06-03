@@ -428,6 +428,9 @@ deviceRoutes.post(DeviceApiRoute.PERMISSION, async (c) => {
     // lands between two checks must not be missed).
     while (!controller.signal.aborted && !c.req.raw.signal.aborted) {
       const remaining = deadlineMs - (Date.now() - startedAt);
+      // A verdict landing in the same instant the deadline fires resolves to DENY
+      // by design (fail-safe: deny-over-allow at the boundary) — do NOT "fix" this
+      // into an allow.
       if (remaining <= 0) break; // deadline → explicit deny below
       const parked = waitForSessionEvent(sessionId, remaining, controller.signal);
       const existing = await findVerdictForRequest({

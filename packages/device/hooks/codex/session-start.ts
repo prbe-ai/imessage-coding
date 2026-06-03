@@ -15,10 +15,10 @@
  *
  * Differences from the CC hook, all forced by Codex's contract:
  *   - Codex sets transcript_path NULLABLE on SessionStart — the rollout file may
- *     not exist yet when the hook fires. When it is empty we still record the
- *     session id via the handshake is NOT possible (handshake needs the path), so
- *     we skip the daemon this fire; a later resume fire (or the MCP server's own
- *     id resolution) recovers it. We never spawn a tap without a real rollout
+ *     not exist yet when the hook fires. When transcript_path is empty we cannot
+ *     write the handshake (it needs the path) or tail a rollout, so we carry on
+ *     and skip the daemon this fire; a later resume fire (or the MCP server's own
+ *     id resolution) recovers the id. We never spawn a tap without a real rollout
  *     path — the byte-offset tailer needs a concrete file.
  *   - Codex has NO SessionEnd hook, so there is no teardown counterpart. The tap
  *     daemon self-exits via its own lsof orphan check once Codex closes the

@@ -408,12 +408,20 @@ install_for_codex() {
   [ -f "$CODEX_PLUGIN_DIR/hooks/codex/hooks.json" ] \
     || die "no hooks/codex/hooks.json in the staged tree — bad Codex plugin package"
   mv -f "$CODEX_PLUGIN_DIR/hooks/codex/hooks.json" "$CODEX_PLUGIN_DIR/hooks/hooks.json"
+  # IMPORTANT: do NOT remove hooks/codex/ — the just-moved hooks/hooks.json still
+  # points at ${CLAUDE_PLUGIN_ROOT}/hooks/codex/{session-start,user-prompt-submit,
+  # permission-request,stop}.ts. Those .ts scripts must stay where the JSON resolves
+  # them; deleting the dir would make every Codex hook fail to launch (and a failed
+  # PermissionRequest hook fails OPEN to the unattended local prompt — a safety
+  # regression). Only the now-duplicate hooks/codex/hooks.json (moved up) is removed.
+  rm -f "$CODEX_PLUGIN_DIR/hooks/codex/hooks.json"
   # Codex commands: install the prompt-style /afk under commands/ (CC's exec-style
-  # afk.md would be a no-op prompt under Codex), then drop the codex/ staging dirs.
+  # afk.md would be a no-op prompt under Codex), then drop the codex/ staging dir
+  # (its only file, afk.md, has been moved up — nothing else references it).
   if [ -f "$CODEX_PLUGIN_DIR/commands/codex/afk.md" ]; then
     mv -f "$CODEX_PLUGIN_DIR/commands/codex/afk.md" "$CODEX_PLUGIN_DIR/commands/afk.md"
   fi
-  rm -rf "$CODEX_PLUGIN_DIR/hooks/codex" "$CODEX_PLUGIN_DIR/commands/codex"
+  rm -rf "$CODEX_PLUGIN_DIR/commands/codex"
 
   # Build the root catalog from the Codex marketplace.json (source "." -> subdir),
   # then drop the inner per-plugin manifests CC-style (root catalog authoritative).
@@ -476,7 +484,11 @@ install_for_codex() {
       s += `\n${pluginHeader}\nenabled = true\n`;
     }
     // [features] plugin_hooks = true — ensure the table + the key (non-destructive).
-    if (s.indexOf("plugin_hooks") === -1) {
+    // Match a real `plugin_hooks =` key assignment, not any substring mention: a
+    // bare indexOf would treat a comment or unrelated reference as "already set"
+    // and silently skip writing the key, disabling Codex hooks. Mirrors the precise
+    // regex the uninstall path uses (/^\s*plugin_hooks\s*=\s*true\s*$\n?/m).
+    if (!/^\s*plugin_hooks\s*=/m.test(s)) {
       const fi = s.indexOf("[features]");
       if (fi === -1) {
         if (s.length && !s.endsWith("\n")) s += "\n";

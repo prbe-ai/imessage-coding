@@ -28,12 +28,14 @@ export type SessionActivityMap = Record<string, ReadonlyArray<SessionActivity>>;
 
 /**
  * What kicked off this turn:
- *  - user_message  — the user texted us (full toolset).
+ *  - user_message  — the user texted us (full toolset). Carries a BATCH: one or
+ *                    more inbound messages sent back-to-back, coalesced into a
+ *                    single turn (a later one may correct an earlier).
  *  - agent_event   — an agent is blocked on a permission/question/plan (notify-only).
  *  - agent_message — an agent sent a fire-and-forget status/result to relay (notify-only).
  */
 export type TurnTrigger =
-  | { kind: 'user_message'; inbound: InboundMessage }
+  | { kind: 'user_message'; inbounds: ReadonlyArray<InboundMessage> }
   | { kind: 'agent_event'; attention: AttentionEvent }
   | { kind: 'agent_message'; sessionId: string; text: string };
 
@@ -308,11 +310,30 @@ function turnContext(args: {
 
   lines.push('');
   if (trigger.kind === 'user_message') {
-    lines.push('THE USER JUST SENT:', `  "${trigger.inbound.text}"`);
-    if (trigger.inbound.reactionTo) {
+    const inbounds = trigger.inbounds;
+    if (inbounds.length <= 1) {
+      const only = inbounds[0];
+      if (only) {
+        lines.push('THE USER JUST SENT:', `  "${only.text}"`);
+        if (only.reactionTo) {
+          lines.push(
+            `  (this is a tap-back / reaction bound to message ${only.reactionTo})`,
+          );
+        }
+      }
+    } else {
+      // Coalesced burst: several texts arrived before we replied. Tell the model
+      // to treat them as ONE request (the typo-correction case) and answer once.
       lines.push(
-        `  (this is a tap-back / inline reply bound to message ${trigger.inbound.reactionTo})`,
+        'THE USER JUST SENT THESE MESSAGES IN QUICK SUCCESSION — treat them as ONE combined',
+        'request (a later message may correct or add to an earlier one) and send a single reply:',
       );
+      for (const m of inbounds) {
+        lines.push(`  - "${m.text}"`);
+        if (m.reactionTo) {
+          lines.push(`    (tap-back / reaction bound to message ${m.reactionTo})`);
+        }
+      }
     }
   } else if (trigger.kind === 'agent_event') {
     lines.push(

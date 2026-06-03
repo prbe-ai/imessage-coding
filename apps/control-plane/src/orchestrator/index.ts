@@ -97,6 +97,10 @@ export interface TurnResult {
   rounds?: number;
   toolCalls?: number;
   actions?: string[];
+  /** Set when a user turn was INTERRUPTED before committing any side effect — a
+   *  newer inbound arrived, so the drain re-runs one combined turn (it delivered
+   *  nothing; `handled` is false). See drainUserQueue. */
+  aborted?: boolean;
 }
 
 // --- public entrypoints -------------------------------------------------------
@@ -133,72 +137,109 @@ export async function orchestrate(
     return { handled: false, reason: 'unknown_or_unverified_sender' };
   }
   const accountId = conv.accountId;
-  // Serialize turns per account (see withAccountLock).
-  return withAccountLock(accountId, () => runUserTurn(inbound, transport, accountId));
+  // Log the inbound once, on receipt and BEFORE the drain reads history — so the
+  // turn's RECENT THREAD is built deterministically (not racing an async write)
+  // and a re-run of an interrupted batch never double-logs. Best-effort: a
+  // logging blip must not drop the message. (The real prologue that gates the
+  // webhook's claim-release is findAccountByPhone above, already awaited; this
+  // is detached from the 200-ack because the webhook fire-and-forgets orchestrate.)
+  await logMessage({ accountId, direction: 'inbound', body: inbound.text }).catch((err) => {
+    console.error('[assistant] failed to log inbound', err);
+  });
+  // Coalesce back-to-back texts. Enqueue; a single per-account drain loop runs
+  // the turn(s). A new text that lands BEFORE the current turn replies INTERRUPTS
+  // it and re-runs ONE combined turn over both (the typo-correction case); a text
+  // that lands AFTER the reply runs as its own turn.
+  enqueueUserMessage(accountId, inbound, transport);
+  return { handled: true, accountId, reason: 'enqueued' };
 }
 
-/** The serialized body of a user-message turn. */
+/**
+ * The serialized body of a user-message turn, run over a BATCH of inbound
+ * messages coalesced back-to-back (usually one; more when the user fired several
+ * before we replied). `signal` interrupts the turn while it is still uncommitted
+ * so a newer inbound can re-coalesce; `commit` latches true the instant the turn
+ * sends or acts (after which the signal is ignored — see runAssistantTurn).
+ * Fail-closed: any error sends a safe clarify and never throws to the drain.
+ */
 async function runUserTurn(
-  inbound: InboundMessage,
+  batch: ReadonlyArray<InboundMessage>,
   transport: Transport,
   accountId: string,
+  signal: AbortSignal,
+  commit: { committed: boolean },
 ): Promise<TurnResult> {
-  await logMessage({ accountId, direction: 'inbound', body: inbound.text });
-
-  const [pending, sessions, history] = await Promise.all([
-    listPendingAttentionForAccount(accountId),
-    listLiveSessionsForAccount(accountId),
-    recentMessages({ accountId, limit: HISTORY_LIMIT }),
-  ]);
-  // Deterministic binding drives the destructive-allow gate (never the model).
-  const boundTarget = deterministicTarget(inbound, pending);
-
-  const actions: string[] = [];
-  const sent = { count: 0 };
-  const ctx: DispatchCtx = {
-    mode: 'user_message',
-    accountId,
-    transport,
-    inbound,
-    pending,
-    boundTarget,
-    actions,
-    sent,
-  };
-  const activity = await loadSessionActivity(accountId, sessions);
-  const messages = buildTurnMessages({
-    trigger: { kind: 'user_message', inbound },
-    pending,
-    sessions,
-    history,
-    activity,
-  });
+  // Address replies to the most recent message of the burst.
+  const last = batch[batch.length - 1];
+  if (!last) return { handled: false, accountId, reason: 'empty_batch' };
 
   try {
+    // (Inbound messages are logged once on receipt in orchestrate, NOT here —
+    //  re-running an interrupted batch must not double-log them.)
+    const [pending, sessions, history] = await Promise.all([
+      listPendingAttentionForAccount(accountId),
+      listLiveSessionsForAccount(accountId),
+      recentMessages({ accountId, limit: HISTORY_LIMIT }),
+    ]);
+    // Deterministic binding drives the destructive-allow gate (never the model).
+    // A tap-back / inline reply in the burst (if any) binds; else the latest text.
+    const bindingInbound = [...batch].reverse().find((m) => m.reactionTo) ?? last;
+    const boundTarget = deterministicTarget(bindingInbound, pending);
+
+    const actions: string[] = [];
+    const sent = { count: 0 };
+    const ctx: DispatchCtx = {
+      mode: 'user_message',
+      accountId,
+      transport,
+      inbound: last,
+      pending,
+      boundTarget,
+      actions,
+      sent,
+    };
+    const activity = await loadSessionActivity(accountId, sessions);
+    const messages = buildTurnMessages({
+      trigger: { kind: 'user_message', inbounds: batch },
+      pending,
+      sessions,
+      history,
+      activity,
+    });
+
     const outcome = await runAssistantTurn({
       messages,
       tools: assistantTools('user_message'),
       user: accountId,
+      signal,
+      commit,
       execTool: makeExecTool(ctx),
       onUnsentText: async (text) => {
         await sendToUser(transport, accountId, text, {
-          replyToMessageId: inbound.messageId,
-          fallbackTo: inbound.from,
+          replyToMessageId: last.messageId,
+          fallbackTo: last.from,
         });
         sent.count += 1;
       },
     });
+    // Interrupted before committing anything: deliver nothing and let the drain
+    // re-run a fresh combined turn that includes the newer inbound(s).
+    if (outcome.aborted) {
+      return { handled: false, accountId, reason: 'interrupted', aborted: true };
+    }
     await recordActions(accountId, actions);
     return { handled: true, accountId, rounds: outcome.rounds, toolCalls: outcome.toolCalls, actions };
   } catch (err) {
-    // Fail-closed: never leave the user hanging; never take an action.
+    // Fail-closed: never leave the user hanging; never take an action. (Also
+    // covers a prologue blip — logMessage / context load — which used to escape
+    // to the webhook; now the drain is detached, so we absorb it here.)
     console.error('[assistant] user turn error', err);
     await sendToUser(
       transport,
       accountId,
       "Sorry — I'm having trouble reaching my brain right now. Try again in a moment.",
-      { replyToMessageId: inbound.messageId, fallbackTo: inbound.from },
-    );
+      { replyToMessageId: last.messageId, fallbackTo: last.from },
+    ).catch(() => {});
     return { handled: true, accountId, reason: 'turn_error' };
   }
 }
@@ -652,9 +693,10 @@ const accountLocks = new Map<string, Promise<unknown>>();
  * Run `fn` after any in-flight turn for `accountId` settles, chaining so turns
  * for the same account never overlap (two fast inbound texts, or a text racing
  * an agent-event turn, would otherwise interleave the loop and double-act on the
- * same pending attentions). In-process only — correct for a single instance; a
- * multi-instance deployment would need a Postgres advisory lock (see the
- * deferred burst-handling note in the plan).
+ * same pending attentions). Back-to-back texts are additionally COALESCED on top
+ * of this lock (see the inbound-coalescing section below). In-process only —
+ * correct for a single instance; a multi-instance deployment would need a
+ * Postgres advisory lock.
  */
 function withAccountLock<T>(accountId: string, fn: () => Promise<T>): Promise<T> {
   const prev = accountLocks.get(accountId) ?? Promise.resolve();
@@ -670,4 +712,177 @@ function withAccountLock<T>(accountId: string, fn: () => Promise<T>): Promise<T>
     if (accountLocks.get(accountId) === tail) accountLocks.delete(accountId);
   });
   return run;
+}
+
+// --- back-to-back inbound coalescing (in-process) -----------------------------
+//
+// Goal (single agent per number): when the user fires several texts in quick
+// succession, don't answer each one. While a turn is still UNCOMMITTED (waiting
+// on the model, nothing sent/acted), a newly-arrived text INTERRUPTS it and the
+// two are re-run as ONE combined turn — so a typo correction folds into the same
+// reply. Once a turn has committed a side effect (it replied, or resolved/steered
+// /set-afk something) it always finishes, and the new text runs as its own turn.
+//
+// Buffered inbound per account, drained by one loop at a time. The loop runs
+// inside withAccountLock so user turns stay serialized with the agent-event /
+// status-relay turns. In-process only (same scope as withAccountLock); a
+// multi-instance deployment would need a Postgres-backed queue + advisory lock.
+
+/**
+ * Max times an uncommitted free-text turn may be INTERRUPTED by a newer text
+ * before the next pass is forced to run to completion. Bounds coalescing so a
+ * steady trickle of quick lines ("wait", "no", "actually…") can't keep the turn
+ * perpetually uncommitted and starve the reply. After the cap, the next pass is
+ * non-interruptible (still folds in everything queued so far), then commits.
+ */
+const MAX_COALESCE_INTERRUPTS = 5;
+
+/** Undrained inbound messages per account (FIFO; shared reference, mutated in place). */
+const userQueues = new Map<string, InboundMessage[]>();
+/** Accounts with a drain loop currently running/scheduled (the synchronous guard
+ *  that prevents two concurrent drains and lost wakeups). */
+const drainActive = new Set<string>();
+/** The in-flight user turn per account, for interrupt-coalescing. */
+const inflightUserTurn = new Map<string, InflightTurn>();
+
+interface InflightTurn {
+  abort: AbortController;
+  /** Latches true once the turn performs a side effect; an interrupt is ignored
+   *  after that (a committed turn always finishes). */
+  commit: { committed: boolean };
+  /** False for a tap-back batch (each runs its own turn so its deterministic
+   *  binding is preserved) and for a pass that hit MAX_COALESCE_INTERRUPTS. */
+  interruptible: boolean;
+}
+
+/**
+ * Should a freshly-arrived inbound INTERRUPT the in-flight turn to coalesce with
+ * it? Pure decision (exported for tests). Only an uncommitted, interruptible
+ * in-flight turn yields to a FREE-TEXT message; a tap-back / inline reply never
+ * interrupts — it runs its own turn so its explicit binding isn't merged away.
+ */
+export function shouldInterrupt(
+  inflight: InflightTurn | undefined,
+  incoming: Pick<InboundMessage, 'reactionTo'>,
+): boolean {
+  if (!inflight) return false;
+  if (!inflight.interruptible) return false;
+  if (inflight.commit.committed) return false;
+  if (incoming.reactionTo) return false;
+  return true;
+}
+
+/**
+ * Pull the next batch off the FIFO queue (mutates it). A tap-back / inline reply
+ * is ALWAYS its own batch (so two distinct explicit bindings never merge into one
+ * turn and silently drop one); otherwise coalesce the leading run of free-text
+ * messages up to — but not including — the next tap-back. Pure (exported for
+ * tests). Returns [] only for an empty queue.
+ */
+export function takeBatch(queue: InboundMessage[]): InboundMessage[] {
+  const head = queue[0];
+  if (!head) return [];
+  if (head.reactionTo) return queue.splice(0, 1);
+  let n = 1;
+  for (; n < queue.length; n++) {
+    const m = queue[n];
+    if (!m || m.reactionTo) break;
+  }
+  return queue.splice(0, n);
+}
+
+/**
+ * Enqueue an inbound user message and ensure a drain loop is running. If a drain
+ * is already active, interrupt its in-flight turn when `shouldInterrupt` says so
+ * (uncommitted free-text coalescing); otherwise the message is picked up on the
+ * next drain iteration (the "already replied" / tap-back / capped cases).
+ */
+function enqueueUserMessage(
+  accountId: string,
+  inbound: InboundMessage,
+  transport: Transport,
+): void {
+  const q = userQueues.get(accountId) ?? [];
+  q.push(inbound);
+  userQueues.set(accountId, q);
+
+  if (drainActive.has(accountId)) {
+    const inflight = inflightUserTurn.get(accountId);
+    if (inflight && shouldInterrupt(inflight, inbound)) {
+      inflight.abort.abort(); // interrupt → coalesce with this message
+    }
+    return;
+  }
+
+  // No drain running: start one under the per-account lock (so user turns stay
+  // serialized with the agent-event / status-relay turns).
+  drainActive.add(accountId);
+  void withAccountLock(accountId, () => drainUserQueue(accountId, transport));
+}
+
+/**
+ * Drain an account's inbound queue, one batch at a time, until empty. Each pass
+ * takes the next batch (a free-text run, or a lone tap-back — see takeBatch). An
+ * interrupted (uncommitted) turn re-queues its batch ahead of the newer
+ * message(s) so the next pass coalesces them in arrival order; consecutive
+ * interrupts are capped so the reply can't be starved.
+ */
+async function drainUserQueue(accountId: string, transport: Transport): Promise<void> {
+  let interrupts = 0;
+  try {
+    for (;;) {
+      const queue = userQueues.get(accountId);
+      // Empty → tear down. This check + the delete run in ONE synchronous tick
+      // (no await before the next enqueue can observe it), so a message can't
+      // slip in after we decide to stop (no lost wakeup) and a second drain
+      // can't start while this one is alive (no double drain).
+      if (!queue || queue.length === 0) {
+        userQueues.delete(accountId);
+        return; // `finally` clears drainActive in this same tick.
+      }
+      const batch = takeBatch(queue);
+
+      const abort = new AbortController();
+      const commit = { committed: false };
+      // A tap-back batch never coalesces; a free-text batch is interruptible
+      // until it has been re-queued MAX_COALESCE_INTERRUPTS times (then forced).
+      const interruptible =
+        batch.length > 0 && !batch[0]?.reactionTo && interrupts < MAX_COALESCE_INTERRUPTS;
+      inflightUserTurn.set(accountId, { abort, commit, interruptible });
+      let aborted = false;
+      try {
+        const res = await runUserTurn(batch, transport, accountId, abort.signal, commit);
+        aborted = res.aborted === true;
+      } catch (err) {
+        // runUserTurn is fail-closed and shouldn't throw; if it does (e.g. the
+        // DB was unreachable for BOTH its prologue and the clarify send), drop
+        // this batch rather than stranding the loop. The webhook claim is
+        // already committed, so there's no redelivery — at-most-once, accepted.
+        // Last-ditch: still try to tell the user something went wrong.
+        console.error('[assistant] drain: user turn threw; dropping batch', err);
+        await sendToUser(
+          transport,
+          accountId,
+          "Sorry — something went wrong handling your message. Please try again.",
+        ).catch(() => {});
+      } finally {
+        inflightUserTurn.delete(accountId);
+      }
+      if (aborted) {
+        // Re-queue ahead of the newer message(s) that triggered the abort, and
+        // count the interrupt toward the cap so a trickle eventually commits.
+        interrupts += 1;
+        const q = userQueues.get(accountId) ?? [];
+        q.unshift(...batch);
+        userQueues.set(accountId, q);
+      } else {
+        interrupts = 0; // committed (or no-op): fresh budget for the next batch
+      }
+    }
+  } finally {
+    // ALWAYS release the drain slot, even on an unexpected throw, so the account
+    // never deadlocks — a later inbound restarts the drain (and picks up any
+    // messages left queued).
+    drainActive.delete(accountId);
+  }
 }

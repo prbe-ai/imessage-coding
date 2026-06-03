@@ -74,6 +74,13 @@ const ASSISTANT_TEMPERATURE = 0.3;
 export interface TurnOutcome {
   rounds: number;
   toolCalls: number;
+  /**
+   * True when an external `signal` interrupted the turn BEFORE it committed any
+   * side effect (nothing sent, no action taken). The turn delivered nothing, so
+   * the caller must NOT fire a fallback message — it re-runs a fresh combined
+   * turn instead (back-to-back inbound coalescing). Never set once committed.
+   */
+  aborted?: boolean;
 }
 
 /**
@@ -94,18 +101,50 @@ export async function runAssistantTurn(args: {
    * silently dropped. Only invoked when the turn produced no `text_user`.
    */
   onUnsentText?: (text: string) => Promise<void>;
+  /**
+   * Cooperative interrupt. While the turn is still UNCOMMITTED (waiting on the
+   * model), an abort stops the loop and returns `{ aborted: true }` without
+   * sending — the caller coalesces a freshly-arrived inbound into one combined
+   * turn. The interrupt also aborts the in-flight LLM request. Once the turn
+   * COMMITS a side effect (see `commit`) the signal is ignored: a committed
+   * turn always finishes, so we never half-apply a tool call.
+   */
+  signal?: AbortSignal;
+  /**
+   * Commit latch shared with the caller. Set `committed = true` synchronously,
+   * before the first side-effecting `await` (a tool call, or terminal prose).
+   * The caller reads it to decide whether a newly-arrived inbound may interrupt
+   * this turn — only while still uncommitted. Defaults to a private latch.
+   */
+  commit?: { committed: boolean };
 }): Promise<TurnOutcome> {
   const { llm } = loadEnv();
   if (!llm.apiKey) {
     throw new Error('runAssistantTurn: LLM_API_KEY is not set');
   }
 
-  const { messages, tools, user, execTool } = args;
+  const { messages, tools, user, execTool, signal } = args;
+  const commit = args.commit ?? { committed: false };
   let toolCalls = 0;
   let sawTextUser = false;
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    const msg = await callModel(llm, messages, tools, user);
+    // Interrupt point — only reachable while uncommitted (no side effect yet).
+    if (signal?.aborted) return { rounds: round, toolCalls, aborted: true };
+
+    let msg: { content?: string | null; tool_calls?: ToolCall[] };
+    try {
+      msg = await callModel(llm, messages, tools, user, signal);
+    } catch (err) {
+      // A fetch rejection WHILE interrupted is a clean coalesce, not an error:
+      // swallow it (don't let the caller fire its fail-closed clarify text).
+      if (signal?.aborted) return { rounds: round, toolCalls, aborted: true };
+      throw err;
+    }
+    // The model may have returned just as an interrupt landed — bail before
+    // committing this round's side effects.
+    if (signal?.aborted) return { rounds: round, toolCalls, aborted: true };
+
     const calls = msg.tool_calls ?? [];
 
     if (calls.length === 0) {
@@ -113,10 +152,15 @@ export async function runAssistantTurn(args: {
       // surface it so the user isn't left hanging (best-effort).
       const text = (msg.content ?? '').trim();
       if (text && !sawTextUser && args.onUnsentText) {
+        // COMMIT before the first (and only) side-effecting await on this path.
+        commit.committed = true;
         await args.onUnsentText(text);
       }
       return { rounds: round + 1, toolCalls };
     }
+
+    // COMMIT before running any tool call — from here the turn always finishes.
+    commit.committed = true;
 
     // Record the assistant's tool-call turn BEFORE appending tool results.
     messages.push({ role: 'assistant', content: msg.content ?? null, tool_calls: calls });
@@ -142,15 +186,26 @@ export async function runAssistantTurn(args: {
   return { rounds: MAX_ROUNDS, toolCalls };
 }
 
-/** One Chat Completions round. Throws on transport/HTTP error. */
+/** One Chat Completions round. Throws on transport/HTTP error.
+ *  `external` is the turn's interrupt signal — when it aborts (a new inbound
+ *  arrived mid-round), we abort the in-flight request too so the coalesced turn
+ *  doesn't wait out a stale round. */
 async function callModel(
   llm: { apiBase: string; apiKey: string | undefined; model: string },
   messages: ReadonlyArray<ChatMessage>,
   tools: ReadonlyArray<ToolDef>,
   user: string,
+  external?: AbortSignal,
 ): Promise<{ content?: string | null; tool_calls?: ToolCall[] }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  // Chain the external interrupt onto this request's controller (the timeout and
+  // the interrupt both abort the same fetch). Listener removed in finally.
+  const onExternalAbort = () => controller.abort();
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener('abort', onExternalAbort, { once: true });
+  }
   try {
     const res = await fetch(`${llm.apiBase.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
@@ -182,5 +237,6 @@ async function callModel(
     return msg;
   } finally {
     clearTimeout(timer);
+    if (external) external.removeEventListener('abort', onExternalAbort);
   }
 }

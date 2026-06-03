@@ -21,8 +21,8 @@ const STATE_BADGE: Record<SessionState, string> = {
 };
 
 const STATE_LABEL: Record<SessionState, string> = {
-  [SessionState.ACTIVE]: "Active",
-  [SessionState.WAITING]: "Waiting",
+  [SessionState.ACTIVE]: "Working",
+  [SessionState.WAITING]: "Waiting for answer",
   [SessionState.IDLE]: "Idle",
   [SessionState.ENDED]: "Ended",
 };

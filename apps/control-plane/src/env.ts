@@ -56,12 +56,34 @@ function require_(name: string): string {
   return v;
 }
 
+/** Truthy env flag: "1"/"true"/"yes"/"on" (case-insensitive); anything else false. */
+function isTruthy(name: string): boolean {
+  const v = read(name);
+  return v !== undefined && ['1', 'true', 'yes', 'on'].includes(v.toLowerCase());
+}
+
+/**
+ * Pick the LLM backend the orchestrator talks to. `SHOULD_USE_CEREBRAS=true` is
+ * the ergonomic toggle between the two backends wired in the LiteLLM proxy; an
+ * explicit `LLM_MODEL` (any id) still wins as a power-user override. The result
+ * MUST match a `model_name` in apps/litellm/config.yaml.
+ */
+function resolveLlmModel(): string {
+  const explicit = read('LLM_MODEL');
+  if (explicit) return explicit;
+  if (isTruthy('SHOULD_USE_CEREBRAS')) return LLM_MODEL_CEREBRAS;
+  return DEFAULT_LLM_MODEL;
+}
+
 const DEFAULT_PORT = 8080;
 // Local-dev default: a LiteLLM proxy on localhost. A forgotten override fails as
 // "proxy not running" (connection refused) rather than silently 404-ing a gemini
 // model id against OpenAI. Prod sets LLM_API_BASE to the flycast proxy (fly.toml).
 const DEFAULT_LLM_API_BASE = 'http://localhost:4000/v1';
-const DEFAULT_LLM_MODEL = 'gemini-3.5-flash';
+// Backend model ids — each MUST match a `model_name` in apps/litellm/config.yaml.
+const LLM_MODEL_GEMINI = 'gemini-3.5-flash';
+const LLM_MODEL_CEREBRAS = 'gpt-oss-120b';
+const DEFAULT_LLM_MODEL = LLM_MODEL_GEMINI;
 // Local-dev default. Prod sets WEBHOOK_BASE_URL to the public control-plane
 // origin (fly.toml [env]); never hardcode a specific deployment's host here.
 const DEFAULT_WEBHOOK_BASE_URL = 'http://localhost:8080';
@@ -95,7 +117,7 @@ export function loadEnv(): ControlPlaneEnv {
     llm: {
       apiKey: read('LLM_API_KEY'),
       apiBase: read('LLM_API_BASE') ?? DEFAULT_LLM_API_BASE,
-      model: read('LLM_MODEL') ?? DEFAULT_LLM_MODEL,
+      model: resolveLlmModel(),
     },
   };
 

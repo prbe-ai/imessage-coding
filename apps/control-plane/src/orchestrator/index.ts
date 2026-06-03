@@ -681,29 +681,76 @@ async function execGetSessionState(ctx: DispatchCtx, args: Record<string, unknow
             .map((b) => `${b.kind}${b.toolName ? `(${b.toolName})` : ''} [id=${b.id}]`)
             .join(', ')}`
         : 'not blocked';
-      const title = s.title ? JSON.stringify(clip(s.title, 80)) : '(untitled)';
       return (
-        `- id=${s.id} title=${title} state=${s.state} afk=${s.afk}` +
+        `- id=${s.id} title=${sessionTitle(s.title)} state=${s.state} afk=${s.afk}` +
         `${s.cwd ? ` cwd=${clip(s.cwd, 80)}` : ''}; ${blockedNote}`
       );
     })
     .join('\n');
 }
 
-/** get_session_data: read an agent's activity log (recent / grep / line range). */
+/** get_session_data: the one read tool for agent activity. Two modes:
+ *   - NO ids  → list every live session as a compact `id + title` pick-list, so
+ *     the model can discover which sessions exist before reading any (thin
+ *     harness: discovery lives on the same tool, not a separate one).
+ *   - one+ ids → read each named agent's activity log (recent / grep / line
+ *     range), grouped under a per-session header. The limit/grep/range options
+ *     apply per session. */
 async function execGetSessionData(ctx: DispatchCtx, args: Record<string, unknown>): Promise<string> {
-  const sessionId = typeof args.session === 'string' ? args.session.trim() : '';
-  if (!sessionId) return 'error: session is required';
-  const rows = await getSessionActivity({
-    sessionId,
+  const ids = collectSessionIds(args);
+
+  // No ids → list mode: every live session as `id + title`, the minimum the
+  // model needs to then call this same tool with the ids it wants to read.
+  if (ids.length === 0) {
+    if (ctx.sessions.length === 0) return 'no live sessions';
+    return ctx.sessions.map((s) => `- id=${s.id} title=${sessionTitle(s.title)}`).join('\n');
+  }
+
+  // Fetch mode: read each id's log into its own labelled block. Per-session
+  // queries (not a single batched one) keep one bad/empty id from masking the
+  // rest, and let each block carry its own line-numbered range for re-slicing.
+  const opts = {
     accountId: ctx.accountId,
     ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
     ...(typeof args.grep === 'string' && args.grep.trim() ? { grep: args.grep } : {}),
     ...(typeof args.from_line === 'number' ? { fromLine: args.from_line } : {}),
     ...(typeof args.to_line === 'number' ? { toLine: args.to_line } : {}),
-  });
-  if (rows.length === 0) return 'no matching activity for that session';
-  return rows.map(formatActivityLine).join('\n');
+  };
+  const blocks = await Promise.all(
+    ids.map(async (sessionId) => {
+      const known = ctx.sessions.find((s) => s.id === sessionId);
+      const header = `=== session ${sessionId} title=${sessionTitle(known?.title)} ===`;
+      // Guard the ::uuid comparison: a malformed id would error the query and
+      // (via Promise.all) take down the whole batch. Skip it with a note instead.
+      if (!isUuid(sessionId)) return `${header}\nerror: not a valid session id`;
+      const rows = await getSessionActivity({ sessionId, ...opts });
+      const body = rows.length === 0 ? 'no matching activity for this session' : rows.map(formatActivityLine).join('\n');
+      return `${header}\n${body}`;
+    }),
+  );
+  return blocks.join('\n\n');
+}
+
+/** Normalize get_session_data's target ids → trimmed, non-empty, de-duped. Forgiving
+ *  of how the model phrases it: `session_ids` as an array (canonical) or a lone
+ *  string, plus a single `session` string (tolerated alias). */
+function collectSessionIds(args: Record<string, unknown>): string[] {
+  const fromIds = Array.isArray(args.session_ids)
+    ? args.session_ids
+    : typeof args.session_ids === 'string'
+      ? [args.session_ids]
+      : [];
+  const fromSingle = typeof args.session === 'string' ? [args.session] : [];
+  const cleaned = [...fromIds, ...fromSingle]
+    .filter((v): v is string => typeof v === 'string')
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0);
+  return [...new Set(cleaned)];
+}
+
+/** A session title for tool output: the quoted title, or `(untitled)`. */
+function sessionTitle(title: string | undefined): string {
+  return title ? JSON.stringify(clip(title, 80)) : '(untitled)';
 }
 
 /** update_session_state: change a session setting (afk only, for now). AFK is

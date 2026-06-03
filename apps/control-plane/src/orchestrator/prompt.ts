@@ -93,8 +93,9 @@ export function systemPrompt(): string {
     "  action=allow / action=deny instead of text (action=approve for a plan).",
     '- get_session_state — look up what your agents are doing and what they are blocked',
     '  on (one agent or all).',
-    '- get_session_data — read an agent\'s actual activity log (recent events, or grep',
-    '  it, or a line range) to answer "what is it doing / did it do X".',
+    '- get_session_data — read your agents\' activity logs (recent events, grep, or a',
+    '  line range) to answer "what is it doing / did it do X". Omit ids to list all',
+    '  your live sessions (id + title); pass one or more ids to read those logs.',
     '- update_session_state — change a session setting; right now that is AFK on/off.',
     '',
     'You get a short snapshot of the live agents and anything pending. It is',
@@ -248,29 +249,38 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
       function: {
         name: ToolName.GET_SESSION_DATA,
         description:
-          "Read what a coding agent has actually been doing — its activity log (messages " +
-          'it sent, tools it ran). Defaults to the last 20 events. Pass grep to search ' +
-          'the log for a word or phrase, or from_line / to_line to read a specific range ' +
-          '(the log is line-numbered). Use this to answer "what is my agent doing" or ' +
-          '"did it do X".',
+          'Read what your coding agents have actually been doing — their activity logs ' +
+          '(messages they sent, tools they ran). TWO MODES: (1) OMIT session_ids to list ' +
+          'every live agent as id + title, so you can see what exists and pick which to ' +
+          'read; (2) pass one or more session_ids to read those agents\' logs (each ' +
+          'returned under its own header). Defaults to the last 20 events per session. ' +
+          'Pass grep to search the logs, or from_line / to_line to read a specific range ' +
+          '(each log is line-numbered). Use this to answer "what are my agents doing" or ' +
+          '"did agent X do Y".',
         parameters: {
           type: 'object',
           properties: {
-            session: { type: 'string', description: 'Id of the session whose log to read.' },
+            session_ids: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'Ids of the sessions whose logs to read (one or many). Omit entirely to ' +
+                'instead list all live sessions as id + title.',
+            },
             limit: {
               type: 'number',
               description:
-                'How many recent events to return (default 20). Ignored when a line range is given.',
+                'How many recent events to return per session (default 20). Ignored when a line range is given.',
             },
             grep: {
               type: 'string',
               description:
-                'Case-insensitive substring to filter the log by (message text / tool summary).',
+                'Case-insensitive substring to filter the logs by (message text / tool summary).',
             },
             from_line: { type: 'number', description: 'Start line (inclusive) of a range to read.' },
             to_line: { type: 'number', description: 'End line (inclusive) of a range to read.' },
           },
-          required: ['session'],
+          required: [],
         },
       },
     },

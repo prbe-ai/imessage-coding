@@ -1152,10 +1152,84 @@ export async function listUndeliveredSessionMessages(args: {
   return rows.map((r) => ({ id: r.id, body: r.body }));
 }
 
-/** Mark steers delivered (after the device has injected them into the session). */
+/** Mark steers delivered (after the SSE flush has written them to the stream).
+ *  Server-side re-serve dedup — NOT a device-injection confirmation. Unscoped by
+ *  design (the SSE flush already scoped the ids it wrote); never pass device
+ *  input here — use markSessionMessagesAcked for that. */
 export async function markSessionMessagesDelivered(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   await query(`UPDATE session_messages SET delivered_at = now() WHERE id = ANY($1::uuid[])`, [ids]);
+}
+
+/**
+ * Mark steers ACKED — the device confirms it INJECTED them into the session
+ * (true delivery confirmation, distinct from delivered_at's SSE-write dedup).
+ * Tenant-scoped via the session join (device_id + account_id) so a device can
+ * only ack its OWN session's steers; this is the device-input-safe counterpart
+ * to the unscoped markSessionMessagesDelivered. Idempotent (already-acked rows
+ * skipped). Returns the ids actually flipped; the acked_at→non-null transition
+ * fires NOTIFY 'message_delivered' to wake the orchestrator's confirmation watcher.
+ */
+export async function markSessionMessagesAcked(args: {
+  sessionId: string;
+  deviceId: string;
+  accountId: string;
+  messageIds: string[];
+}): Promise<string[]> {
+  if (args.messageIds.length === 0) return [];
+  const rows = await query<{ id: string }>(
+    `UPDATE session_messages sm
+        SET acked_at = now()
+       FROM sessions s
+      WHERE sm.session_id = s.id
+        AND sm.session_id = $1
+        AND s.device_id   = $2
+        AND s.account_id  = $3
+        AND sm.account_id = $3
+        AND sm.id = ANY($4::uuid[])
+        AND sm.acked_at IS NULL
+    RETURNING sm.id`,
+    [args.sessionId, args.deviceId, args.accountId, args.messageIds],
+  );
+  return rows.map((r) => r.id);
+}
+
+/** True once the device has ACKed injection of the decision for `attentionId`
+ *  (decisions.delivered_at set). Account-scoped. Used as the orchestrator's
+ *  delivery-confirmation pre-check (see waitForDelivered's park-before-query). */
+export async function isDecisionDelivered(args: {
+  attentionId: string;
+  accountId: string;
+}): Promise<boolean> {
+  const rows = await query<{ ok: number }>(
+    `SELECT 1 AS ok
+       FROM decisions d
+       JOIN attention_events ae ON ae.id = d.attention_id
+      WHERE d.attention_id = $1
+        AND ae.account_id  = $2
+        AND d.delivered_at IS NOT NULL
+      LIMIT 1`,
+    [args.attentionId, args.accountId],
+  );
+  return rows.length > 0;
+}
+
+/** True once the device has ACKed injection of the steer `messageId`
+ *  (session_messages.acked_at set). Account-scoped. */
+export async function isSteerAcked(args: {
+  messageId: string;
+  accountId: string;
+}): Promise<boolean> {
+  const rows = await query<{ ok: number }>(
+    `SELECT 1 AS ok
+       FROM session_messages sm
+      WHERE sm.id = $1
+        AND sm.account_id = $2
+        AND sm.acked_at IS NOT NULL
+      LIMIT 1`,
+    [args.messageId, args.accountId],
+  );
+  return rows.length > 0;
 }
 
 export type { AccountRow };

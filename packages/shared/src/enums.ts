@@ -203,6 +203,14 @@ export const NotifyChannel = {
   /** Fired on a device afk/grant change — the machine-wide toggle (wake every
    *  live device stream + the dashboard). Payload carries device_id + account_id. */
   DEVICE_STATE: 'device_state',
+  /** Fired when a decision's delivered_at flips non-null (the device ACKed
+   *  injection). Wakes the orchestrator's delivery-confirmation waiter, keyed by
+   *  the attention_id. Payload: { id }. */
+  DECISION_DELIVERED: 'decision_delivered',
+  /** Fired when a session_message's acked_at flips non-null (the device ACKed
+   *  injection). Wakes the delivery-confirmation waiter, keyed by the message id.
+   *  Payload: { id }. (Separate from delivered_at, which stays server-side dedup.) */
+  MESSAGE_DELIVERED: 'message_delivered',
 } as const;
 export type NotifyChannel = (typeof NotifyChannel)[keyof typeof NotifyChannel];
 

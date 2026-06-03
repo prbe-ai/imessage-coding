@@ -29,7 +29,16 @@ const CHANNELS = [
   NotifyChannel.SESSION_MESSAGE,
   NotifyChannel.SESSION_STATE,
   NotifyChannel.DEVICE_STATE,
+  NotifyChannel.DECISION_DELIVERED,
+  NotifyChannel.MESSAGE_DELIVERED,
 ] as const;
+
+/** The two confirmation channels carry only a row `id` and wake the
+ *  delivery-confirmation waiter (not session/account/device waiters). */
+const DELIVERED_CHANNELS: readonly string[] = [
+  NotifyChannel.DECISION_DELIVERED,
+  NotifyChannel.MESSAGE_DELIVERED,
+];
 
 /** A bare wake signal for a parked waiter. */
 type Waiter = () => void;
@@ -111,21 +120,30 @@ function makeWaiterRegistry() {
 const sessionWaiters = makeWaiterRegistry();
 const accountWaiters = makeWaiterRegistry();
 const deviceWaiters = makeWaiterRegistry();
+/** Keyed by ROW id (attention_id / message id) — woken by the *_delivered
+ *  channels when the device confirms it injected that decision/steer. */
+const deliveredWaiters = makeWaiterRegistry();
 
 let client: Client | undefined;
 let starting: Promise<void> | undefined;
 
 function handleNotification(channel: string, payloadText: string | undefined): void {
   if (!(CHANNELS as readonly string[]).includes(channel) || !payloadText) return;
-  let payload: { session_id?: string; account_id?: string; device_id?: string };
+  let payload: { session_id?: string; account_id?: string; device_id?: string; id?: string };
   try {
     payload = JSON.parse(payloadText) as {
       session_id?: string;
       account_id?: string;
       device_id?: string;
+      id?: string;
     };
   } catch {
     console.error('[listener] unparseable payload on', channel, payloadText);
+    return;
+  }
+  // Confirmation channels are keyed by the row id → wake the delivery waiter.
+  if (DELIVERED_CHANNELS.includes(channel)) {
+    if (payload.id) deliveredWaiters.wake(payload.id);
     return;
   }
   // decision_ready / session_message / session_state carry a session_id → wake
@@ -260,6 +278,90 @@ export function waitForSessionOrDeviceEvent(
     cleanup();
     return woken;
   });
+}
+
+/** Max time to wait on `ensureListener` before proceeding regardless (a hung
+ *  connect must not stall the caller; the post-wake re-query is the safety net). */
+const ENSURE_LISTENER_BUDGET_MS = 2_000;
+
+/**
+ * Resolve `p`, but never later than `ms` (then `fallback`). A rejection also
+ * resolves to `fallback`. Used to bound every DB touch in waitForDelivered so a
+ * hung query (pool exhaustion, partition) can NEVER hang the detached watcher —
+ * the function always settles. Resolving twice is a no-op (a Promise settles once).
+ */
+function settleWithin<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const t = setTimeout(() => resolve(fallback), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(t);
+        resolve(fallback);
+      },
+    );
+  });
+}
+
+/**
+ * Wait until the device confirms delivery of the row `key` (an attention_id for
+ * a decision, or a message id for a steer), or until `timeoutMs` elapses.
+ * Resolves true if confirmed, false on timeout/abort. `isDone` is the caller's
+ * per-kind lookup (decisions.delivered_at / session_messages.acked_at).
+ *
+ * Robustness (every line here defends a way the detached watcher could lie or
+ * hang — it must always settle, and must never claim "unconfirmed" when the row
+ * is actually delivered):
+ *  - ENSURE THE LISTENER: a `*_delivered` NOTIFY only arrives if the dedicated
+ *    LISTEN client is up. Boot warm-up is best-effort and never retries an
+ *    initial failure, so ensure it HERE (idempotent) — else every confirmation
+ *    falsely times out. Bounded so a hung connect can't stall us.
+ *  - PARK-BEFORE-QUERY (TOCTOU): register the waiter BEFORE the first re-check,
+ *    so a NOTIFY firing in the check→park window isn't stranded (the same hazard
+ *    the device SSE loop documents).
+ *  - BOUNDED CHECKS: each `isDone` runs under `settleWithin`, so a stuck query
+ *    can't outlive the deadline and hang the watcher's `Promise.all`.
+ *  - RE-QUERY IS THE ARBITER: after the wake/timeout, query once more — a missed
+ *    or reconnect-dropped NOTIFY must not produce a false "unconfirmed" when
+ *    `delivered_at`/`acked_at` is in fact set. The DB, not the NOTIFY, decides.
+ */
+export async function waitForDelivered(
+  key: string,
+  timeoutMs: number,
+  isDone: () => Promise<boolean>,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (signal?.aborted) return false;
+  // The NOTIFY can't reach us without the LISTEN client. Bounded + best-effort:
+  // a failure falls through to the re-query path, never throws.
+  await settleWithin(ensureListener(), ENSURE_LISTENER_BUDGET_MS, undefined);
+  if (signal?.aborted) return false;
+
+  // A child controller lets us cancel the parked waiter when a check short-circuits.
+  const controller = new AbortController();
+  const onParentAbort = (): void => controller.abort();
+  signal?.addEventListener('abort', onParentAbort, { once: true });
+  // Register the waiter BEFORE the first re-check (park-before-query invariant).
+  const parked = deliveredWaiters.waitFor(key, timeoutMs, controller.signal);
+  // A delivery check that can never outlive the deadline (false on hang/throw).
+  const check = (): Promise<boolean> => settleWithin(isDone(), timeoutMs, false);
+  try {
+    // Pre-check: already delivered → done (covers the fast ACK / warm row).
+    if (await check()) {
+      controller.abort(); // unregister the (now-moot) waiter
+      return true;
+    }
+    // Wait for the NOTIFY wake or the timeout, then RE-QUERY as the arbiter
+    // (handles a missed/reconnect-dropped NOTIFY and the wake→here window).
+    await parked;
+    return await check();
+  } finally {
+    controller.abort();
+    signal?.removeEventListener('abort', onParentAbort);
+  }
 }
 
 /** @deprecated Alias retained for the legacy decisions long-poll. */

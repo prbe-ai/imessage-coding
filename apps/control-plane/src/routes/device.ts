@@ -60,6 +60,7 @@ import {
   listDecisionsForSession,
   listUndeliveredSessionMessages,
   markDecisionsDelivered,
+  markSessionMessagesAcked,
   markSessionMessagesDelivered,
   setDeviceAfk,
   setDeviceGrant,
@@ -539,20 +540,27 @@ deviceRoutes.post(DeviceApiRoute.ACK, async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as {
     sessionId?: unknown;
     attentionIds?: unknown;
+    messageIds?: unknown;
   };
   const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
   if (!sessionId) {
     return c.json({ error: 'missing_session_id' }, 400);
   }
-  // Validate UUIDs here: markDecisionsDelivered casts to ::uuid[], and a
-  // malformed id (old/buggy client) would otherwise raise an unhandled 500 —
-  // the exact failure mode the heartbeat fail-soft change kills. Drop non-UUIDs
-  // silently (consistent with the idempotent "subset actually flipped" contract).
+  // Validate UUIDs here: the repo casts to ::uuid[], and a malformed id
+  // (old/buggy client) would otherwise raise an unhandled 500 — the exact
+  // failure mode the heartbeat fail-soft change kills. Drop non-UUIDs silently
+  // (consistent with the idempotent "subset actually flipped" contract).
   const attentionIds = Array.isArray(body.attentionIds)
     ? body.attentionIds.filter((x): x is string => typeof x === 'string' && isUuid(x))
     : [];
-  if (attentionIds.length === 0) {
-    return c.json({ acked: [] });
+  // messageIds: the device confirms it injected these STEERS (sets acked_at →
+  // the delivery-confirmation signal). Optional — older plugins send only
+  // attentionIds. Both are tenant-scoped in the repo by device_id + account_id.
+  const messageIds = Array.isArray(body.messageIds)
+    ? body.messageIds.filter((x): x is string => typeof x === 'string' && isUuid(x))
+    : [];
+  if (attentionIds.length === 0 && messageIds.length === 0) {
+    return c.json({ acked: [], ackedMessages: [] });
   }
   // Scope check: the session must belong to this device/account.
   const session = await getSessionForDevice({
@@ -563,13 +571,25 @@ deviceRoutes.post(DeviceApiRoute.ACK, async (c) => {
   if (!session) {
     return c.json({ error: 'unknown_session' }, 404);
   }
-  const acked = await markDecisionsDelivered({
-    sessionId,
-    deviceId: auth.deviceId,
-    accountId: auth.accountId,
-    attentionIds,
-  });
-  return c.json({ acked });
+  const acked =
+    attentionIds.length > 0
+      ? await markDecisionsDelivered({
+          sessionId,
+          deviceId: auth.deviceId,
+          accountId: auth.accountId,
+          attentionIds,
+        })
+      : [];
+  const ackedMessages =
+    messageIds.length > 0
+      ? await markSessionMessagesAcked({
+          sessionId,
+          deviceId: auth.deviceId,
+          accountId: auth.accountId,
+          messageIds,
+        })
+      : [];
+  return c.json({ acked, ackedMessages });
 });
 
 // --- HEARTBEAT ----------------------------------------------------------------

@@ -45,6 +45,8 @@ import {
   getAttentionForAccount,
   getSessionActivity,
   insertSessionMessage,
+  isDecisionDelivered,
+  isSteerAcked,
   listLiveSessionsForAccount,
   listPendingAttentionForAccount,
   logMessage,
@@ -54,6 +56,7 @@ import {
   setDevicesAfkForSessions,
   type SessionActivityLine,
 } from '../db/repo.ts';
+import { waitForDelivered } from '../db/listener.ts';
 import { hashToken } from '../auth/device.ts';
 import { runAssistantTurn, type ToolExecutor } from './llm.ts';
 import { assistantTools, buildTurnMessages, type TurnMode } from './prompt.ts';
@@ -65,6 +68,20 @@ import {
 } from './safety.ts';
 
 const HISTORY_LIMIT = 20;
+
+/** How long the per-turn delivery watcher waits for the device to confirm it
+ *  injected a resolution/steer before reporting it as unconfirmed. Covers the
+ *  full round-trip (NOTIFY → SSE push → device inject → device ACK → NOTIFY).
+ *  Detached from the turn, so this never blocks the per-account lock. */
+const DELIVERY_CONFIRM_TIMEOUT_MS = 4_000;
+
+/** One row the turn delivered to a session, watched for device confirmation. */
+interface DeliveryWatch {
+  id: string;
+  kind: 'decision' | 'steer';
+  /** Short human phrase for the follow-up message (e.g. "your answer"). */
+  label: string;
+}
 
 /** Outcome of one turn (for logging/tests). */
 export interface TurnResult {
@@ -175,6 +192,7 @@ async function runUserTurn(
       boundTarget,
       actions,
       sent,
+      deliveries: [],
     };
     const messages = buildTurnMessages({
       trigger: { kind: 'user_message', inbounds: batch },
@@ -204,6 +222,14 @@ async function runUserTurn(
       return { handled: false, accountId, reason: 'interrupted', aborted: true };
     }
     await recordActions(accountId, actions);
+    // Confirm delivery OUT OF BAND: a DETACHED watcher waits for the device to
+    // ACK each row this turn wrote to a session, then texts the user what
+    // actually landed (and a heads-up for anything unconfirmed). Detached (not
+    // awaited) so it never holds the per-account lock — the next inbound /
+    // agent-event / status turn isn't starved, and N rows share ONE deadline.
+    if (ctx.deliveries.length > 0) {
+      void watchDeliveries(accountId, transport, ctx.deliveries);
+    }
     return { handled: true, accountId, rounds: outcome.rounds, toolCalls: outcome.toolCalls, actions };
   } catch (err) {
     // Fail-closed: never leave the user hanging; never take an action. (Also
@@ -267,6 +293,7 @@ async function runAgentEventTurnLocked(
       triggerAttentionId: attention.id,
       actions,
       sent,
+      deliveries: [],
     };
     const messages = buildTurnMessages({
       trigger: { kind: 'agent_event', attention },
@@ -337,6 +364,7 @@ async function relayAgentMessageLocked(
       sessions,
       actions,
       sent,
+      deliveries: [],
     };
     const messages = buildTurnMessages({
       trigger: { kind: 'agent_message', sessionId: message.sessionId, text: message.text },
@@ -392,6 +420,9 @@ interface DispatchCtx {
   actions: string[];
   /** Count of outbound messages sent this turn. */
   sent: { count: number };
+  /** Rows delivered to a session this turn (user-message turns only), watched
+   *  AFTER the turn for device confirmation. See watchDeliveries. */
+  deliveries: DeliveryWatch[];
 }
 
 /** Build the tool executor for one turn. Tools never throw — they return `error:`.
@@ -507,6 +538,7 @@ async function execMessageAgent(ctx: DispatchCtx, args: Record<string, unknown>)
     });
     if (dec) {
       ctx.actions.push(`answered ${answerable.kind} ${shortId(answerable.id)}`);
+      ctx.deliveries.push({ id: answerable.id, kind: 'decision', label: 'your answer' });
       return queuedForSession('answer recorded');
     }
     // Raced to resolved between snapshot and now — fall through to a plain steer.
@@ -516,6 +548,7 @@ async function execMessageAgent(ctx: DispatchCtx, args: Record<string, unknown>)
   const res = await insertSessionMessage({ sessionId, accountId: ctx.accountId, body: text });
   if (!res) return 'error: no such live session for this account';
   ctx.actions.push(`messaged session ${shortId(sessionId)}`);
+  ctx.deliveries.push({ id: res.id, kind: 'steer', label: `your message to ${shortId(sessionId)}` });
   return queuedForSession('message sent');
 }
 
@@ -555,6 +588,7 @@ async function resolveSessionAction(
     });
     if (!dec) return 'error: that request is already resolved';
     ctx.actions.push(`denied ${target.kind} ${shortId(target.id)}`);
+    ctx.deliveries.push({ id: target.id, kind: 'decision', label: 'the denial' });
     return queuedForSession('denial recorded');
   }
 
@@ -574,6 +608,7 @@ async function resolveSessionAction(
     });
     if (!dec) return 'error: that plan is already resolved';
     ctx.actions.push(`approved plan ${shortId(target.id)}${grant ? ` grant=${grant}` : ''}`);
+    ctx.deliveries.push({ id: target.id, kind: 'decision', label: 'the plan approval' });
     return queuedForSession(grant ? `plan approved (standing grant: ${grant})` : 'plan approved');
   }
 
@@ -615,6 +650,7 @@ async function allowPermission(ctx: DispatchCtx, target: AttentionEvent): Promis
   });
   if (!dec) return 'error: that permission is already resolved';
   ctx.actions.push(`allowed ${target.toolName ?? 'permission'} ${shortId(target.id)}`);
+  ctx.deliveries.push({ id: target.id, kind: 'decision', label: 'the permission' });
   return queuedForSession('permission allowed');
 }
 
@@ -882,6 +918,72 @@ function shortId(id: string): string {
  */
 function queuedForSession(recorded: string): string {
   return `${recorded}; queued for delivery to the session (the agent has NOT confirmed receipt yet)`;
+}
+
+/**
+ * DETACHED per-turn delivery watcher. Waits (one shared deadline) for the device
+ * to confirm it INJECTED each row this turn wrote to a session — a decision
+ * (decisions.delivered_at, set on the device ACK) or a steer
+ * (session_messages.acked_at) — then texts the user ONE batched follow-up: what
+ * landed (✓) and anything still unconfirmed (⚠️). This is the actual proof the
+ * agent received it; the in-turn tool result only ever says "queued". Runs off
+ * the per-account lock (spawned with `void`); best-effort, never throws out.
+ */
+async function watchDeliveries(
+  accountId: string,
+  transport: Transport,
+  deliveries: ReadonlyArray<DeliveryWatch>,
+): Promise<void> {
+  try {
+    const results = await Promise.all(
+      deliveries.map(async (d) => {
+        const isDone =
+          d.kind === 'decision'
+            ? (): Promise<boolean> => isDecisionDelivered({ attentionId: d.id, accountId })
+            : (): Promise<boolean> => isSteerAcked({ messageId: d.id, accountId });
+        const ok = await waitForDelivered(d.id, DELIVERY_CONFIRM_TIMEOUT_MS, isDone);
+        return { label: d.label, ok };
+      }),
+    );
+    const followup = composeDeliveryFollowup(
+      results.filter((r) => r.ok).map((r) => r.label),
+      results.filter((r) => !r.ok).map((r) => r.label),
+    );
+    if (followup) await sendToUser(transport, accountId, followup);
+  } catch (err) {
+    console.error('[assistant] delivery watch error', err);
+  }
+}
+
+/**
+ * Compose the batched delivery follow-up (CODE-generated — never LLM prose, so
+ * the confirmation is always truthful). Returns undefined when there's nothing
+ * to say. `confirmed` landed on the agent; `unconfirmed` didn't ACK within the
+ * window. Exported for tests.
+ */
+export function composeDeliveryFollowup(
+  confirmed: ReadonlyArray<string>,
+  unconfirmed: ReadonlyArray<string>,
+): string | undefined {
+  const secs = Math.round(DELIVERY_CONFIRM_TIMEOUT_MS / 1000);
+  if (unconfirmed.length === 0) {
+    if (confirmed.length === 0) return undefined;
+    return `✓ Delivered to the session: ${joinLabels(confirmed)}.`;
+  }
+  // Honest for BOTH paths: a decision re-serves until ACKed, but a steer's
+  // delivered_at is set on SSE write, so it may already be delivered yet
+  // unconfirmed (e.g. a pre-0.1.5 device that never ACKs steers). Don't promise
+  // a retry that won't happen — just state we couldn't confirm.
+  const warn = `⚠️ Heads up — I couldn't confirm ${joinLabels(unconfirmed)} reached the session (no ack after ${secs}s). It may still have landed; I just can't confirm it.`;
+  if (confirmed.length === 0) return warn;
+  return `✓ Delivered: ${joinLabels(confirmed)}.\n${warn}`;
+}
+
+/** Join labels into a natural list ("a", "a and b", "a, b and c"). */
+function joinLabels(labels: ReadonlyArray<string>): string {
+  if (labels.length <= 1) return labels[0] ?? '';
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
+  return `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
 }
 
 // --- per-account serialization (in-process) -----------------------------------

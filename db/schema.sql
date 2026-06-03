@@ -272,8 +272,17 @@ CREATE TABLE IF NOT EXISTS session_messages (
   account_id    UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   body          TEXT        NOT NULL,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  delivered_at  TIMESTAMPTZ
+  -- delivered_at: set server-side in the SSE flush on WRITE (re-serve dedup).
+  -- acked_at:     set by the device AFTER it injects the steer (true delivery
+  --               confirmation, the signal the orchestrator waits on). Kept
+  --               separate so adding confirmation never disturbs the existing
+  --               delivered_at dedup (no re-serve / double-inject regression).
+  delivered_at  TIMESTAMPTZ,
+  acked_at      TIMESTAMPTZ
 );
+-- Older deployments: add acked_at to an existing table (CREATE … IF NOT EXISTS
+-- above does not alter a pre-existing table).
+ALTER TABLE session_messages ADD COLUMN IF NOT EXISTS acked_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_session_messages_undelivered
   ON session_messages(session_id) WHERE delivered_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_session_messages_session_created
@@ -340,6 +349,48 @@ CREATE TRIGGER trg_session_message
   AFTER INSERT ON session_messages
   FOR EACH ROW
   EXECUTE FUNCTION notify_session_message();
+
+-- =============================================================================
+-- LISTEN/NOTIFY: delivery confirmation. When the device ACKs that it injected a
+-- decision (delivered_at) or a steer (acked_at), wake the orchestrator's
+-- per-turn delivery-confirmation watcher so it can tell the user what actually
+-- landed. Keyed by the ROW id (attention_id / message id), which is what the
+-- watcher parks on — payload carries only `id`. Fires once, on the null→set
+-- transition (the WHEN guard), so a re-ACK or any later UPDATE is inert.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION notify_decision_delivered() RETURNS trigger AS $$
+BEGIN
+  PERFORM pg_notify(
+    'decision_delivered',
+    json_build_object('id', NEW.attention_id)::text
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_decision_delivered ON decisions;
+CREATE TRIGGER trg_decision_delivered
+  AFTER UPDATE OF delivered_at ON decisions
+  FOR EACH ROW
+  WHEN (OLD.delivered_at IS NULL AND NEW.delivered_at IS NOT NULL)
+  EXECUTE FUNCTION notify_decision_delivered();
+
+CREATE OR REPLACE FUNCTION notify_message_delivered() RETURNS trigger AS $$
+BEGIN
+  PERFORM pg_notify(
+    'message_delivered',
+    json_build_object('id', NEW.id)::text
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_message_delivered ON session_messages;
+CREATE TRIGGER trg_message_delivered
+  AFTER UPDATE OF acked_at ON session_messages
+  FOR EACH ROW
+  WHEN (OLD.acked_at IS NULL AND NEW.acked_at IS NOT NULL)
+  EXECUTE FUNCTION notify_message_delivered();
 
 -- =============================================================================
 -- LISTEN/NOTIFY: wake BOTH the device's event stream AND the dashboard's event

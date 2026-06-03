@@ -13,7 +13,13 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { GrantLevel, MessageChannel, type InboundMessage } from '@imsg/shared';
-import { capGrant, extractOnboardingToken, shouldInterrupt, takeBatch } from './index.ts';
+import {
+  capGrant,
+  composeDeliveryFollowup,
+  extractOnboardingToken,
+  shouldInterrupt,
+  takeBatch,
+} from './index.ts';
 
 function inbound(overrides: Partial<InboundMessage> = {}): InboundMessage {
   return {
@@ -148,5 +154,38 @@ describe('shouldInterrupt — only uncommitted free-text coalesces', () => {
 
   test('an incoming tap-back never interrupts — it runs its own turn', () => {
     expect(shouldInterrupt(inflight(), inbound({ reactionTo: 'notify-1' }))).toBe(false);
+  });
+});
+
+describe('composeDeliveryFollowup — honest, code-generated confirmation', () => {
+  test('nothing delivered → no message (undefined)', () => {
+    expect(composeDeliveryFollowup([], [])).toBeUndefined();
+  });
+
+  test('all confirmed → a single ✓ line', () => {
+    const msg = composeDeliveryFollowup(['your answer'], []) ?? '';
+    expect(msg.includes('✓')).toBe(true);
+    expect(msg.includes('your answer')).toBe(true);
+    expect(msg.includes('⚠️')).toBe(false);
+  });
+
+  test('all unconfirmed → a ⚠️ heads-up, never a ✓', () => {
+    const msg = composeDeliveryFollowup([], ['your answer']) ?? '';
+    expect(msg.includes('⚠️')).toBe(true);
+    expect(msg.includes("couldn't confirm")).toBe(true);
+    expect(msg.includes('✓')).toBe(false);
+  });
+
+  test('mixed → both a ✓ for landed and a ⚠️ for unconfirmed', () => {
+    const msg = composeDeliveryFollowup(['the plan approval'], ['your message to abc12345']) ?? '';
+    expect(msg.includes('✓')).toBe(true);
+    expect(msg.includes('the plan approval')).toBe(true);
+    expect(msg.includes('⚠️')).toBe(true);
+    expect(msg.includes('your message to abc12345')).toBe(true);
+  });
+
+  test('joins multiple labels naturally with "and"', () => {
+    const msg = composeDeliveryFollowup(['a', 'b', 'c'], []) ?? '';
+    expect(msg.includes('a, b and c')).toBe(true);
   });
 });

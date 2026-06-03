@@ -428,6 +428,32 @@ async function ackDecisions(attentionIds: string[]): Promise<void> {
   }
 }
 
+/**
+ * ACK injected STEERS back to the control plane (by message id) so it sets
+ * `acked_at` — the delivery-confirmation signal the orchestrator's per-turn
+ * watcher waits on (distinct from `delivered_at`, which the server sets on SSE
+ * write for re-serve dedup). Mirrors ackDecisions; best-effort, never throws.
+ */
+async function ackSteers(messageIds: string[]): Promise<void> {
+  if (messageIds.length === 0) return;
+  const token = loadToken();
+  if (!token) return;
+  try {
+    const resp = await postJson(
+      deviceApiUrl(DeviceApiRoute.ACK),
+      JSON.stringify({ sessionId: SESSION_ID, messageIds }),
+      { bearer: token },
+    );
+    if (resp.classification === Classification.SUCCESS) {
+      log('steers_acked', { count: messageIds.length });
+    } else {
+      log('steer_ack_failed', { status: resp.status });
+    }
+  } catch (err) {
+    log('steer_ack_error', { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 interface DecisionsResponse {
   decisions?: Decision[];
   /** Server maps each resolved attentionId back to its channel request_id. */
@@ -530,7 +556,12 @@ async function subscribeEvents(): Promise<void> {
               if (decisions.length > 0) void ackDecisions(decisions.map((d) => d.attentionId));
             } else if (event === SseEvent.SESSION_MESSAGES) {
               const body = JSON.parse(data) as { messages?: Array<{ id: string; body: string }> };
-              for (const m of body.messages ?? []) await applySteer(m);
+              const msgs = body.messages ?? [];
+              for (const m of msgs) await applySteer(m);
+              // ACK every steer in the frame (injected or dup-skipped) so the
+              // server sets acked_at and the orchestrator's watcher can confirm
+              // delivery to the user. Fire-and-forget (mirrors the decision ACK).
+              if (msgs.length > 0) void ackSteers(msgs.map((m) => m.id));
             } else if (event === SseEvent.STATE) {
               // Mirror the control plane's authoritative afk/grant into the local
               // state files the PreToolUse hook reads (guarded: write on change).

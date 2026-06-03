@@ -191,7 +191,7 @@ chains the status line, pre-allows the `reply` tool, and pairs the device.
 - Set env vars in Vercel: `DATABASE_URL`, `GOOGLE_CLIENT_ID`,
   `GOOGLE_CLIENT_SECRET`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`,
   `CONTROL_PLANE_URL`, `DEVICE_TOKEN_PEPPER` (same value as the control plane),
-  `WEBHOOK_BASE_URL`, `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_AGENT_PHONE_NUMBER`.
+  `WEBHOOK_BASE_URL`, `NEXT_PUBLIC_APP_URL`.
 - The Google OAuth redirect URI is `${BETTER_AUTH_URL}/api/idp/callback/google`.
 - `next.config.ts` also emits a `standalone` build, so the dashboard can
   alternatively run as a Docker image if you don't use Vercel.

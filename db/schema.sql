@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS agent_numbers (
   id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  phone_number  TEXT        NOT NULL UNIQUE,        -- E.164, e.g. +16576263011
+  phone_number  TEXT        NOT NULL UNIQUE,        -- E.164, e.g. +15551234567
   agent_id      TEXT        NOT NULL,               -- AgentPhone agentId that owns it
   provider_id   TEXT,                               -- AgentPhone number id
   active        BOOLEAN     NOT NULL DEFAULT TRUE,  -- allocatable?

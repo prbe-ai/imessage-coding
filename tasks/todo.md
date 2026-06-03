@@ -22,7 +22,7 @@ Branch: feat/agent-number-pool · Plan reviewed via /plan-eng-review 2026-06-01
 
 ## Review
 - DDL applied to neondb (flat-haze-76011530): `agent_numbers` table + `accounts.agent_number_id` FK. Additive, non-destructive.
-- Seeded from the live AgentPhone API: `+16576263011` (active/imessage), agent_id cmpu7vvuc00si52ghixa90ax8. Idempotent upsert, single row.
+- Seeded from the live AgentPhone API (active/imessage number + agent_id pulled at runtime, never hardcoded). Idempotent upsert, single row.
 - Verified: col + FK exist; assigner pick returns the number; account_count=0 (no backfill).
 - Dashboard `tsc --noEmit` EXIT=0. Seed script runs under bun (fails loud on missing env).
 - NOT done (left for you): commit/push/merge; full onboarding e2e smoke with the app running.

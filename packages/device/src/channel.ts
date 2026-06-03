@@ -41,6 +41,7 @@ import {
   AttentionKind,
   ChannelMethod,
   DeviceApiRoute,
+  MESSAGE_USER_TOOL,
   SseEvent,
   type AttentionEvent,
   type InboxItem,
@@ -145,7 +146,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.8' },
+  { name: 'imsg-device', version: '0.1.9' },
   {
     capabilities: {
       experimental: {
@@ -177,7 +178,7 @@ const mcp = new Server(
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
-      name: 'message_user',
+      name: MESSAGE_USER_TOOL,
       description:
         'Send a message to the user (who is driving you remotely over iMessage). Use this to keep them posted: ' +
         'report your result when you FINISH a task or hit a meaningful milestone (do NOT narrate every step). Leave ' +
@@ -207,7 +208,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 }));
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
-  if (req.params.name === 'message_user') {
+  if (req.params.name === MESSAGE_USER_TOOL) {
     const { text, expect_reply, reply_tag } = req.params.arguments as {
       text: string;
       expect_reply?: boolean;

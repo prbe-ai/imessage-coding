@@ -54,6 +54,16 @@ export const AfkState = {
 export type AfkState = (typeof AfkState)[keyof typeof AfkState];
 
 // -----------------------------------------------------------------------------
+// The single MCP tool the coding agent calls to reach the user (channel bridge
+// OUT). Declared here so the MCP registration (channel.ts) and the transcript
+// scan that detects whether the agent reported this turn (transcript.ts, used by
+// the AFK Stop gate) agree on one identifier. In a transcript the call appears
+// fully-qualified as `mcp__<server>__message_user`, so matchers should also
+// accept a `__message_user` suffix.
+// -----------------------------------------------------------------------------
+export const MESSAGE_USER_TOOL = 'message_user';
+
+// -----------------------------------------------------------------------------
 // Why the agent is asking for the user's attention.
 // -----------------------------------------------------------------------------
 export const AttentionKind = {

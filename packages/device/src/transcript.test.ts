@@ -8,7 +8,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 
-import { splitLines } from './transcript.ts';
+import { agentMessagedSinceLastPrompt, splitLines } from './transcript.ts';
 
 describe('splitLines', () => {
   test('emits complete lines, withholds a partial trailing line', () => {
@@ -39,5 +39,114 @@ describe('splitLines', () => {
     const { lines, partial } = splitLines(Buffer.from(''));
     expect(lines).toEqual([]);
     expect(partial).toBe(0);
+  });
+});
+
+// --- transcript lines (the shapes Claude Code writes) -----------------------
+const userPrompt = (text: string) =>
+  JSON.stringify({ type: 'user', message: { role: 'user', content: text } });
+const assistantText = (text: string) =>
+  JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } });
+const toolUse = (name: string) =>
+  JSON.stringify({
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'tool_use', name, input: { text: 'hi' } }] },
+  });
+const FQ_MESSAGE_USER = 'mcp__plugin_imsg-device_imsg-device__message_user';
+// A tool_result is delivered as a USER-role message — it must NOT be treated as a
+// turn boundary (otherwise a message_user before it would be missed).
+const toolResult = () =>
+  JSON.stringify({
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] },
+  });
+const metaTurn = () =>
+  JSON.stringify({ type: 'user', isMeta: true, message: { role: 'user', content: '<system-reminder>x' } });
+// A Task subagent's message_user call — carries isSidechain:true; must NOT count
+// as the MAIN agent reporting.
+const sidechainMessageUser = () =>
+  JSON.stringify({
+    type: 'assistant',
+    isSidechain: true,
+    message: { role: 'assistant', content: [{ type: 'tool_use', name: FQ_MESSAGE_USER, input: { text: 'sub' } }] },
+  });
+// An image-only user prompt (no text block) — still a real turn boundary.
+const imageOnlyPrompt = () =>
+  JSON.stringify({
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'image', source: { type: 'base64', data: 'x' } }] },
+  });
+
+describe('agentMessagedSinceLastPrompt', () => {
+  test('true when message_user was called after the last prompt', () => {
+    expect(
+      agentMessagedSinceLastPrompt([userPrompt('do it'), assistantText('working'), toolUse(FQ_MESSAGE_USER)]),
+    ).toBe(true);
+  });
+
+  test('false when the turn ended with no message_user', () => {
+    expect(agentMessagedSinceLastPrompt([userPrompt('do it'), assistantText('done')])).toBe(false);
+  });
+
+  test('false when message_user only happened in a PRIOR turn', () => {
+    expect(
+      agentMessagedSinceLastPrompt([
+        userPrompt('first'),
+        toolUse(FQ_MESSAGE_USER),
+        userPrompt('second'), // newer prompt → boundary; nothing reported since
+        assistantText('done'),
+      ]),
+    ).toBe(false);
+  });
+
+  test('matches the bare tool name (this package\'s own MCP server)', () => {
+    expect(agentMessagedSinceLastPrompt([userPrompt('do it'), toolUse('message_user')])).toBe(true);
+  });
+
+  test('does not match an unrelated tool', () => {
+    expect(agentMessagedSinceLastPrompt([userPrompt('do it'), toolUse('Bash')])).toBe(false);
+  });
+
+  test('a tool_result (user-role) is not a turn boundary', () => {
+    expect(
+      agentMessagedSinceLastPrompt([
+        userPrompt('do it'),
+        toolUse(FQ_MESSAGE_USER),
+        toolResult(), // user-role, but NOT a prompt → scan keeps going past it
+        assistantText('done'),
+      ]),
+    ).toBe(true);
+  });
+
+  test('a CC meta turn is not a turn boundary', () => {
+    expect(
+      agentMessagedSinceLastPrompt([userPrompt('do it'), toolUse(FQ_MESSAGE_USER), metaTurn(), assistantText('x')]),
+    ).toBe(true);
+  });
+
+  test('skips unparseable lines', () => {
+    expect(agentMessagedSinceLastPrompt(['{ not json', userPrompt('do it'), toolUse(FQ_MESSAGE_USER)])).toBe(true);
+  });
+
+  test('a subagent (sidechain) message_user does NOT satisfy the main-agent gate', () => {
+    expect(
+      agentMessagedSinceLastPrompt([userPrompt('do it'), sidechainMessageUser(), assistantText('done')]),
+    ).toBe(false);
+  });
+
+  test('an image-only user prompt is still a turn boundary', () => {
+    // message_user happened BEFORE this image-only prompt → not "this turn".
+    expect(
+      agentMessagedSinceLastPrompt([
+        userPrompt('first'),
+        toolUse(FQ_MESSAGE_USER),
+        imageOnlyPrompt(), // boundary; nothing reported since
+        assistantText('done'),
+      ]),
+    ).toBe(false);
+  });
+
+  test('empty transcript → false', () => {
+    expect(agentMessagedSinceLastPrompt([])).toBe(false);
   });
 });

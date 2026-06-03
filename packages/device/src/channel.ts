@@ -145,7 +145,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.3' },
+  { name: 'imsg-device', version: '0.1.4' },
   {
     capabilities: {
       experimental: {
@@ -575,9 +575,10 @@ async function subscribeEvents(): Promise<void> {
 // ignores any afk/grant in the body anyway. Sending them would falsely imply an
 // up-sync and risk clobbering the authoritative value.
 
-/** The session title (first user message) captured locally by the tap daemon,
- *  or undefined if not yet observed. Forwarded on the heartbeat as session
- *  metadata (like cwd) so it populates regardless of AFK; server freezes it. */
+/** The session title captured locally by the tap daemon — Claude Code's own
+ *  ai-title / a /rename custom-title, else the provisional first message — or
+ *  undefined if not yet observed. Forwarded on the heartbeat as session metadata
+ *  (like cwd) so it populates regardless of AFK; the server keeps the newest. */
 function readSessionTitle(): string | undefined {
   try {
     const t = readFileSync(sessionTitleFile(SESSION_ID), 'utf8').trim();

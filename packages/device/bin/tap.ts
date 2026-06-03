@@ -227,17 +227,31 @@ function enqueueEvents(events: ActivityEvent[]): void {
   }
 }
 
-// --- session title (first user message) --------------------------------------
-// The channel MCP server reads this file and forwards it on the heartbeat. It's
-// a LOCAL write (not egress), so it's deliberately OUTSIDE the AFK ship-gate —
-// the title is a session LABEL (metadata, like cwd), not transcript content, so
-// it populates even at the keyboard. Captured ONCE per session, then frozen.
-let titleCaptured = existsSync(sessionTitleFile(SESSION_ID));
+// --- session title (CC-generated > /rename > first user message) --------------
+// The channel MCP server reads `<id>.title` and forwards it on the heartbeat.
+// It's a LOCAL write (not egress), so — like cwd — it's deliberately OUTSIDE the
+// AFK ship-gate: the title is a session LABEL, not transcript content, so it
+// populates even at the keyboard.
+//
+// Source priority (low → high): the first user message is only a PROVISIONAL
+// fallback (for a slash-command session it's raw <command-…> XML); we upgrade to
+// Claude Code's own LLM title — persisted in the transcript as
+// {"type":"ai-title","aiTitle":"…"} — and to a user /rename
+// ({"type":"custom-title","customTitle":"…"}) when present. The control plane
+// takes the newest non-null title, so a heartbeat re-sending the same final
+// title is idempotent, and the label upgrades in place as CC fills it in.
+const TitleRank = { NONE: 0, FIRST_MESSAGE: 1, AI: 2, CUSTOM: 3 } as const;
+type TitleRank = (typeof TitleRank)[keyof typeof TitleRank];
+let titleRank: TitleRank = TitleRank.NONE;
 
-/** Atomically write the session title (already sanitized by extractActivity).
- *  Returns true only on a confirmed write — the caller must NOT mark the title
- *  captured on failure, or it's lost forever (the byte cursor advances past the
- *  first user message each tick, so a failed write is never re-scanned). */
+/** Normalize a title to a single trimmed line within the length cap. */
+function cleanTitle(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, SESSION_TITLE_MAX_LEN);
+}
+
+/** Atomically write `<id>.title`. Returns true only on a confirmed write — the
+ *  caller must NOT advance `titleRank` on failure, or a better title we've
+ *  already scanned past would never be retried. */
 function writeTitle(text: string): boolean {
   try {
     const path = sessionTitleFile(SESSION_ID);
@@ -246,18 +260,56 @@ function writeTitle(text: string): boolean {
     renameSync(tmp, path);
     return true;
   } catch {
-    return false; // best-effort — retried next tick that has lines (title non-critical)
+    return false; // best-effort — retried on a later tick
   }
 }
 
+/** Write `rawText` as the title iff `rank` is an upgrade (a re-`/rename` at the
+ *  CUSTOM level may also replace). Advances `titleRank` only on a confirmed
+ *  write. */
+function offerTitle(rank: TitleRank, rawText: string): void {
+  if (rank < titleRank) return;
+  if (rank === titleRank && rank !== TitleRank.CUSTOM) return;
+  const text = cleanTitle(rawText);
+  if (!text) return;
+  if (writeTitle(text)) {
+    titleRank = rank;
+    log('title_captured', { rank, len: text.length });
+  }
+}
+
+/** Turn a provisional first-message into a label. A slash-command turn is stored
+ *  as XML (`<command-name>/afk</command-name><command-message>…</command-message>
+ *  <command-args>…</command-args>`) — show the command (+ args) instead of the raw
+ *  tags, for the rare session that never gets an ai-title (e.g. a bare `/clear`). */
+function firstMessageTitle(text: string): string {
+  const name = text.match(/<command-name>([^<]*)<\/command-name>/)?.[1]?.trim();
+  if (!name) return text;
+  const cmdArgs = text.match(/<command-args>([^<]*)<\/command-args>/)?.[1]?.trim();
+  return cmdArgs ? `${name} ${cmdArgs}` : name;
+}
+
+/** A Claude Code title entry, if this transcript line is one. These rows carry
+ *  no `message` block, so extractActivity() skips them — read them directly. */
+function readTitleEntry(parsed: unknown): { rank: TitleRank; text: string } | null {
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const o = parsed as Record<string, unknown>;
+  if (o['type'] === 'custom-title' && typeof o['customTitle'] === 'string')
+    return { rank: TitleRank.CUSTOM, text: o['customTitle'] };
+  if (o['type'] === 'ai-title' && typeof o['aiTitle'] === 'string')
+    return { rank: TitleRank.AI, text: o['aiTitle'] };
+  return null;
+}
+
 /**
- * Scan this tick's new transcript lines for the FIRST user message and capture
- * it as the title (truncated). Runs regardless of AFK; no-ops once captured. The
- * cursor starts at byte 0 on a fresh session, so the first run always sees the
- * opening user turn.
+ * Scan transcript lines for the best available title and upgrade `<id>.title`.
+ * Prefers CC's ai-title/custom-title; falls back to the first user message only
+ * until a real title appears. Runs regardless of AFK; cheap no-op once a CUSTOM
+ * title is captured. Used for both the one-time startup seed (full transcript,
+ * recovers the title across a CC reload) and the per-tick scan of new lines.
  */
-function maybeCaptureTitle(lines: string[]): void {
-  if (titleCaptured) return;
+function scanForTitle(lines: string[]): void {
+  if (titleRank === TitleRank.CUSTOM) return;
   for (const line of lines) {
     let parsed: unknown;
     try {
@@ -265,20 +317,19 @@ function maybeCaptureTitle(lines: string[]): void {
     } catch {
       continue;
     }
-    for (const a of extractActivity(parsed)) {
-      if (a.kind === ActivityKind.USER_MESSAGE && a.text && a.text.trim()) {
-        const title = a.text.trim().slice(0, SESSION_TITLE_MAX_LEN);
-        // Only mark captured on a CONFIRMED write. On a (rare) write failure we
-        // leave titleCaptured false and fall through future ticks: the cursor has
-        // already advanced past this message, so the title ends up being the NEXT
-        // user message rather than the first — acceptable degradation, and far
-        // better than the alternative (marking captured on a failed write would
-        // freeze the title at NULL forever).
-        if (writeTitle(title)) {
-          titleCaptured = true;
-          log('title_captured', { len: title.length });
+    const entry = readTitleEntry(parsed);
+    if (entry) {
+      offerTitle(entry.rank, entry.text);
+      continue;
+    }
+    // Provisional fallback only — stop looking at user messages once we hold any
+    // real title, and only ever take the FIRST one.
+    if (titleRank === TitleRank.NONE) {
+      for (const a of extractActivity(parsed)) {
+        if (a.kind === ActivityKind.USER_MESSAGE && a.text && a.text.trim()) {
+          offerTitle(TitleRank.FIRST_MESSAGE, firstMessageTitle(a.text));
+          break;
         }
-        return;
       }
     }
   }
@@ -327,6 +378,17 @@ async function main(): Promise<number> {
   }
   log('tap_start', { transcript: TRANSCRIPT, cwd: CWD });
 
+  // One-time title seed: scan the existing transcript from the top so a tap that
+  // (re)starts mid-session recovers CC's already-written ai-title/custom-title —
+  // the per-tick scan below only sees NEW lines past the persisted byte cursor,
+  // and the title (~line 11) usually lands before any restart. Reads from byte 0
+  // independently of the activity cursor, which is untouched.
+  try {
+    scanForTitle(readNew(TRANSCRIPT, 0).lines);
+  } catch {
+    /* transcript not readable yet — the per-tick scan will catch up */
+  }
+
   let cursor = readCursor();
   let missing = 0;
   let tick = 0;
@@ -353,9 +415,10 @@ async function main(): Promise<number> {
       missing = 0;
       if (res.lines.length > 0) {
         hadLines = true;
-        // Capture the title (first user message) regardless of AFK — it's a local
-        // write, not egress, so it's outside the ship-gate below.
-        maybeCaptureTitle(res.lines);
+        // Upgrade the session title (CC ai-title/custom-title, else provisional
+        // first message) regardless of AFK — it's a local write, not egress, so
+        // it's outside the ship-gate below.
+        scanForTitle(res.lines);
         // lineNo is a MONOTONIC per-session event index (never reset), so it stays
         // a stable, unique dedup key derived from the (uncommitted-until-success)
         // cursor: a crash-before-commit re-read re-derives the same lineNos and the

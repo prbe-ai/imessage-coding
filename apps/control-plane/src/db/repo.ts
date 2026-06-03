@@ -316,9 +316,12 @@ export async function upsertSession(args: {
             -- an authenticated device of the account, so cross-account stays safe.
             device_id     = $2,
             cwd           = COALESCE(EXCLUDED.cwd, sessions.cwd),
-            -- Title is FROZEN once set (the first user message) — first-writer-wins,
-            -- so a later heartbeat re-sending it can't overwrite the original label.
-            title         = COALESCE(sessions.title, EXCLUDED.title),
+            -- Title takes the newest non-null value (last-writer-wins): the device
+            -- starts with a provisional first-message label and UPGRADES it to
+            -- Claude Code's own ai-title / a /rename custom-title once the tap sees
+            -- one. A missing title ($7 NULL) never clobbers, and re-sending the same
+            -- final title is idempotent, so this converges and stays put.
+            title         = COALESCE(EXCLUDED.title, sessions.title),
             -- A heartbeat revives a session the staleness reaper had ended (e.g.
             -- the device slept past the window, then woke and beat again).
             state         = COALESCE($6, CASE WHEN sessions.state = 'ended'

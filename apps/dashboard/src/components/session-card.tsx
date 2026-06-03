@@ -7,10 +7,11 @@
  * active=success, waiting=warning, idle=info, ended=outline.
  */
 
-import { ChevronDown, Folder } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 
 import {
   AfkState,
+  AgentKind,
   SessionState,
   GrantLevel,
   type SessionInfo,
@@ -64,6 +65,14 @@ const GRANT_ORDER = [
   GrantLevel.FULL,
 ] as const;
 
+/** Coding-agent → brand icon, served from `public/icons`. Keyed by AgentKind so
+ *  adding an agent is a compile error here until its asset is mapped. `agent` is
+ *  an unchecked DB string at the edge, so reads fall back to the Claude mark
+ *  rather than render a broken <img> for an unmapped value. */
+const AGENT_ICON: Record<AgentKind, string> = {
+  [AgentKind.CLAUDE_CODE]: "/icons/claude-code.svg",
+};
+
 export function SessionCard({
   session,
   onToggleAfk,
@@ -90,8 +99,15 @@ export function SessionCard({
     <div className="rounded-lg border border-outline-variant/40 bg-surface-container-low p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex items-center gap-1.5 text-sm font-bold tracking-tight text-on-surface">
-            <Folder className="size-4 shrink-0 text-on-surface-variant" />
+          <div className="flex items-center gap-2 text-sm font-bold tracking-tight text-on-surface">
+            <span className="flex size-5 shrink-0 items-center justify-center rounded-[5px] border border-outline-variant/50 bg-white p-0.5">
+              {/* eslint-disable-next-line @next/next/no-img-element -- static brand SVG from /public, next/image adds no value */}
+              <img
+                src={AGENT_ICON[session.agent] ?? AGENT_ICON[AgentKind.CLAUDE_CODE]}
+                alt={session.agent}
+                className="size-full"
+              />
+            </span>
             <span className="line-clamp-1" title={tooltip}>
               {label}
             </span>

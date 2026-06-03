@@ -72,10 +72,12 @@ export interface SessionInfo {
   deviceId: string;
   cwd?: string;
   /**
-   * Human label for the session — the (sanitized, truncated) first user message,
-   * captured once and frozen. Lets the dashboard + orchestrator name a session by
-   * what it's doing instead of an opaque id + folder. Absent until the first user
-   * message is observed; readers fall back to the cwd basename.
+   * Human label for the session. Prefers Claude Code's own title — its
+   * LLM-generated `ai-title`, or a `/rename` custom-title — and falls back to the
+   * first user message (provisional) until one appears. Lets the dashboard +
+   * orchestrator name a session by what it's doing instead of an opaque id +
+   * folder. Upgrades in place (the server keeps the newest non-null value);
+   * absent until a title is observed, when readers fall back to the cwd basename.
    */
   title?: string;
   agent: AgentKind;

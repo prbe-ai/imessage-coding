@@ -711,8 +711,8 @@ export async function getAttentionForAccount(args: {
 /**
  * Persist the provider message id of the OUTBOUND phone notification that
  * fronted this attention. This is the canonical deterministic binding target:
- * a tapback/inline reply carrying this id binds to THIS attention (see
- * orchestrator/safety.ts deterministicTarget). Scoped to account. Returns true
+ * a tap-back carrying this id binds to THIS attention (typed replies carry no
+ * link — see orchestrator/safety.ts deterministicTarget). Scoped to account. Returns true
  * if a row was updated.
  */
 export async function setAttentionNotifyMessageId(

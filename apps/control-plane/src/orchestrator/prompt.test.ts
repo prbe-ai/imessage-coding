@@ -13,7 +13,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { MessageChannel, type InboundMessage } from '@imsg/shared';
-import { assistantTools, buildTurnMessages } from './prompt.ts';
+import { assistantTools, buildTurnMessages, systemPrompt } from './prompt.ts';
 
 function inbound(overrides: Partial<InboundMessage> = {}): InboundMessage {
   return {
@@ -46,9 +46,9 @@ const toolNames = (mode: 'user_message' | 'agent_event' | 'agent_message'): stri
     .join(',');
 
 describe('assistantTools — notify-only gate', () => {
-  test('user_message exposes all four capable tools', () => {
+  test('user_message exposes all capable tools', () => {
     expect(toolNames('user_message')).toBe(
-      'respond_to_request,send_to_session,set_afk,text_user',
+      'respond_to_request,send_to_session,set_afk,surface_request,text_user',
     );
   });
 
@@ -88,5 +88,32 @@ describe('buildTurnMessages — coalesced user burst rendering', () => {
       inbound({ text: 'this one', messageId: 'm2', reactionTo: 'notify-XYZ' }),
     ]);
     expect(ctx.includes('notify-XYZ')).toBe(true);
+  });
+});
+
+// REGRESSION GUARD for the approve-loop: AgentPhone forwards NO link for a typed
+// inline reply, so "reply directly to this message" guidance can never bind and
+// traps the user in a loop (only a tap-back/reaction binds). The model's standing
+// instructions must never instruct a typed reply to choose/approve — only a
+// tap-back — and `surface_request` must exist as the way to present a tappable
+// permission. Locks the invariants so a future copy edit can't reintroduce them.
+describe('binding guidance — never instruct a typed reply to bind', () => {
+  const allowDesc = (): string =>
+    assistantTools('user_message').find((t) => t.function.name === 'respond_to_request')!.function
+      .description;
+
+  test('system prompt steers to tap-back, never "reply directly"', () => {
+    const sp = systemPrompt();
+    expect(/reply directly/i.test(sp)).toBe(false);
+    expect(/tap-back/i.test(sp)).toBe(true);
+  });
+
+  test('respond_to_request description never says "replied directly"', () => {
+    expect(/replied directly|reply directly/i.test(allowDesc())).toBe(false);
+    expect(/tapped-back|tap-back/i.test(allowDesc())).toBe(true);
+  });
+
+  test('surface_request exists — the tappable way to present a permission', () => {
+    expect(toolNames('user_message').includes('surface_request')).toBe(true);
   });
 });

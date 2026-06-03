@@ -13,8 +13,9 @@
  *
  * SAFETY (unchanged contract, enforced in code — never on the model's say-so):
  *   - A destructive permission is allowed ONLY via a deterministic binding
- *     (tap-back/inline-reply or a single pending) — `respond_to_request` (action
- *     `allow`) checks `deterministicTarget()` + `checkDestructiveAllow()`, refuses else.
+ *     (a tap-back reaction, or a single pending — a typed reply carries no link)
+ *     — `respond_to_request` (action `allow`) checks `deterministicTarget()` +
+ *     `checkDestructiveAllow()`, refuses else.
  *   - The model can never mint a FULL grant (`capGrant` caps to EDITS).
  *   - The agent-driven turns expose only `text_user` (notify; the human resolves).
  * Fail-closed everywhere: a turn error sends a safe clarify (user path) or falls
@@ -459,6 +460,17 @@ function makeExecTool(ctx: DispatchCtx): ToolExecutor {
       return 'error: only text_user is available here; notify the user and let them decide';
     }
 
+    if (name === 'surface_request') {
+      const requestId = typeof args.request_id === 'string' ? args.request_id : '';
+      if (!requestId) return 'error: request_id is required';
+      const target = await resolveTarget(requestId, ctx.accountId, ctx.pending);
+      if (!target) return 'error: no such pending request';
+      const id = await surfaceRequestMessage(ctx, target);
+      if (!id) return 'error: could not deliver (no verified phone on file)';
+      ctx.actions.push(`surfaced ${target.kind} ${shortId(target.id)} for tap-back`);
+      return 'surfaced — the user can now tap-back 👍 (allow) / 👎 (deny) on the message I just posted';
+    }
+
     if (name === 'send_to_session') {
       const sessionId = typeof args.session_id === 'string' ? args.session_id : '';
       const text = typeof args.text === 'string' ? args.text.trim() : '';
@@ -549,14 +561,18 @@ function makeExecTool(ctx: DispatchCtx): ToolExecutor {
           if (!actionAllowedForKind(RequestAction.ALLOW, target.kind)) {
             return "error: action='allow' is for permissions (use answer for a question, approve for a plan)";
           }
-          // A destructive allow additionally requires PROOF the user was shown a
-          // code-generated, accurate notification for THIS request: notify_message_id
-          // is set only by notifyStatic for destructive perms, never by the LLM (see
-          // text_user). Without it (notification lost on a restart, or never sent
-          // because the user wasn't AFK at creation), a bare "yes" to a lone pending
-          // must NOT approve an op the user never saw described — fail closed.
+          // A destructive allow requires PROOF the user was shown a code-generated,
+          // accurate notification for THIS request: notify_message_id is set only by
+          // the system (notifyStatic / surfaceRequestMessage), never by LLM prose
+          // (see text_user). If it's missing (notification lost on a restart, or
+          // never sent because the user wasn't AFK at creation), don't approve an op
+          // the user never saw described — instead SURFACE it now (posts the accurate
+          // description AND sets notify_message_id), then have them tap-back it. That
+          // both shows the description and bootstraps the binding — strictly better
+          // than dead-ending at "use the keyboard" when the user is away.
           if (isDestructiveTool(target.toolName) && !target.notifyMessageId) {
-            return 'refused: that request was never confirmed to you with a description, so it cannot be approved by text — act on the on-screen prompt directly.';
+            await surfaceRequestMessage(ctx, target);
+            return 'refused: that request had not been shown to you with a description yet — I just posted it as a fresh message. Ask the user to TAP-BACK 👍 (allow) / 👎 (deny) on THAT message to approve it.';
           }
           // THE GATE: destructive allows require a deterministic binding. The model
           // names a target; we only treat it as deterministic if it IS the bound one.
@@ -564,7 +580,15 @@ function makeExecTool(ctx: DispatchCtx): ToolExecutor {
             ctx.boundTarget && ctx.boundTarget.id === target.id ? 'deterministic' : 'inferred';
           const check = checkDestructiveAllow(target, binding);
           if (!check.permitted) {
-            return `refused: ${check.reason}. Ask the user to reply directly to that exact request to approve it.`;
+            // CODE BACKSTOP for the approve-loop: the only tap-backable target
+            // for a destructive permission is a system-posted notification, and
+            // the original one has usually scrolled away. Re-post it now (and
+            // move the binding onto the fresh message) so a tap-back has
+            // something to land on — don't rely on the model remembering to call
+            // surface_request. Then point the user at THAT message; never tell
+            // them to "reply" (a typed reply carries no link — see safety.ts).
+            await surfaceRequestMessage(ctx, target);
+            return `refused: ${check.reason}. I re-posted that exact request as a fresh message — ask the user to TAP-BACK 👍 (allow) / 👎 (deny) on THAT message (not your prose; a typed reply cannot bind).`;
           }
           const dec = await resolveAttention({
             accountId: ctx.accountId,
@@ -669,6 +693,33 @@ async function notifyStatic(
   if (id) await setAttentionNotifyMessageId(event.id, id, accountId).catch(() => {});
 }
 
+/**
+ * Re-post a pending request as a FRESH, tap-backable message during a
+ * user-message turn and move its tap-back binding onto that new message. The
+ * user-turn analog of notifyStatic: the body is the CODE-generated
+ * composeNotification (an accurate description — the safety invariant that a
+ * destructive tap-back only ever fronts code-generated prose, see text_user),
+ * NOT anything the model wrote. This is what lets a destructive permission be
+ * approved by tap-back at all — the original notification scrolls away, and the
+ * model's own "tap-back this" prose is deliberately unbindable, so without a
+ * fresh code-posted target every reaction misses and the user loops. Returns the
+ * new provider message id, or undefined if delivery failed. Best-effort.
+ */
+async function surfaceRequestMessage(
+  ctx: DispatchCtx,
+  target: AttentionEvent,
+): Promise<string | undefined> {
+  const id = await sendToUser(ctx.transport, ctx.accountId, composeNotification(target), {
+    replyToMessageId: ctx.inbound?.messageId,
+    fallbackTo: ctx.inbound?.from,
+  });
+  if (id) {
+    ctx.sent.count += 1;
+    await setAttentionNotifyMessageId(target.id, id, ctx.accountId).catch(() => {});
+  }
+  return id;
+}
+
 function composeNotification(event: AttentionEvent): string {
   const head =
     event.kind === AttentionKind.PERMISSION
@@ -677,7 +728,17 @@ function composeNotification(event: AttentionEvent): string {
         ? 'Plan ready for review'
         : 'Question';
   const detail = event.description || event.inputPreview || '';
-  return detail ? `${head}: ${detail}` : head;
+  const base = detail ? `${head}: ${detail}` : head;
+  // A PERMISSION is the binding-gated kind: from the phone it can only be
+  // approved by a TAP-BACK on THIS message (a typed reply carries no link to it
+  // — see safety.ts). This notification's own provider id becomes the
+  // attention's notifyMessageId, so a tap-back here binds deterministically.
+  // Spell out the gesture (and which reaction means what) so the user is never
+  // left guessing how to act — the gap that produced the approve-loop.
+  if (event.kind === AttentionKind.PERMISSION) {
+    return `${base}\n\nTap-back this message to act: 👍 allow, 👎 deny.`;
+  }
+  return base;
 }
 
 function shortId(id: string): string {

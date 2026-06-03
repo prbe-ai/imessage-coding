@@ -12,15 +12,16 @@
  *   POST /api/device/ack        {sessionId, attentionIds}      -> {acked}
  *   GET  /api/device/decisions  ?sessionId&since               -> LONG-POLL (legacy)
  *   POST /api/device/heartbeat  {sessionId, cwd?}              -> {ok}
- *   POST /api/device/state      {sessionId?, afk?, grant?}     -> SessionInfo(s)
+ *   POST /api/device/state      {afk?, grant?}                 -> {device:{enabled,afk,grant}}
  *   GET  /api/device/state                                     -> {enabled, afk, grant}
  *
  * The device subscribes to EVENTS (SSE) for pushed decisions + steers, then
  * confirms it injected decisions via ACK so the server marks them delivered and
- * stops re-serving them (at-least-once + idempotent). POST /state with NO
- * sessionId is the CLI's device-wide toggle (`imsg afk/grant`): afk/grant apply
- * to ALL the device's live sessions. GET /state is the remote killswitch probe:
- * enabled = (revoked_at IS NULL AND disabled_at IS NULL) for the device.
+ * stops re-serving them (at-least-once + idempotent). afk/grant are MACHINE-WIDE
+ * (stored on the device, not the session): POST /state writes the authenticated
+ * device's afk/grant (the CLI `imsg afk/grant` toggle); any sessionId in the body
+ * is ignored. GET /state is the remote killswitch probe: enabled = (revoked_at IS
+ * NULL AND disabled_at IS NULL) for the device.
  *
  * The (legacy) decisions long-poll waits on LISTEN/NOTIFY 'decision_ready' (or
  * ~25s) and returns resolved Decisions for the device's session. FAIL-CLOSED: a
@@ -60,12 +61,16 @@ import {
   listUndeliveredSessionMessages,
   markDecisionsDelivered,
   markSessionMessagesDelivered,
+  setDeviceAfk,
+  setDeviceGrant,
   touchSession,
-  updateSessionState,
-  updateSessionStateForDevice,
   upsertSession,
 } from '../db/repo.ts';
-import { ensureListener, waitForDecision, waitForSessionEvent } from '../db/listener.ts';
+import {
+  ensureListener,
+  waitForDecision,
+  waitForSessionOrDeviceEvent,
+} from '../db/listener.ts';
 import { streamSSE } from 'hono/streaming';
 import { getTransport } from '../transport.ts';
 import { relayAgentMessage, runAgentEventTurn } from '../orchestrator/index.ts';
@@ -494,11 +499,18 @@ deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
       }
     };
 
-    // Catch-up on connect, then stream live. waitForSessionEvent wakes on a
-    // decision OR a steer for this session; on timeout we ping to stay alive.
+    // Catch-up on connect, then stream live. Wake on a decision/steer for THIS
+    // session OR a machine-wide afk/grant toggle on THIS device (device_state),
+    // so a dashboard/CLI device toggle reaches every session's hook sub-second.
+    // On timeout we ping to stay alive.
     await flush();
     while (!aborted && !c.req.raw.signal.aborted) {
-      const woken = await waitForSessionEvent(sessionId, SSE_HEARTBEAT_MS, c.req.raw.signal);
+      const woken = await waitForSessionOrDeviceEvent(
+        sessionId,
+        auth.deviceId,
+        SSE_HEARTBEAT_MS,
+        c.req.raw.signal,
+      );
       if (aborted || c.req.raw.signal.aborted) break;
       // Honor a mid-stream device revoke/disable: the stream authed once at connect,
       // but the killswitch must still cut delivery (the old long-poll re-authed on
@@ -615,62 +627,31 @@ deviceRoutes.get(DeviceApiRoute.STATE, async (c) => {
 });
 
 // --- STATE: POST (afk / grant) ------------------------------------------------
-// sessionId is OPTIONAL. With a sessionId, update that one session. WITHOUT one
-// (the CLI `imsg afk/grant` device-wide path), apply afk/grant to ALL the
-// device's live sessions. FULL is reachable here only via the authenticated
-// device path, never via the LLM (see orchestrator validateAction).
+// afk/grant are MACHINE-WIDE: they live on the device row (the single source of
+// truth the PreToolUse hook honors), so a toggle here writes the authenticated
+// device — NOT one session. Any `sessionId` in the body is ignored (the CLI
+// `imsg afk/grant` already sends none; the field is legacy). FULL is reachable
+// here only via this authenticated device path, never via the LLM (the
+// orchestrator caps any LLM-set grant at EDITS).
 deviceRoutes.post(DeviceApiRoute.STATE, async (c) => {
   const auth = device(c);
   const body = (await c.req.json().catch(() => ({}))) as {
-    sessionId?: unknown;
     afk?: unknown;
     grant?: unknown;
   };
-  const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
   const afk = isAfkState(body.afk) ? body.afk : undefined;
   const grant = isGrantLevel(body.grant) ? body.grant : undefined;
-
-  // DEVICE-WIDE: no sessionId -> apply across all the device's live sessions.
-  if (!sessionId) {
-    if (afk === undefined && grant === undefined) {
-      return c.json({ error: 'nothing_to_update' }, 400);
-    }
-    const sessions = await updateSessionStateForDevice({
-      deviceId: auth.deviceId,
-      accountId: auth.accountId,
-      afk,
-      grant,
-    });
-    return c.json({ sessions });
-  }
-
-  // SINGLE SESSION.
   if (afk === undefined && grant === undefined) {
-    // Nothing to change — return current state (or 404 if unknown).
-    const current = await getSessionForDevice({
-      sessionId,
-      deviceId: auth.deviceId,
-      accountId: auth.accountId,
-    });
-    return current
-      ? c.json({ session: current })
-      : c.json({ error: 'unknown_session' }, 404);
+    return c.json({ error: 'nothing_to_update' }, 400);
   }
 
-  // Ensure the session exists, then apply the state change.
-  await upsertSession({
-    sessionId,
-    deviceId: auth.deviceId,
-    accountId: auth.accountId,
-  });
-  const updated = await updateSessionState({
-    sessionId,
-    deviceId: auth.deviceId,
-    accountId: auth.accountId,
-    afk,
-    grant,
-  });
-  return updated
-    ? c.json({ session: updated })
-    : c.json({ error: 'unknown_session' }, 404);
+  if (afk !== undefined) {
+    await setDeviceAfk({ deviceId: auth.deviceId, accountId: auth.accountId, afk });
+  }
+  if (grant !== undefined) {
+    await setDeviceGrant({ deviceId: auth.deviceId, accountId: auth.accountId, grant });
+  }
+  // Echo the device's resulting machine-wide state (the CLI only checks ok).
+  const state = await getDeviceState({ deviceId: auth.deviceId, accountId: auth.accountId });
+  return c.json({ device: state });
 });

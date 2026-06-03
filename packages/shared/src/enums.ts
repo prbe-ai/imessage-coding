@@ -182,6 +182,8 @@ export const SseEvent = {
   STATE: 'state',
   /** Dashboard stream: the account's live `sessions` list. */
   SESSIONS: 'sessions',
+  /** Dashboard stream: the account's `devices` list (afk/grant live here). */
+  DEVICES: 'devices',
   /** Keepalive on both streams (ignored by clients). */
   PING: 'ping',
 } as const;
@@ -196,8 +198,11 @@ export const NotifyChannel = {
   DECISION_READY: 'decision_ready',
   /** Fired on a session_messages INSERT (wake the device's steer waiter). */
   SESSION_MESSAGE: 'session_message',
-  /** Fired on a sessions afk/grant/state change (wake device + dashboard). */
+  /** Fired on a sessions state change (wake device + dashboard). */
   SESSION_STATE: 'session_state',
+  /** Fired on a device afk/grant change — the machine-wide toggle (wake every
+   *  live device stream + the dashboard). Payload carries device_id + account_id. */
+  DEVICE_STATE: 'device_state',
 } as const;
 export type NotifyChannel = (typeof NotifyChannel)[keyof typeof NotifyChannel];
 

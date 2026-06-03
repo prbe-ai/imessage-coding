@@ -19,6 +19,7 @@ import {
   type Decision,
   type DecisionBehavior,
   type DecisionSource,
+  type DeviceInfo,
   type SessionInfo,
 } from '@imsg/shared';
 import { query, queryOne, withTransaction } from './pool.ts';
@@ -33,6 +34,17 @@ interface AccountRow {
 interface DeviceRow {
   id: string;
   account_id: string;
+}
+
+/** Device + machine-wide afk/grant + live-session count (DeviceInfo backing). */
+interface DeviceStateRow {
+  id: string;
+  os: string | null;
+  hostname: string | null;
+  afk: string;
+  grant: string;
+  enabled: boolean;
+  session_count: string | number;
 }
 
 interface PairingTokenRow {
@@ -106,6 +118,15 @@ interface MessageLogRow {
 
 // --- mappers ------------------------------------------------------------------
 
+// afk/grant are MACHINE-WIDE (they live on `devices`, not `sessions`), so every
+// session read sources them from its device via this JOIN. Selecting explicit
+// columns (not `s.*, d.afk`) avoids the afk/grant name collision between the two
+// tables. SessionInfo.afk/grant therefore always reflect the device's value.
+const SESSION_FROM = 'FROM sessions s JOIN devices d ON d.id = s.device_id';
+const SESSION_COLUMNS =
+  's.id, s.device_id, s.account_id, s.cwd, s.title, s.agent, s.state, ' +
+  's.last_event_at, d.afk, d."grant"';
+
 function toSessionInfo(r: SessionRow): SessionInfo {
   const info: SessionInfo = {
     id: r.id,
@@ -118,6 +139,25 @@ function toSessionInfo(r: SessionRow): SessionInfo {
   };
   if (r.cwd !== null) info.cwd = r.cwd;
   if (r.title !== null) info.title = r.title;
+  return info;
+}
+
+function toDeviceInfo(r: DeviceStateRow): DeviceInfo {
+  // Friendly label: hostname, else os, else the short id (mirrors the session
+  // card's title→folder fallback).
+  const label = r.hostname?.trim() || r.os?.trim() || r.id.slice(0, 8);
+  const info: DeviceInfo = {
+    id: r.id,
+    label,
+    afk: r.afk as AfkState,
+    grant: r.grant as GrantLevel,
+    enabled: r.enabled,
+    sessionCount: Number(r.session_count),
+  };
+  // Truthy guard (not !== null) so an empty string is omitted, matching the
+  // dashboard's lib/devices.ts mapper — the two must agree on the wire shape.
+  if (r.os) info.os = r.os;
+  if (r.hostname) info.hostname = r.hostname;
   return info;
 }
 
@@ -393,119 +433,128 @@ export async function reapStaleSessions(
   return rows.length;
 }
 
-/** Update afk/grant on a device's session. */
-export async function updateSessionState(args: {
-  sessionId: string;
+// afk/grant are MACHINE-WIDE and live on `devices`. These RETURNING columns +
+// the live-session count back the DeviceInfo wire shape. The count is a
+// correlated subquery so a single UPDATE ... RETURNING yields a full DeviceInfo.
+const DEVICE_COLUMNS =
+  'd.id, d.os, d.hostname, d.afk, d."grant", ' +
+  '(d.revoked_at IS NULL AND d.disabled_at IS NULL) AS enabled, ' +
+  "(SELECT count(*) FROM sessions s WHERE s.device_id = d.id AND s.state <> 'ended') " +
+  'AS session_count';
+
+/** Set a device's machine-wide AFK (the dashboard/CLI toggle). Returns the
+ *  updated device, or undefined if it isn't this account's device. No session
+ *  write → the staleness reaper's clock is never bumped by a remote toggle. */
+export async function setDeviceAfk(args: {
   deviceId: string;
   accountId: string;
-  afk?: AfkState | undefined;
-  grant?: GrantLevel | undefined;
-}): Promise<SessionInfo | undefined> {
-  const row = await queryOne<SessionRow>(
-    `UPDATE sessions
-        SET afk           = COALESCE($4, afk),
-            "grant"       = COALESCE($5, "grant"),
-            last_event_at = now()
-      WHERE id = $1 AND device_id = $2 AND account_id = $3
-     RETURNING *`,
-    [args.sessionId, args.deviceId, args.accountId, args.afk ?? null, args.grant ?? null],
+  afk: AfkState;
+}): Promise<DeviceInfo | undefined> {
+  const row = await queryOne<DeviceStateRow>(
+    `UPDATE devices d SET afk = $1
+      WHERE d.id = $2 AND d.account_id = $3
+     RETURNING ${DEVICE_COLUMNS}`,
+    [args.afk, args.deviceId, args.accountId],
   );
-  return row ? toSessionInfo(row) : undefined;
+  return row ? toDeviceInfo(row) : undefined;
+}
+
+/** Set a device's machine-wide session grant (off|edits|full). FULL is reachable
+ *  only via the authenticated device/dashboard path; the LLM is capped at EDITS
+ *  upstream (orchestrator capGrant), never here. */
+export async function setDeviceGrant(args: {
+  deviceId: string;
+  accountId: string;
+  grant: GrantLevel;
+}): Promise<DeviceInfo | undefined> {
+  const row = await queryOne<DeviceStateRow>(
+    `UPDATE devices d SET "grant" = $1
+      WHERE d.id = $2 AND d.account_id = $3
+     RETURNING ${DEVICE_COLUMNS}`,
+    [args.grant, args.deviceId, args.accountId],
+  );
+  return row ? toDeviceInfo(row) : undefined;
 }
 
 /**
- * Apply afk/grant across ALL of a device's LIVE (non-ended) sessions. Used by
- * the device-wide `imsg afk/grant` path (POST /api/device/state with no
- * sessionId): the CLI toggles AFK/grant for the whole machine, not one session.
- * Returns the updated SessionInfo rows (most-recent-first). FULL is reachable
- * here only via the authenticated device/dashboard path, never via the LLM.
- */
-export async function updateSessionStateForDevice(args: {
-  deviceId: string;
-  accountId: string;
-  afk?: AfkState | undefined;
-  grant?: GrantLevel | undefined;
-}): Promise<SessionInfo[]> {
-  const rows = await query<SessionRow>(
-    `UPDATE sessions
-        SET afk           = COALESCE($3, afk),
-            "grant"       = COALESCE($4, "grant"),
-            last_event_at = now()
-      WHERE device_id = $1 AND account_id = $2 AND state <> $5
-     RETURNING *`,
-    [
-      args.deviceId,
-      args.accountId,
-      args.afk ?? null,
-      args.grant ?? null,
-      SessionState.ENDED,
-    ],
-  );
-  // Order most-recent-first to mirror listLiveSessionsForAccount.
-  return rows
-    .map(toSessionInfo)
-    .sort((a, b) => (a.lastEventAt < b.lastEventAt ? 1 : -1));
-}
-
-/**
- * Set AFK across a NAMED set of the account's LIVE sessions. Used by the
- * orchestrator's `set_afk` tool (the phone steering AFK on/off), mirroring the
- * dashboard's account-scoped POST /api/home/afk write. account_id is the tenant
- * boundary; ids that aren't a live session of this account are silently skipped.
- * Returns the ids actually updated so the caller can report which took effect.
- * The device observes the change on its next SSE `state` flush (it re-queries
- * sessions.afk per stream) and mirrors it to the local PreToolUse hook file.
+ * Set AFK on the DEVICES behind a named set of the account's LIVE sessions. Used
+ * by the orchestrator's `set_afk` tool (the phone steering AFK on/off): the model
+ * names sessions, but AFK is machine-wide, so we flip each named session's whole
+ * device. account_id is the tenant boundary; ids that aren't a live session of
+ * this account are silently skipped. Returns the matched session ids so the
+ * caller can report what took effect. Each device's live streams pick the change
+ * up via the `device_state` notify → SSE `state` flush.
  *
- * AFK carries no auto-approve power on its own (grant is untouched here), so —
- * unlike a FULL grant — it is safe for the LLM to flip.
+ * AFK carries no auto-approve power on its own (grant untouched), so — unlike a
+ * FULL grant — it is safe for the LLM to flip.
  */
-export async function setSessionsAfkForAccount(args: {
+export async function setDevicesAfkForSessions(args: {
   accountId: string;
   sessionIds: string[];
   afk: AfkState;
 }): Promise<string[]> {
   if (args.sessionIds.length === 0) return [];
-  // No last_event_at bump: a remote control toggle is not session activity and
-  // must not revive the staleness reaper's clock (mirrors the dashboard path).
+  // The `upd` data-modifying CTE always executes (Postgres runs every
+  // data-modifying WITH term); the final SELECT returns the matched session ids.
   const rows = await query<{ id: string }>(
-    `UPDATE sessions
-        SET afk = $1
-      WHERE account_id = $2 AND id = ANY($3::uuid[]) AND state <> $4
-     RETURNING id`,
+    `WITH matched AS (
+        SELECT id, device_id FROM sessions
+         WHERE account_id = $2 AND id = ANY($3::uuid[]) AND state <> $4
+      ), upd AS (
+        UPDATE devices d SET afk = $1
+          FROM (SELECT DISTINCT device_id FROM matched) m
+         WHERE d.id = m.device_id AND d.account_id = $2
+         RETURNING d.id
+      )
+      SELECT id FROM matched`,
     [args.afk, args.accountId, args.sessionIds, SessionState.ENDED],
   );
   return rows.map((r) => r.id);
 }
 
+/** The account's ACTIVE devices (non-revoked + at least one live session), each
+ *  with its machine-wide afk/grant + live-session count. Most-recently-active
+ *  first. The live-session filter both keeps the list to machines worth toggling
+ *  and collapses stale re-pair duplicates (which carry no live sessions). */
+export async function listDevicesForAccount(
+  accountId: string,
+): Promise<DeviceInfo[]> {
+  const rows = await query<DeviceStateRow>(
+    `SELECT ${DEVICE_COLUMNS}
+       FROM devices d
+      WHERE d.account_id = $1 AND d.revoked_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM sessions s WHERE s.device_id = d.id AND s.state <> 'ended'
+        )
+      ORDER BY (
+        SELECT max(last_event_at) FROM sessions s WHERE s.device_id = d.id
+      ) DESC NULLS LAST, d.paired_at DESC`,
+    [accountId],
+  );
+  return rows.map(toDeviceInfo);
+}
+
 /**
  * Current device state for the GET /api/device/state killswitch + state probe.
- * Reports `enabled` from the device row (revoked_at IS NULL AND disabled_at IS
- * NULL) and the afk/grant of the device's MOST-RECENT live session (the CLI's
- * device-wide toggles keep these uniform across the device's sessions). When
- * the device has no live session, afk/grant default to off.
+ * `enabled` = revoked_at IS NULL AND disabled_at IS NULL; afk/grant are the
+ * device's own machine-wide columns (the single source of truth). A missing
+ * device row reports disabled + off/off (fail-closed).
  */
 export async function getDeviceState(args: {
   deviceId: string;
   accountId: string;
 }): Promise<{ enabled: boolean; afk: AfkState; grant: GrantLevel }> {
-  const dev = await queryOne<{ enabled: boolean }>(
-    `SELECT (revoked_at IS NULL AND disabled_at IS NULL) AS enabled
+  const dev = await queryOne<{ enabled: boolean; afk: string; grant: string }>(
+    `SELECT (revoked_at IS NULL AND disabled_at IS NULL) AS enabled, afk, "grant"
        FROM devices
       WHERE id = $1 AND account_id = $2`,
     [args.deviceId, args.accountId],
   );
-  const enabled = dev?.enabled ?? false;
-
-  const sess = await queryOne<SessionRow>(
-    `SELECT * FROM sessions
-      WHERE device_id = $1 AND account_id = $2 AND state <> $3
-      ORDER BY last_event_at DESC
-      LIMIT 1`,
-    [args.deviceId, args.accountId, SessionState.ENDED],
-  );
-  const afk = (sess?.afk as AfkState | undefined) ?? AfkState.OFF;
-  const grant = (sess?.grant as GrantLevel | undefined) ?? GrantLevel.OFF;
-  return { enabled, afk, grant };
+  return {
+    enabled: dev?.enabled ?? false,
+    afk: (dev?.afk as AfkState | undefined) ?? AfkState.OFF,
+    grant: (dev?.grant as GrantLevel | undefined) ?? GrantLevel.OFF,
+  };
 }
 
 /** Get a single session scoped to a device + account. */
@@ -515,7 +564,8 @@ export async function getSessionForDevice(args: {
   accountId: string;
 }): Promise<SessionInfo | undefined> {
   const row = await queryOne<SessionRow>(
-    `SELECT * FROM sessions WHERE id = $1 AND device_id = $2 AND account_id = $3`,
+    `SELECT ${SESSION_COLUMNS} ${SESSION_FROM}
+      WHERE s.id = $1 AND s.device_id = $2 AND s.account_id = $3`,
     [args.sessionId, args.deviceId, args.accountId],
   );
   return row ? toSessionInfo(row) : undefined;
@@ -526,9 +576,9 @@ export async function listLiveSessionsForAccount(
   accountId: string,
 ): Promise<SessionInfo[]> {
   const rows = await query<SessionRow>(
-    `SELECT * FROM sessions
-      WHERE account_id = $1 AND state <> $2
-      ORDER BY last_event_at DESC`,
+    `SELECT ${SESSION_COLUMNS} ${SESSION_FROM}
+      WHERE s.account_id = $1 AND s.state <> $2
+      ORDER BY s.last_event_at DESC`,
     [accountId, SessionState.ENDED],
   );
   return rows.map(toSessionInfo);
@@ -869,14 +919,16 @@ export async function resolveAttention(args: {
       ],
     );
 
-    // If the decision carries a session-grant escalation, apply it to the
-    // session so subsequent in-grant tools auto-proceed (mirrors the hook).
+    // If the decision carries a grant escalation (a phone plan-approval), apply
+    // it to the attention's DEVICE — grant is machine-wide, and the hook reads
+    // the device-pushed grant.state. Writing sessions.grant would never reach
+    // the hook. The device picks it up via the device_state notify → SSE `state`.
     if (optionalGrant !== null) {
       await client.query(
-        `UPDATE sessions s
-            SET "grant" = $1, last_event_at = now()
+        `UPDATE devices d
+            SET "grant" = $1
            FROM attention_events ae
-          WHERE ae.id = $2 AND ae.session_id = s.id AND s.account_id = $3`,
+          WHERE ae.id = $2 AND ae.device_id = d.id AND d.account_id = $3`,
         [optionalGrant, args.attentionId, args.accountId],
       );
     }

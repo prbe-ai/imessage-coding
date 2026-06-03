@@ -17,7 +17,7 @@
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { DashboardApiRoute, SseEvent } from '@imsg/shared';
-import { listLiveSessionsForAccount } from '../db/repo.ts';
+import { listDevicesForAccount, listLiveSessionsForAccount } from '../db/repo.ts';
 import { ensureListener, waitForAccountEvent } from '../db/listener.ts';
 import { verifySseTicket } from '../auth/dashboard.ts';
 
@@ -45,11 +45,17 @@ dashboardRoutes.get(DashboardApiRoute.EVENTS, async (c) => {
       aborted = true;
     });
 
-    // Emit the account's current live sessions. The browser replaces its list
-    // wholesale on each event (idempotent); low volume, so always send.
+    // Emit the account's current live sessions + paired devices (machine-wide
+    // afk/grant lives on the device). The browser replaces each list wholesale
+    // on its event (idempotent); low volume, so always send both. A device toggle
+    // fires `device_state`, which wakes this account waiter too (see listener).
     const flush = async (): Promise<void> => {
-      const sessions = await listLiveSessionsForAccount(accountId);
+      const [sessions, devices] = await Promise.all([
+        listLiveSessionsForAccount(accountId),
+        listDevicesForAccount(accountId),
+      ]);
       await stream.writeSSE({ event: SseEvent.SESSIONS, data: JSON.stringify({ sessions }) });
+      await stream.writeSSE({ event: SseEvent.DEVICES, data: JSON.stringify({ devices }) });
     };
 
     // Catch-up on connect, then stream live. Re-query EVERY iteration (not only

@@ -93,6 +93,27 @@ export interface SessionInfo {
 export const SESSION_TITLE_MAX_LEN = 80;
 
 /**
+ * A paired machine, as tracked by the control plane. AFK + session grant are
+ * MACHINE-WIDE (the PreToolUse hook reads one shared state file per device), so
+ * they live here, not on the session — a device toggle is the single source of
+ * truth that every live session on the device syncs down. `label` is a friendly
+ * name (hostname → os → short id); `sessionCount` is the device's live sessions.
+ */
+export interface DeviceInfo {
+  id: string;
+  /** Friendly name for display: hostname, else os, else the short id. */
+  label: string;
+  os?: string;
+  hostname?: string;
+  afk: AfkState;
+  grant: GrantLevel;
+  /** Killswitch state: revoked_at IS NULL AND disabled_at IS NULL. */
+  enabled: boolean;
+  /** Count of the device's non-ended sessions. */
+  sessionCount: number;
+}
+
+/**
  * One surfaced unit of session activity (the transcript tap). The device derives
  * these from the Claude Code transcript and ships them in REALTIME whenever the
  * killswitch permits (no longer AFK-gated) — so the control plane's activity log

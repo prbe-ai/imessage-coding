@@ -28,6 +28,7 @@ const CHANNELS = [
   NotifyChannel.DECISION_READY,
   NotifyChannel.SESSION_MESSAGE,
   NotifyChannel.SESSION_STATE,
+  NotifyChannel.DEVICE_STATE,
 ] as const;
 
 /** A bare wake signal for a parked waiter. */
@@ -109,23 +110,37 @@ function makeWaiterRegistry() {
 
 const sessionWaiters = makeWaiterRegistry();
 const accountWaiters = makeWaiterRegistry();
+const deviceWaiters = makeWaiterRegistry();
 
 let client: Client | undefined;
 let starting: Promise<void> | undefined;
 
 function handleNotification(channel: string, payloadText: string | undefined): void {
   if (!(CHANNELS as readonly string[]).includes(channel) || !payloadText) return;
-  let payload: { session_id?: string; account_id?: string };
+  let payload: { session_id?: string; account_id?: string; device_id?: string };
   try {
-    payload = JSON.parse(payloadText) as { session_id?: string; account_id?: string };
+    payload = JSON.parse(payloadText) as {
+      session_id?: string;
+      account_id?: string;
+      device_id?: string;
+    };
   } catch {
     console.error('[listener] unparseable payload on', channel, payloadText);
     return;
   }
-  // All channels carry a session_id → wake the device's session stream.
+  // decision_ready / session_message / session_state carry a session_id → wake
+  // the device's per-session stream.
   if (payload.session_id) sessionWaiters.wake(payload.session_id);
-  // Only session_state is account-fanned → wake the dashboard's account stream.
-  if (channel === NotifyChannel.SESSION_STATE && payload.account_id) {
+  // device_state (machine-wide afk/grant) carries a device_id → wake every live
+  // stream for that device so each re-flushes its device-sourced {afk,grant}.
+  if (channel === NotifyChannel.DEVICE_STATE && payload.device_id) {
+    deviceWaiters.wake(payload.device_id);
+  }
+  // session_state + device_state are account-fanned → wake the dashboard stream.
+  if (
+    (channel === NotifyChannel.SESSION_STATE || channel === NotifyChannel.DEVICE_STATE) &&
+    payload.account_id
+  ) {
     accountWaiters.wake(payload.account_id);
   }
 }
@@ -196,6 +211,55 @@ export function waitForAccountEvent(
   signal?: AbortSignal,
 ): Promise<boolean> {
   return accountWaiters.waitFor(accountId, timeoutMs, signal);
+}
+
+/**
+ * Wait until a `device_state` change (machine-wide afk/grant toggle) lands for
+ * `deviceId`, or until `timeoutMs` elapses.
+ */
+export function waitForDeviceEvent(
+  deviceId: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  return deviceWaiters.waitFor(deviceId, timeoutMs, signal);
+}
+
+/**
+ * Wait until EITHER a per-session event (decision/steer for `sessionId`) OR a
+ * machine-wide `device_state` toggle for `deviceId` lands, or until `timeoutMs`
+ * elapses. The device's per-session SSE stream uses this so a dashboard/CLI
+ * device toggle reaches every session's hook sub-second.
+ *
+ * A naive `Promise.race([waitForSession, waitForDevice])` leaks: the LOSING
+ * waiter stays parked (Set entry + live timer) until its own timeout, so a busy
+ * stream accumulates stale waiters. We instead drive both off ONE inner
+ * AbortController and abort it the instant either settles — cancelling the loser
+ * immediately (its `waitFor` cleans up on abort).
+ */
+export function waitForSessionOrDeviceEvent(
+  sessionId: string,
+  deviceId: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const inner = new AbortController();
+  const onOuterAbort = (): void => inner.abort();
+  if (signal) {
+    if (signal.aborted) inner.abort();
+    else signal.addEventListener('abort', onOuterAbort, { once: true });
+  }
+  const cleanup = (): void => {
+    inner.abort(); // cancel whichever waiter hasn't settled yet
+    if (signal) signal.removeEventListener('abort', onOuterAbort);
+  };
+  return Promise.race([
+    sessionWaiters.waitFor(sessionId, timeoutMs, inner.signal),
+    deviceWaiters.waitFor(deviceId, timeoutMs, inner.signal),
+  ]).then((woken) => {
+    cleanup();
+    return woken;
+  });
 }
 
 /** @deprecated Alias retained for the legacy decisions long-poll. */

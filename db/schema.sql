@@ -66,9 +66,33 @@ CREATE TABLE IF NOT EXISTS devices (
   -- Remote killswitch: a non-null disabled_at disables the device WITHOUT
   -- destroying its credential (reversible, unlike revoked_at). The device's
   -- GET /api/device/state reports enabled = (revoked_at IS NULL AND disabled_at IS NULL).
-  disabled_at        TIMESTAMPTZ
+  disabled_at        TIMESTAMPTZ,
+  -- AFK + session grant are MACHINE-WIDE, so they live on the device, not the
+  -- session: the PreToolUse hook reads ONE shared afk.state/grant.state file per
+  -- machine, so a per-session value is a fiction (and N concurrent sessions'
+  -- streams clobber the shared file). A toggle here is the single source of
+  -- truth; every live session on the device syncs it down via the SSE `state`
+  -- event. afk ∈ on|off ; grant ∈ off|edits|full (string-checked to match enums).
+  afk                TEXT        NOT NULL DEFAULT 'off'
+                       CHECK (afk IN ('on', 'off')),
+  "grant"            TEXT        NOT NULL DEFAULT 'off'
+                       CHECK ("grant" IN ('off', 'edits', 'full'))
 );
 CREATE INDEX IF NOT EXISTS idx_devices_account ON devices(account_id);
+-- Idempotent adds for already-provisioned DBs (CREATE TABLE IF NOT EXISTS above
+-- is a no-op once the table exists). Backfill carries each device's current
+-- per-session value (most-recent live session wins) so existing AFK survives.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS afk     TEXT NOT NULL DEFAULT 'off'
+  CHECK (afk IN ('on', 'off'));
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS "grant" TEXT NOT NULL DEFAULT 'off'
+  CHECK ("grant" IN ('off', 'edits', 'full'));
+UPDATE devices d SET afk = s.afk, "grant" = s."grant"
+  FROM (
+    SELECT DISTINCT ON (device_id) device_id, afk, "grant"
+      FROM sessions WHERE state <> 'ended'
+     ORDER BY device_id, last_event_at DESC
+  ) s
+ WHERE s.device_id = d.id AND d.afk = 'off' AND d."grant" = 'off';
 
 -- -----------------------------------------------------------------------------
 -- pairing_tokens — single-use, short-TTL tokens embedded in install.sh and
@@ -126,6 +150,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   agent          TEXT        NOT NULL DEFAULT 'claude-code',
   state          TEXT        NOT NULL DEFAULT 'active'
                    CHECK (state IN ('active', 'waiting', 'idle', 'ended')),
+  -- VESTIGIAL: afk/grant are MACHINE-WIDE and now live on `devices` (the hook
+  -- reads one shared state file per machine). These columns are no longer
+  -- written or read — SessionInfo.afk/grant are JOINed from the device. Kept
+  -- only so a mid-deploy old build doesn't error selecting them; drop once both
+  -- tiers are on the per-device code.
   afk            TEXT        NOT NULL DEFAULT 'off'
                    CHECK (afk IN ('on', 'off')),
   "grant"        TEXT        NOT NULL DEFAULT 'off'
@@ -314,21 +343,19 @@ CREATE TRIGGER trg_session_message
 
 -- =============================================================================
 -- LISTEN/NOTIFY: wake BOTH the device's event stream AND the dashboard's event
--- stream when a session's afk/grant/state changes — whoever wrote it (the
--- dashboard's account-scoped UPDATE, the CLI's device-wide UPDATE, or a
--- lifecycle transition). The control plane is the single source of truth + SSE
--- hub: on wake the device re-queries its session's {afk,grant} and pushes a
--- `state` event (so the PreToolUse hook honors a dashboard toggle), and the
--- dashboard re-queries the account's live sessions and pushes a `sessions` event.
--- The payload carries session_id (device, session-keyed) AND account_id
--- (dashboard, account-keyed).
+-- stream when a session's lifecycle STATE changes (started, waiting, idle,
+-- ended). afk/grant are machine-wide and live on `devices` now — they fire
+-- `trg_device_state_update` (below), not this trigger. The control plane is the
+-- single source of truth + SSE hub: on wake the device re-queries its session
+-- and the dashboard re-queries the account's live sessions/devices. The payload
+-- carries session_id (device, session-keyed) AND account_id (dashboard-keyed).
 --
 -- Two triggers, deliberately: the UPDATE trigger's WHEN fires ONLY on a real
--- afk/grant/state change — NOT on the per-60s touchSession() that only bumps
--- last_event_at (which would otherwise wake the device every heartbeat). The
--- INSERT trigger always fires so a newly-started session appears live in the
--- dashboard. (A single AFTER INSERT OR UPDATE trigger can't be used here: a WHEN
--- clause may not reference OLD on the INSERT path.)
+-- state change — NOT on the per-60s touchSession() that only bumps last_event_at
+-- (which would otherwise wake the device every heartbeat). The INSERT trigger
+-- always fires so a newly-started session appears live in the dashboard. (A
+-- single AFTER INSERT OR UPDATE trigger can't be used here: a WHEN clause may
+-- not reference OLD on the INSERT path.)
 -- =============================================================================
 CREATE OR REPLACE FUNCTION notify_session_state() RETURNS trigger AS $$
 BEGIN
@@ -353,12 +380,42 @@ DROP TRIGGER IF EXISTS trg_session_state_update ON sessions;
 CREATE TRIGGER trg_session_state_update
   AFTER UPDATE ON sessions
   FOR EACH ROW
-  WHEN (
-    OLD.afk     IS DISTINCT FROM NEW.afk
-    OR OLD."grant" IS DISTINCT FROM NEW."grant"
-    OR OLD.state   IS DISTINCT FROM NEW.state
-  )
+  -- Only on a lifecycle (state) change. afk/grant moved to `devices` (machine-
+  -- wide) and fire `trg_device_state_update` instead; the vestigial
+  -- sessions.afk/grant columns are no longer written, so they're not watched here.
+  WHEN (OLD.state IS DISTINCT FROM NEW.state)
   EXECUTE FUNCTION notify_session_state();
+
+-- =============================================================================
+-- LISTEN/NOTIFY: a device's afk/grant changed (the machine-wide toggle). Wakes
+-- BOTH every live SSE stream for that device (each re-queries its session's now
+-- device-sourced {afk,grant} and pushes a `state` event to its PreToolUse hook)
+-- AND the dashboard's account stream (re-render the device cards). A device
+-- change has no single session_id, so it rides its OWN channel (device_state)
+-- carrying device_id + account_id — keeping the session_state fan-out clean.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION notify_device_state() RETURNS trigger AS $$
+BEGIN
+  PERFORM pg_notify(
+    'device_state',
+    json_build_object(
+      'device_id', NEW.id,
+      'account_id', NEW.account_id
+    )::text
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_device_state_update ON devices;
+CREATE TRIGGER trg_device_state_update
+  AFTER UPDATE ON devices
+  FOR EACH ROW
+  WHEN (
+    OLD.afk        IS DISTINCT FROM NEW.afk
+    OR OLD."grant" IS DISTINCT FROM NEW."grant"
+  )
+  EXECUTE FUNCTION notify_device_state();
 
 -- -----------------------------------------------------------------------------
 -- session_activity — the AFK transcript tap. A lightweight, per-block stream of

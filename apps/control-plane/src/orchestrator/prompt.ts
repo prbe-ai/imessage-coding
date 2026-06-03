@@ -283,15 +283,19 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
           'Change a coding agent setting. The only setting right now is AFK: ' +
           `afk='${AfkState.ON}' routes that agent's permission prompts, questions, and ` +
           `status to you here over iMessage; afk='${AfkState.OFF}' returns them to its ` +
-          'keyboard. Name one or more sessions. This only changes WHERE prompts show up ' +
-          '— it never approves anything, so it is always safe.',
+          'keyboard. AFK is MACHINE-WIDE — naming any session flips its whole machine ' +
+          '(every session on that device); name sessions from several machines to flip ' +
+          'them all. This only changes WHERE prompts show up — it never approves ' +
+          'anything, so it is always safe.',
         parameters: {
           type: 'object',
           properties: {
             session_ids: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Ids of the sessions to update (at least one).',
+              description:
+                'Ids of the sessions whose machines to update (at least one). The ' +
+                "named session's whole device flips, not just that session.",
             },
             afk: {
               type: 'string',

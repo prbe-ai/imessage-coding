@@ -22,7 +22,7 @@ import { toast } from "sonner";
 
 import { useSession } from "@/lib/idp/better-auth-client";
 import { DashboardChrome } from "@/components/dashboard-chrome";
-import { SessionCard } from "@/components/session-card";
+import { DeviceCard } from "@/components/device-card";
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -30,12 +30,14 @@ import {
   GrantLevel,
   SessionState,
   SseEvent,
+  type DeviceInfo,
   type SessionInfo,
 } from "@imsg/shared";
 import {
   getAgentNumber,
   getLinkedNumber,
   getSseTicket,
+  listDevices,
   listSessions,
   setAfk,
   setGrant,
@@ -51,8 +53,10 @@ export default function HomePage() {
   // The agent number to chat WITH (distinct from phoneNumber, the user's own).
   const [agentNumber, setAgentNumber] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
+  // Devices carry the machine-wide afk/grant; sessions nest under them.
+  const [devices, setDevices] = useState<DeviceInfo[] | null>(null);
   const [afkBusy, setAfkBusy] = useState(false);
-  // Per-session grant writes in flight — serialized so two overlapping POSTs
+  // Per-DEVICE grant writes in flight — serialized so two overlapping POSTs
   // can't race, and surfaced as `grantBusy` to disable the control meanwhile.
   const grantPending = useRef<Set<string>>(new Set<string>());
   const [grantBusyIds, setGrantBusyIds] = useState<readonly string[]>([]);
@@ -113,6 +117,13 @@ export default function HomePage() {
       .catch(() => {
         // Transient — keep the last good list.
       });
+    listDevices(ac.signal)
+      .then((res) => {
+        if (!cancelled) setDevices(res.devices);
+      })
+      .catch(() => {
+        // Transient — keep the last good list.
+      });
 
     const scheduleReconnect = () => {
       if (cancelled) return;
@@ -145,6 +156,16 @@ export default function HomePage() {
             // Ignore a malformed frame; the next event reconciles.
           }
         });
+        source.addEventListener(SseEvent.DEVICES, (ev) => {
+          try {
+            const body = JSON.parse((ev as MessageEvent).data) as {
+              devices: DeviceInfo[];
+            };
+            if (!cancelled) setDevices(body.devices);
+          } catch {
+            // Ignore a malformed frame; the next event reconciles.
+          }
+        });
         source.addEventListener("error", () => {
           // On a transient drop the browser auto-reconnects (readyState
           // CONNECTING) reusing this ticket — let it; that's a ~3s recovery vs.
@@ -173,25 +194,31 @@ export default function HomePage() {
   const liveSessions = (sessions ?? []).filter(
     (s) => s.state !== SessionState.ENDED,
   );
+  const liveDevices = devices ?? [];
+  // AFK is machine-wide → "all on" means every device is AFK.
   const allAfkOn =
-    liveSessions.length > 0 && liveSessions.every((s) => s.afk === AfkState.ON);
+    liveDevices.length > 0 && liveDevices.every((d) => d.afk === AfkState.ON);
+  // Group this device's live sessions for nesting under its card.
+  const sessionsForDevice = useCallback(
+    (deviceId: string) => liveSessions.filter((s) => s.deviceId === deviceId),
+    [liveSessions],
+  );
 
-  // ── Account-wide AFK toggle. ──────────────────────────────────────────
+  // ── Master AFK toggle (every device). ─────────────────────────────────
   const onMasterAfk = useCallback(
     async (next: AfkState) => {
       if (afkBusy) return;
       setAfkBusy(true);
-      // Optimistic: flip every live session locally.
-      setSessions((prev) =>
-        prev
-          ? prev.map((s) =>
-              s.state === SessionState.ENDED ? s : { ...s, afk: next },
-            )
-          : prev,
-      );
+      // Optimistic: flip every device locally; snapshot for rollback on failure.
+      let prevDevices: DeviceInfo[] | null = null;
+      setDevices((prev) => {
+        prevDevices = prev;
+        return prev ? prev.map((d) => ({ ...d, afk: next })) : prev;
+      });
       try {
         await setAfk(next);
       } catch (err) {
+        setDevices(prevDevices);
         toast.error(extractError(err, "Couldn't update AFK."));
       } finally {
         setAfkBusy(false);
@@ -200,74 +227,94 @@ export default function HomePage() {
     [afkBusy],
   );
 
-  // ── Per-session AFK toggle. ───────────────────────────────────────────
-  const onSessionAfk = useCallback(
-    async (sessionId: string, next: AfkState) => {
-      setSessions((prev) =>
+  // ── Per-device AFK toggle (machine-wide). ─────────────────────────────
+  const onDeviceAfk = useCallback(
+    async (deviceId: string, next: AfkState) => {
+      if (afkBusy) return;
+      setAfkBusy(true);
+      // Optimistic flip; remember the prior value to roll back on failure.
+      let prevAfk: AfkState | undefined;
+      setDevices((prev) =>
         prev
-          ? prev.map((s) => (s.id === sessionId ? { ...s, afk: next } : s))
+          ? prev.map((d) => {
+              if (d.id !== deviceId) return d;
+              prevAfk = d.afk;
+              return { ...d, afk: next };
+            })
           : prev,
       );
       try {
-        await setAfk(next, sessionId);
+        const res = await setAfk(next, deviceId);
+        // updated === 0 means no device matched (revoked between render and
+        // click) — the write never took, so treat it as a failure.
+        if (res.updated === 0) throw new Error("Device is no longer available.");
       } catch (err) {
+        if (prevAfk !== undefined) {
+          const restore = prevAfk;
+          setDevices((prev) =>
+            prev
+              ? prev.map((d) => (d.id === deviceId ? { ...d, afk: restore } : d))
+              : prev,
+          );
+        }
         toast.error(extractError(err, "Couldn't update AFK."));
+      } finally {
+        setAfkBusy(false);
       }
     },
-    [],
+    [afkBusy],
   );
 
-  // ── Per-session grant change. ─────────────────────────────────────────
-  const onSessionGrant = useCallback(
-    async (sessionId: string, next: GrantLevel) => {
-      // Serialize per session: ignore a change while this session's grant write
-      // is still in flight, so two overlapping POSTs can't land out of order and
+  // ── Per-device grant change (machine-wide). ───────────────────────────
+  const onDeviceGrant = useCallback(
+    async (deviceId: string, next: GrantLevel) => {
+      // Serialize per device: ignore a change while this device's grant write is
+      // still in flight, so two overlapping POSTs can't land out of order and
       // leave the authoritative grant disagreeing with the user's last choice.
-      if (grantPending.current.has(sessionId)) return;
-      grantPending.current.add(sessionId);
+      if (grantPending.current.has(deviceId)) return;
+      grantPending.current.add(deviceId);
       setGrantBusyIds([...grantPending.current]);
 
       // Optimistic flip; remember the prior level to roll back on failure.
       let prevGrant: GrantLevel | undefined;
-      setSessions((prev) =>
+      setDevices((prev) =>
         prev
-          ? prev.map((s) => {
-              if (s.id !== sessionId) return s;
-              prevGrant = s.grant;
-              return { ...s, grant: next };
+          ? prev.map((d) => {
+              if (d.id !== deviceId) return d;
+              prevGrant = d.grant;
+              return { ...d, grant: next };
             })
           : prev,
       );
 
       try {
-        const res = await setGrant(next, sessionId);
-        // updated === 0 means no row matched (e.g. the session ended between
-        // render and click) — the write never took, so treat it as a failure
-        // rather than leaving the optimistic value showing.
-        if (res.updated === 0) throw new Error("Session is no longer live.");
+        const res = await setGrant(next, deviceId);
+        // updated === 0 means no device matched (e.g. revoked between render and
+        // click) — the write never took, so treat it as a failure.
+        if (res.updated === 0) throw new Error("Device is no longer available.");
         // Reconcile to the server's authoritative level, not our optimistic one,
         // so any future server-side capping can't be masked by the UI.
-        setSessions((prev) =>
+        setDevices((prev) =>
           prev
-            ? prev.map((s) =>
-                s.id === sessionId ? { ...s, grant: res.grant } : s,
+            ? prev.map((d) =>
+                d.id === deviceId ? { ...d, grant: res.grant } : d,
               )
             : prev,
         );
       } catch (err) {
         if (prevGrant !== undefined) {
           const restore = prevGrant;
-          setSessions((prev) =>
+          setDevices((prev) =>
             prev
-              ? prev.map((s) =>
-                  s.id === sessionId ? { ...s, grant: restore } : s,
+              ? prev.map((d) =>
+                  d.id === deviceId ? { ...d, grant: restore } : d,
                 )
               : prev,
           );
         }
         toast.error(extractError(err, "Couldn't update grant."));
       } finally {
-        grantPending.current.delete(sessionId);
+        grantPending.current.delete(deviceId);
         setGrantBusyIds([...grantPending.current]);
       }
     },
@@ -307,51 +354,53 @@ export default function HomePage() {
               </div>
             </div>
             <label className="flex cursor-pointer items-center gap-2 text-sm text-on-surface-variant">
-              <span>AFK all sessions</span>
+              <span>AFK all devices</span>
               <Switch
                 checked={allAfkOn}
                 onCheckedChange={(checked) =>
                   void onMasterAfk(checked ? AfkState.ON : AfkState.OFF)
                 }
-                disabled={afkBusy || liveSessions.length === 0}
-                aria-label="Toggle away-from-keyboard for all sessions"
+                disabled={afkBusy || liveDevices.length === 0}
+                aria-label="Toggle away-from-keyboard for all devices"
               />
             </label>
           </div>
         </section>
 
-        {/* Sessions */}
+        {/* Devices (AFK + grant live here, machine-wide) → sessions nest under each. */}
         <section className="space-y-4">
           <div className="flex items-center justify-between border-b border-outline-variant/40 pb-2">
-            <h2 className="text-lg font-bold tracking-tight">Sessions</h2>
+            <h2 className="text-lg font-bold tracking-tight">Devices</h2>
             <span className="font-mono text-[10px] uppercase tracking-widest text-outline">
-              {liveSessions.length} live
+              {liveDevices.length} paired · {liveSessions.length} live
             </span>
           </div>
 
-          {sessions === null ? (
+          {devices === null ? (
             <div className="space-y-3">
-              <Skeleton className="h-24 w-full" />
-              <Skeleton className="h-24 w-full" />
+              <Skeleton className="h-28 w-full" />
+              <Skeleton className="h-28 w-full" />
             </div>
-          ) : liveSessions.length === 0 ? (
+          ) : liveDevices.length === 0 ? (
             <div className="py-12 text-center text-sm text-outline">
-              No live sessions. Pair a device from{" "}
+              No active devices. Start Claude Code on a paired machine, or pair
+              one from{" "}
               <a className="text-primary underline" href="/integrations">
                 Integrations
               </a>
-              , then start Claude Code.
+              .
             </div>
           ) : (
-            <div className="space-y-3">
-              {liveSessions.map((s) => (
-                <SessionCard
-                  key={s.id}
-                  session={s}
-                  busy={afkBusy}
-                  grantBusy={grantBusyIds.includes(s.id)}
-                  onToggleAfk={(next) => void onSessionAfk(s.id, next)}
-                  onSetGrant={(next) => void onSessionGrant(s.id, next)}
+            <div className="space-y-4">
+              {liveDevices.map((d) => (
+                <DeviceCard
+                  key={d.id}
+                  device={d}
+                  sessions={sessionsForDevice(d.id)}
+                  afkBusy={afkBusy}
+                  grantBusy={grantBusyIds.includes(d.id)}
+                  onToggleAfk={(next) => void onDeviceAfk(d.id, next)}
+                  onSetGrant={(next) => void onDeviceGrant(d.id, next)}
                 />
               ))}
             </div>

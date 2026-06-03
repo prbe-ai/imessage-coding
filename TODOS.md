@@ -7,7 +7,6 @@ once deployed — fix before GA.
 
 ## P2 — functional gaps (fix before GA)
 
-- [ ] **Heartbeat drops afk/grant.** `apps/control-plane/src/routes/device.ts` HEARTBEAT reads only `sessionId`+`cwd`; the device heartbeats afk/grant but they never reach the DB, so the dashboard shows stale state. Fix: parse optional afk/grant (validate via `isAfkState`/`isGrantLevel`) → `updateSessionState`.
 - [ ] **Long-poll lost-wakeup race (~25s added latency).** `routes/device.ts` runs `listDecisionsForSession()` before registering the waiter; a NOTIFY in that window is dropped and the poll sleeps the full timeout. Fix: subscribe-then-check — register waiter (`ensureListener`+`waitForDecision`) BEFORE the initial read; cancel if the read already has rows.
 - [ ] **`since` cursor ms truncation.** `db/repo.ts listDecisionsForSession` returns the cursor at ms precision while filtering at µs → can skip/double-deliver same-ms decisions. Fix: full-precision opaque cursor, or `(resolved_at, id)` keyset with `ORDER BY resolved_at, id`.
 - [ ] **STEER is a silent no-op that echoes back to the user.** `orchestrator/index.ts` STEER calls `sendOutbound(...text)` → texts the steer back to the sender; nothing reaches the session. Fix: implement a real session-inbound relay (persist a steer decision the device long-poll injects), or have STEER reply honestly that live steering isn't wired yet.

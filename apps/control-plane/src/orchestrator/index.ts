@@ -51,7 +51,7 @@ import {
   recentMessages,
   resolveAttention,
   setAttentionNotifyMessageId,
-  setSessionsAfkForAccount,
+  setDevicesAfkForSessions,
   type SessionActivityLine,
 } from '../db/repo.ts';
 import { hashToken } from '../auth/device.ts';
@@ -682,7 +682,9 @@ async function execGetSessionData(ctx: DispatchCtx, args: Record<string, unknown
   return rows.map(formatActivityLine).join('\n');
 }
 
-/** update_session_state: change a session setting (afk only, for now). */
+/** update_session_state: change a session setting (afk only, for now). AFK is
+ *  MACHINE-WIDE — naming a session flips its whole device (every live session on
+ *  it), so this writes devices.afk for each named session's device. */
 async function execUpdateSessionState(ctx: DispatchCtx, args: Record<string, unknown>): Promise<string> {
   if (!isAfkState(args.afk)) {
     return `error: afk must be '${AfkState.ON}' or '${AfkState.OFF}'`;
@@ -693,7 +695,7 @@ async function execUpdateSessionState(ctx: DispatchCtx, args: Record<string, unk
   if (ids.length === 0) {
     return 'error: session_ids must be a non-empty array of session ids';
   }
-  const updated = await setSessionsAfkForAccount({
+  const updated = await setDevicesAfkForSessions({
     accountId: ctx.accountId,
     sessionIds: ids,
     afk: args.afk,
@@ -704,7 +706,7 @@ async function execUpdateSessionState(ctx: DispatchCtx, args: Record<string, unk
   ctx.actions.push(`set afk=${args.afk} on ${updated.length} session(s)`);
   const missed = ids.length - updated.length;
   const missedNote = missed > 0 ? `; ${missed} id(s) matched no live session` : '';
-  return `set afk=${args.afk} on ${updated.length} session(s)${missedNote}`;
+  return `set afk=${args.afk} on ${updated.length} session(s) (machine-wide)${missedNote}`;
 }
 
 /** One line per activity event for get_session_data, line-numbered for citing/re-slicing. */

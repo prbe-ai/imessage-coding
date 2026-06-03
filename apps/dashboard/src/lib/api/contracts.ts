@@ -4,7 +4,12 @@
  * browser code and the route handler can't drift on field names.
  */
 
-import type { AfkState, GrantLevel, SessionInfo } from "@imsg/shared";
+import type {
+  AfkState,
+  DeviceInfo,
+  GrantLevel,
+  SessionInfo,
+} from "@imsg/shared";
 
 // ── Onboarding ──────────────────────────────────────────────────────────
 
@@ -52,6 +57,12 @@ export interface SessionsResponse {
   sessions: SessionInfo[];
 }
 
+/** Response of GET /api/home/devices — the account's paired devices (machine-wide
+ *  afk/grant live here). Also the shape of each `devices` SSE event. */
+export interface DevicesResponse {
+  devices: DeviceInfo[];
+}
+
 /** Response of GET /api/home/sse-ticket — a short-TTL ticket + the absolute
  *  control-plane SSE URL the browser opens an EventSource against. The dashboard
  *  is on a different origin than the control plane, so the browser needs both. */
@@ -62,23 +73,25 @@ export interface SseTicketResponse {
   url: string;
 }
 
-/** Body of POST /api/home/afk — set AFK across the account's live sessions. */
+/** Body of POST /api/home/afk — set machine-wide AFK. AFK lives on the device
+ *  (one shared hook state file per machine), so a toggle targets a device. */
 export interface SetAfkRequest {
   afk: AfkState;
-  /** Optional: scope to one session; omitted = all live sessions. */
-  sessionId?: string;
+  /** Optional: one device; omitted = every device on the account (master toggle). */
+  deviceId?: string;
 }
 
 export interface SetAfkResponse {
   afk: AfkState;
-  /** Number of sessions updated. */
+  /** Number of devices updated. */
   updated: number;
 }
 
-/** Body of POST /api/home/grant — set the standing grant level. */
+/** Body of POST /api/home/grant — set the machine-wide standing grant level. */
 export interface SetGrantRequest {
   grant: GrantLevel;
-  sessionId?: string;
+  /** Optional: one device; omitted = every device on the account. */
+  deviceId?: string;
 }
 
 export interface SetGrantResponse {

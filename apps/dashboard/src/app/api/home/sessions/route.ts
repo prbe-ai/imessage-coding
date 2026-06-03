@@ -24,11 +24,15 @@ export async function GET(req: Request): Promise<Response> {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
+  // afk/grant are machine-wide → source them from the session's device (JOIN),
+  // not the now-unused sessions.afk/grant columns.
   const res = await query<SessionDbRow>(
-    `SELECT id, device_id, cwd, title, agent, last_event_at, state, afk, "grant"
-       FROM sessions
-      WHERE account_id = $1 AND state <> $2
-      ORDER BY last_event_at DESC`,
+    `SELECT s.id, s.device_id, s.cwd, s.title, s.agent, s.last_event_at,
+            s.state, d.afk, d."grant"
+       FROM sessions s
+       JOIN devices d ON d.id = s.device_id
+      WHERE s.account_id = $1 AND s.state <> $2
+      ORDER BY s.last_event_at DESC`,
     [ctx.accountId, SessionState.ENDED],
   );
 

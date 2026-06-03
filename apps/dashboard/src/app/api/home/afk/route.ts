@@ -1,18 +1,18 @@
 /**
- * POST /api/home/afk — toggle AFK for the account's live sessions.
+ * POST /api/home/afk — set machine-wide AFK.
  *
- * Writes `sessions.afk` directly in the shared Neon DB (account-scoped). The
- * device plugin reads its AFK/grant from the control plane's
- * GET /api/device/state, which reads the same column — so a dashboard toggle
- * syncs to the device on its next state poll. Body: `{ afk, sessionId? }`;
- * omitting `sessionId` applies to every non-ended session on the account.
+ * AFK is per-DEVICE (the PreToolUse hook reads one shared afk.state file per
+ * machine), so this writes `devices.afk` in the shared Neon DB (account-scoped).
+ * The device's `device_state` trigger then wakes every live SSE stream for that
+ * device → each mirrors the new value into its hook. Body: `{ afk, deviceId? }`;
+ * omitting `deviceId` applies to every device on the account (the master toggle).
  */
 
 import { NextResponse } from "next/server";
 
 import { requireAccount } from "@/lib/server-session";
 import { query } from "@/lib/db";
-import { AfkState, SessionState, isAfkState } from "@imsg/shared";
+import { AfkState, isAfkState } from "@imsg/shared";
 import type { SetAfkRequest, SetAfkResponse } from "@/lib/api/contracts";
 
 export const dynamic = "force-dynamic";
@@ -29,7 +29,7 @@ export async function POST(req: Request): Promise<Response> {
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
-  const { afk, sessionId } = (parsed ?? {}) as Partial<SetAfkRequest>;
+  const { afk, deviceId } = (parsed ?? {}) as Partial<SetAfkRequest>;
   if (!isAfkState(afk)) {
     return NextResponse.json(
       { error: `afk must be one of: ${Object.values(AfkState).join(", ")}` },
@@ -37,19 +37,17 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  // Scope to one session when given; otherwise every live session. Either way
-  // the account_id predicate is the tenant boundary.
-  const res = sessionId
+  // Scope to one device when given; otherwise every device on the account. The
+  // account_id predicate is the tenant boundary in both branches.
+  const res = deviceId
     ? await query(
-        `UPDATE sessions SET afk = $1
-          WHERE account_id = $2 AND id = $3 AND state <> $4`,
-        [afk, ctx.accountId, sessionId, SessionState.ENDED],
+        `UPDATE devices SET afk = $1 WHERE account_id = $2 AND id = $3`,
+        [afk, ctx.accountId, deviceId],
       )
-    : await query(
-        `UPDATE sessions SET afk = $1
-          WHERE account_id = $2 AND state <> $3`,
-        [afk, ctx.accountId, SessionState.ENDED],
-      );
+    : await query(`UPDATE devices SET afk = $1 WHERE account_id = $2`, [
+        afk,
+        ctx.accountId,
+      ]);
 
   const body: SetAfkResponse = { afk, updated: res.rowCount ?? 0 };
   return NextResponse.json(body, { status: 200 });

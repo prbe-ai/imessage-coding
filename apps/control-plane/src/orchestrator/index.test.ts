@@ -1,20 +1,13 @@
 /**
- * Critical-path unit tests for the orchestrator's pure helpers: grant-cap
- * enforcement (capGrant), onboarding-token extraction, and the back-to-back
- * inbound coalescing decisions (takeBatch / shouldInterrupt). Pure logic only —
+ * Critical-path unit tests for the orchestrator's pure helpers: onboarding-token
+ * extraction, the back-to-back inbound coalescing decisions (takeBatch /
+ * shouldInterrupt), and the delivery-confirmation follow-up. Pure logic only —
  * none touch the DB/network, and importing index.ts opens no connection
  * (Pool/env are lazy).
- *
- * SAFETY focus: capGrant is the seam that enforces "the LLM can NEVER mint a
- * FULL grant" (Contract #1). A bug here lets a model auto-allow everything while
- * the user is AFK. (It replaces the old validateAction grant cap after the
- * orchestrator moved to tool-calling — the cap is now applied in the
- * message_agent action='approve' path via this function.)
  */
 import { describe, expect, test } from 'bun:test';
-import { GrantLevel, MessageChannel, type InboundMessage } from '@imsg/shared';
+import { MessageChannel, type InboundMessage } from '@imsg/shared';
 import {
-  capGrant,
   composeDeliveryFollowup,
   extractOnboardingToken,
   shouldInterrupt,
@@ -40,29 +33,6 @@ function inflight(
     interruptible: overrides.interruptible ?? true,
   };
 }
-
-describe('capGrant — LLM may never set FULL', () => {
-  test("'full' is capped to EDITS", () => {
-    expect(capGrant(GrantLevel.FULL)).toBe(GrantLevel.EDITS);
-  });
-
-  test("'off' is dropped (treated as no grant)", () => {
-    expect(capGrant(GrantLevel.OFF)).toBeUndefined();
-  });
-
-  test("'edits' is preserved", () => {
-    expect(capGrant(GrantLevel.EDITS)).toBe(GrantLevel.EDITS);
-  });
-
-  test('an unrecognized grant value is dropped (not coerced to a grant)', () => {
-    expect(capGrant('superuser')).toBeUndefined();
-  });
-
-  test('missing / non-string grant stays undefined', () => {
-    expect(capGrant(undefined)).toBeUndefined();
-    expect(capGrant(42 as unknown)).toBeUndefined();
-  });
-});
 
 describe('extractOnboardingToken', () => {
   // 32-char base64url run (24 bytes -> 32 chars), matches the dashboard deep link.

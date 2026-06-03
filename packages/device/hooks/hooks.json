@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "*",
+        "matcher": "AskUserQuestion|ExitPlanMode",
         "hooks": [
           { "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/intercept.ts" }
         ]

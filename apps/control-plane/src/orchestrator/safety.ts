@@ -18,11 +18,10 @@
  * approvals, denials, and answers are handled by the LLM; only the destructive
  * ALLOW path is locked behind this deterministic gate.
  *
- * "Destructive" mirrors the device hook's grant semantics: file-edit tools
- * (Edit/Write/MultiEdit/NotebookEdit) are the only ones a session `grant=edits`
- * may auto-allow; Bash and everything else are treated as destructive and never
- * auto-allowed without the keyboard. We classify conservatively: UNKNOWN tools
- * are destructive.
+ * "Destructive" = anything other than the file-edit tools (Edit/Write/MultiEdit/
+ * NotebookEdit). File-edits are non-destructive (always allowable); Bash and
+ * everything else are destructive and require a deterministic binding — never
+ * allowed by inference. We classify conservatively: UNKNOWN tools are destructive.
  */
 import {
   AttentionKind,
@@ -32,9 +31,9 @@ import {
 } from '@imsg/shared';
 
 /**
- * File-edit tools — the ONLY tools a `grant=edits` session auto-allows, and the
- * only permission tools considered NON-destructive. Mirrors the device hook's
- * EDIT_TOOLS set exactly. Keep in lockstep with the plugin.
+ * File-edit tools — the only permission tools considered NON-destructive (always
+ * allowable; see checkDestructiveAllow). Everything else is gated. Keep in
+ * lockstep with the plugin's permission handling.
  */
 const EDIT_TOOLS: ReadonlySet<string> = new Set([
   'Edit',

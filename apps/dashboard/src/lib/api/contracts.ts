@@ -4,12 +4,7 @@
  * browser code and the route handler can't drift on field names.
  */
 
-import type {
-  AfkState,
-  DeviceInfo,
-  GrantLevel,
-  SessionInfo,
-} from "@imsg/shared";
+import type { AfkState, DeviceInfo, SessionInfo } from "@imsg/shared";
 
 // ── Onboarding ──────────────────────────────────────────────────────────
 
@@ -58,7 +53,7 @@ export interface SessionsResponse {
 }
 
 /** Response of GET /api/home/devices — the account's paired devices (machine-wide
- *  afk/grant live here). Also the shape of each `devices` SSE event. */
+ *  afk lives here). Also the shape of each `devices` SSE event. */
 export interface DevicesResponse {
   devices: DeviceInfo[];
 }
@@ -84,18 +79,6 @@ export interface SetAfkRequest {
 export interface SetAfkResponse {
   afk: AfkState;
   /** Number of devices updated. */
-  updated: number;
-}
-
-/** Body of POST /api/home/grant — set the machine-wide standing grant level. */
-export interface SetGrantRequest {
-  grant: GrantLevel;
-  /** Optional: one device; omitted = every device on the account. */
-  deviceId?: string;
-}
-
-export interface SetGrantResponse {
-  grant: GrantLevel;
   updated: number;
 }
 

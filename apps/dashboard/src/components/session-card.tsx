@@ -2,8 +2,8 @@
 
 /**
  * One live Claude Code session row. Shows the task title (or cwd fallback), the
- * agent, a status badge, and a relative "last active" timestamp. AFK + grant are
- * MACHINE-WIDE, so they're controlled on the parent DeviceCard, not here. Status
+ * agent, a status badge, and a relative "last active" timestamp. AFK is
+ * MACHINE-WIDE, so it's controlled on the parent DeviceCard, not here. Status
  * badge colors follow DESIGN.md: active=success, waiting=warning, idle=info,
  * ended=outline.
  */

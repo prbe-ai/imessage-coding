@@ -65,11 +65,6 @@ export function afkStateFile(): string {
   return join(deviceDir(), 'afk.state');
 }
 
-/** Local grant state file (off|edits|full). */
-export function grantStateFile(): string {
-  return join(deviceDir(), 'grant.state');
-}
-
 /** Cached pending-attention count for the statusline (written by channel server). */
 export function pendingStateFile(): string {
   return join(deviceDir(), 'pending.state');

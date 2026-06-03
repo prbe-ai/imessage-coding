@@ -1,10 +1,10 @@
 /**
  * GET /api/home/devices — the account's paired (non-revoked) devices.
  *
- * AFK + session grant are MACHINE-WIDE, so they live on the device, not the
- * session — the dashboard groups sessions under their device and exposes one
- * AFK switch + one grant control per device. Reads the shared Neon DB directly
- * (account-scoped), mirroring the control plane's listDevicesForAccount.
+ * AFK is MACHINE-WIDE, so it lives on the device, not the session — the
+ * dashboard groups sessions under their device and exposes one AFK switch per
+ * device. Reads the shared Neon DB directly (account-scoped), mirroring the
+ * control plane's listDevicesForAccount.
  */
 
 import { NextResponse } from "next/server";

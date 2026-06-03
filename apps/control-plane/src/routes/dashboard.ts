@@ -6,7 +6,7 @@
  *
  * The dashboard opens ONE long-lived EventSource here and reacts to pushed
  * `sessions` events (the account's live sessions, incl. each session's
- * afk/grant/state) — replacing the dashboard's old 5s poll. Driven by the same
+ * afk/state) — replacing the dashboard's old 5s poll. Driven by the same
  * LISTEN/NOTIFY bridge as the device stream: a `session_state` NOTIFY wakes the
  * account waiter, we re-query, and push.
  *
@@ -46,7 +46,7 @@ dashboardRoutes.get(DashboardApiRoute.EVENTS, async (c) => {
     });
 
     // Emit the account's current live sessions + paired devices (machine-wide
-    // afk/grant lives on the device). The browser replaces each list wholesale
+    // afk lives on the device). The browser replaces each list wholesale
     // on its event (idempotent); low volume, so always send both. A device toggle
     // fires `device_state`, which wakes this account waiter too (see listener).
     const flush = async (): Promise<void> => {

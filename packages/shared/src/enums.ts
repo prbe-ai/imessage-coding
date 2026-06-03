@@ -54,16 +54,6 @@ export const AfkState = {
 export type AfkState = (typeof AfkState)[keyof typeof AfkState];
 
 // -----------------------------------------------------------------------------
-// Standing grant level for a session (how much can auto-proceed while AFK).
-// -----------------------------------------------------------------------------
-export const GrantLevel = {
-  OFF: 'off',
-  EDITS: 'edits',
-  FULL: 'full',
-} as const;
-export type GrantLevel = (typeof GrantLevel)[keyof typeof GrantLevel];
-
-// -----------------------------------------------------------------------------
 // Why the agent is asking for the user's attention.
 // -----------------------------------------------------------------------------
 export const AttentionKind = {
@@ -87,7 +77,7 @@ export type AttentionKind = (typeof AttentionKind)[keyof typeof AttentionKind];
 export const RequestAction = {
   /** Answer a question/plan with free text (becomes the agent's prompt input). */
   ANSWER: 'answer',
-  /** Approve a plan (optionally with a standing edits grant). */
+  /** Approve a plan. */
   APPROVE: 'approve',
   /** Deny / reject a permission or plan. Always safe. */
   DENY: 'deny',
@@ -174,15 +164,15 @@ export type DashboardApiRoute =
 // server writer (streamSSE) and the client frame-parser MUST reference these.
 // -----------------------------------------------------------------------------
 export const SseEvent = {
-  /** Device stream: resolved decisions (verdicts/answers/grants). */
+  /** Device stream: resolved decisions (verdicts/answers). */
   DECISIONS: 'decisions',
   /** Device stream: free-text steering messages to inject. */
   SESSION_MESSAGES: 'session_messages',
-  /** Device stream: a session's current { afk, grant } (push-down sync). */
+  /** Device stream: a session's current { afk } (push-down sync). */
   STATE: 'state',
   /** Dashboard stream: the account's live `sessions` list. */
   SESSIONS: 'sessions',
-  /** Dashboard stream: the account's `devices` list (afk/grant live here). */
+  /** Dashboard stream: the account's `devices` list (afk lives here). */
   DEVICES: 'devices',
   /** Keepalive on both streams (ignored by clients). */
   PING: 'ping',
@@ -200,7 +190,7 @@ export const NotifyChannel = {
   SESSION_MESSAGE: 'session_message',
   /** Fired on a sessions state change (wake device + dashboard). */
   SESSION_STATE: 'session_state',
-  /** Fired on a device afk/grant change — the machine-wide toggle (wake every
+  /** Fired on a device afk change — the machine-wide toggle (wake every
    *  live device stream + the dashboard). Payload carries device_id + account_id. */
   DEVICE_STATE: 'device_state',
   /** Fired when a decision's delivered_at flips non-null (the device ACKed

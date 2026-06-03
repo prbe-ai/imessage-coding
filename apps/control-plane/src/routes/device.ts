@@ -12,16 +12,16 @@
  *   POST /api/device/ack        {sessionId, attentionIds}      -> {acked}
  *   GET  /api/device/decisions  ?sessionId&since               -> LONG-POLL (legacy)
  *   POST /api/device/heartbeat  {sessionId, cwd?}              -> {ok}
- *   POST /api/device/state      {afk?, grant?}                 -> {device:{enabled,afk,grant}}
- *   GET  /api/device/state                                     -> {enabled, afk, grant}
+ *   POST /api/device/state      {afk?}                         -> {device:{enabled,afk}}
+ *   GET  /api/device/state                                     -> {enabled, afk}
  *
  * The device subscribes to EVENTS (SSE) for pushed decisions + steers, then
  * confirms it injected decisions via ACK so the server marks them delivered and
- * stops re-serving them (at-least-once + idempotent). afk/grant are MACHINE-WIDE
+ * stops re-serving them (at-least-once + idempotent). afk is MACHINE-WIDE
  * (stored on the device, not the session): POST /state writes the authenticated
- * device's afk/grant (the CLI `imsg afk/grant` toggle); any sessionId in the body
- * is ignored. GET /state is the remote killswitch probe: enabled = (revoked_at IS
- * NULL AND disabled_at IS NULL) for the device.
+ * device's afk (the CLI `imsg afk` toggle); any sessionId in the body is ignored.
+ * GET /state is the remote killswitch probe: enabled = (revoked_at IS NULL AND
+ * disabled_at IS NULL) for the device.
  *
  * The (legacy) decisions long-poll waits on LISTEN/NOTIFY 'decision_ready' (or
  * ~25s) and returns resolved Decisions for the device's session. FAIL-CLOSED: a
@@ -38,7 +38,6 @@ import {
   isActivityBatchBody,
   isAfkState,
   isAttentionEvent,
-  isGrantLevel,
   isUuid,
   type AttentionEvent,
 } from '@imsg/shared';
@@ -63,7 +62,6 @@ import {
   markSessionMessagesAcked,
   markSessionMessagesDelivered,
   setDeviceAfk,
-  setDeviceGrant,
   touchSession,
   upsertSession,
 } from '../db/repo.ts';
@@ -441,20 +439,19 @@ deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
 
   return streamSSE(c, async (stream) => {
     let since = since0; // decisions cursor (ISO resolved_at); advances as we emit
-    // Last afk/grant pushed for THIS session; undefined → emit the current value
-    // on the first flush so a reconnecting device re-syncs even if it missed a
+    // Last afk pushed for THIS session; undefined → emit the current value on
+    // the first flush so a reconnecting device re-syncs even if it missed a
     // change while disconnected.
     let lastAfk: typeof session.afk | undefined;
-    let lastGrant: typeof session.grant | undefined;
     let aborted = false;
     stream.onAbort(() => {
       aborted = true;
     });
 
     // Emit pending decisions (since cursor) + undelivered steers (mark them
-    // delivered) + the session's current {afk,grant} when it changed. The
-    // device's applyDecision stays the verdict arbiter; the `state` event is
-    // applied to its local afk.state/grant.state files (idempotent there).
+    // delivered) + the session's current {afk} when it changed. The device's
+    // applyDecision stays the verdict arbiter; the `state` event is applied to
+    // its local afk.state file (idempotent there).
     const flush = async (): Promise<void> => {
       const dec = await listDecisionsForSession({
         sessionId,
@@ -482,26 +479,25 @@ deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
         await stream.writeSSE({ event: SseEvent.SESSION_MESSAGES, data: JSON.stringify({ messages: msgs }) });
         await markSessionMessagesDelivered(msgs.map((m) => m.id));
       }
-      // Push afk/grant on change so a dashboard/CLI toggle reaches the device's
-      // PreToolUse hook (which reads the local state files). Re-query for the
+      // Push afk on change so a dashboard/CLI toggle reaches the device's
+      // PreToolUse hook (which reads the local state file). Re-query for the
       // freshest value; the session may have ended mid-stream (cur undefined).
       const cur = await getSessionForDevice({
         sessionId,
         deviceId: auth.deviceId,
         accountId: auth.accountId,
       });
-      if (cur && (cur.afk !== lastAfk || cur.grant !== lastGrant)) {
+      if (cur && cur.afk !== lastAfk) {
         await stream.writeSSE({
           event: SseEvent.STATE,
-          data: JSON.stringify({ afk: cur.afk, grant: cur.grant }),
+          data: JSON.stringify({ afk: cur.afk }),
         });
         lastAfk = cur.afk;
-        lastGrant = cur.grant;
       }
     };
 
     // Catch-up on connect, then stream live. Wake on a decision/steer for THIS
-    // session OR a machine-wide afk/grant toggle on THIS device (device_state),
+    // session OR a machine-wide afk toggle on THIS device (device_state),
     // so a dashboard/CLI device toggle reaches every session's hook sub-second.
     // On timeout we ping to stay alive.
     await flush();
@@ -634,9 +630,9 @@ deviceRoutes.post(DeviceApiRoute.HEARTBEAT, async (c) => {
 });
 
 // --- STATE: GET (killswitch + state probe) ------------------------------------
-// enabled = device not revoked AND not remotely disabled. afk/grant come from
-// the device's most-recent live session. The device polls this to honor a
-// remote killswitch (disable from the dashboard with no credential rotation).
+// enabled = device not revoked AND not remotely disabled. afk comes from the
+// device row. The device polls this to honor a remote killswitch (disable from
+// the dashboard with no credential rotation).
 deviceRoutes.get(DeviceApiRoute.STATE, async (c) => {
   const auth = device(c);
   const state = await getDeviceState({
@@ -646,31 +642,22 @@ deviceRoutes.get(DeviceApiRoute.STATE, async (c) => {
   return c.json(state);
 });
 
-// --- STATE: POST (afk / grant) ------------------------------------------------
-// afk/grant are MACHINE-WIDE: they live on the device row (the single source of
-// truth the PreToolUse hook honors), so a toggle here writes the authenticated
-// device — NOT one session. Any `sessionId` in the body is ignored (the CLI
-// `imsg afk/grant` already sends none; the field is legacy). FULL is reachable
-// here only via this authenticated device path, never via the LLM (the
-// orchestrator caps any LLM-set grant at EDITS).
+// --- STATE: POST (afk) --------------------------------------------------------
+// afk is MACHINE-WIDE: it lives on the device row (the single source of truth the
+// PreToolUse hook honors), so a toggle here writes the authenticated device — NOT
+// one session. Any `sessionId` in the body is ignored (the CLI `imsg afk` already
+// sends none; the field is legacy).
 deviceRoutes.post(DeviceApiRoute.STATE, async (c) => {
   const auth = device(c);
   const body = (await c.req.json().catch(() => ({}))) as {
     afk?: unknown;
-    grant?: unknown;
   };
   const afk = isAfkState(body.afk) ? body.afk : undefined;
-  const grant = isGrantLevel(body.grant) ? body.grant : undefined;
-  if (afk === undefined && grant === undefined) {
+  if (afk === undefined) {
     return c.json({ error: 'nothing_to_update' }, 400);
   }
 
-  if (afk !== undefined) {
-    await setDeviceAfk({ deviceId: auth.deviceId, accountId: auth.accountId, afk });
-  }
-  if (grant !== undefined) {
-    await setDeviceGrant({ deviceId: auth.deviceId, accountId: auth.accountId, grant });
-  }
+  await setDeviceAfk({ deviceId: auth.deviceId, accountId: auth.accountId, afk });
   // Echo the device's resulting machine-wide state (the CLI only checks ok).
   const state = await getDeviceState({ deviceId: auth.deviceId, accountId: auth.accountId });
   return c.json({ device: state });

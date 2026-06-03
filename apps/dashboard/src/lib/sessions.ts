@@ -12,10 +12,8 @@ import "server-only";
 import {
   AfkState,
   AgentKind,
-  GrantLevel,
   SessionState,
   isAfkState,
-  isGrantLevel,
   isSessionState,
   isAgentKind,
   type SessionInfo,
@@ -31,7 +29,6 @@ export interface SessionDbRow {
   last_event_at: string;
   state: string;
   afk: string;
-  grant: string;
 }
 
 /** Convert a DB row to the shared `SessionInfo`, clamping any unexpected enum
@@ -45,7 +42,6 @@ export function toSessionInfo(row: SessionDbRow): SessionInfo {
     lastEventAt: row.last_event_at,
     state: isSessionState(row.state) ? row.state : SessionState.IDLE,
     afk: isAfkState(row.afk) ? row.afk : AfkState.OFF,
-    grant: isGrantLevel(row.grant) ? row.grant : GrantLevel.OFF,
   };
   if (row.cwd) info.cwd = row.cwd;
   if (row.title) info.title = row.title;

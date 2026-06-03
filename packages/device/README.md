@@ -14,18 +14,17 @@ plane. Uses a durable outbox/backoff/creds/sanitize/killswitch design.
 - **Channel MCP server** (`src/channel.ts`) — implements the Claude Code
   Channels contract (`claude/channel` + `claude/channel/permission` + a `reply`
   tool). Permission prompts and relayed questions/plans become `AttentionEvent`s
-  POSTed to `POST /api/device/attention`; verdicts/answers/grant changes arrive
+  POSTed to `POST /api/device/attention`; verdicts/answers arrive
   by long-polling `GET /api/device/decisions`. Heartbeats + state mirror to the
   control plane. Auth is a Bearer `device_token` from the macOS Keychain (file
   fallback). Egress is gated by a fail-OPEN killswitch.
 - **AFK-aware intercept hook** (`hooks/intercept.ts`) — `PreToolUse`
   (`AskUserQuestion`/`ExitPlanMode`) + `PermissionRequest` (`ExitPlanMode`).
-  Session grant auto-approves edits (`edits`) or everything (`full`), but never
-  Bash under `edits` (fail-closed). When AFK, question/plan tools are held with
-  instructions to relay via the `reply` tool and STOP. A session grant is the
-  cloud-side "plan approved" signal that releases `ExitPlanMode`.
-- **CLI** (`bin/imsg.ts`) — `pair <token>`, `afk on|off|toggle`,
-  `grant edits|full|off`, `status`, `statusline`.
+  There is no standing auto-approval; every tool is gated per-action. When AFK,
+  `AskUserQuestion` is held with instructions to relay via the `reply` tool and
+  STOP, while `ExitPlanMode` is allowed to proceed (its tools stay gated).
+- **CLI** (`bin/imsg.ts`) — `pair <token>`, `afk on|off|toggle`, `status`,
+  `statusline`.
 
 ## Install
 
@@ -61,7 +60,7 @@ All mutable state lives under `IMSG_DEVICE_DIR` (default
 (`CLAUDE_PLUGIN_ROOT`) so a reinstall never clobbers your token:
 
 - `.token` (0600) + Keychain — the `device_token`
-- `afk.state` / `grant.state` / `pending.state` — fast local state the hook +
+- `afk.state` / `pending.state` — fast local state the hook +
   statusline read
 - `outbox.jsonl` — durable attention-event queue (exponential backoff, cap 300s)
 - `logs/` — channel + hook logs (token never logged)

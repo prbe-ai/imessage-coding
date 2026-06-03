@@ -10,7 +10,6 @@
 import {
   AfkState,
   AgentKind,
-  GrantLevel,
   SessionState,
   type ActivityEvent,
   type ActivityKind,
@@ -36,13 +35,12 @@ interface DeviceRow {
   account_id: string;
 }
 
-/** Device + machine-wide afk/grant + live-session count (DeviceInfo backing). */
+/** Device + machine-wide afk + live-session count (DeviceInfo backing). */
 interface DeviceStateRow {
   id: string;
   os: string | null;
   hostname: string | null;
   afk: string;
-  grant: string;
   enabled: boolean;
   session_count: string | number;
 }
@@ -79,7 +77,6 @@ interface SessionRow {
   agent: string;
   state: string;
   afk: string;
-  grant: string;
   last_event_at: string;
 }
 
@@ -104,7 +101,6 @@ interface DecisionRow {
   attention_id: string;
   behavior: string | null;
   answer_text: string | null;
-  grant: string | null;
   source: string;
   resolved_at: string;
   delivered_at: string | null;
@@ -118,14 +114,14 @@ interface MessageLogRow {
 
 // --- mappers ------------------------------------------------------------------
 
-// afk/grant are MACHINE-WIDE (they live on `devices`, not `sessions`), so every
-// session read sources them from its device via this JOIN. Selecting explicit
-// columns (not `s.*, d.afk`) avoids the afk/grant name collision between the two
-// tables. SessionInfo.afk/grant therefore always reflect the device's value.
+// afk is MACHINE-WIDE (it lives on `devices`, not `sessions`), so every session
+// read sources it from its device via this JOIN. Selecting explicit columns (not
+// `s.*, d.afk`) avoids the afk name collision between the two tables.
+// SessionInfo.afk therefore always reflects the device's value.
 const SESSION_FROM = 'FROM sessions s JOIN devices d ON d.id = s.device_id';
 const SESSION_COLUMNS =
   's.id, s.device_id, s.account_id, s.cwd, s.title, s.agent, s.state, ' +
-  's.last_event_at, d.afk, d."grant"';
+  's.last_event_at, d.afk';
 
 function toSessionInfo(r: SessionRow): SessionInfo {
   const info: SessionInfo = {
@@ -135,7 +131,6 @@ function toSessionInfo(r: SessionRow): SessionInfo {
     lastEventAt: new Date(r.last_event_at).toISOString(),
     state: r.state as SessionState,
     afk: r.afk as AfkState,
-    grant: r.grant as GrantLevel,
   };
   if (r.cwd !== null) info.cwd = r.cwd;
   if (r.title !== null) info.title = r.title;
@@ -150,7 +145,6 @@ function toDeviceInfo(r: DeviceStateRow): DeviceInfo {
     id: r.id,
     label,
     afk: r.afk as AfkState,
-    grant: r.grant as GrantLevel,
     enabled: r.enabled,
     sessionCount: Number(r.session_count),
   };
@@ -186,7 +180,6 @@ function toDecision(r: DecisionRow): Decision {
   };
   if (r.behavior !== null) d.behavior = r.behavior as DecisionBehavior;
   if (r.answer_text !== null) d.answerText = r.answer_text;
-  if (r.grant !== null) d.grant = r.grant as GrantLevel;
   return d;
 }
 
@@ -433,11 +426,11 @@ export async function reapStaleSessions(
   return rows.length;
 }
 
-// afk/grant are MACHINE-WIDE and live on `devices`. These RETURNING columns +
+// afk is MACHINE-WIDE and lives on `devices`. These RETURNING columns +
 // the live-session count back the DeviceInfo wire shape. The count is a
 // correlated subquery so a single UPDATE ... RETURNING yields a full DeviceInfo.
 const DEVICE_COLUMNS =
-  'd.id, d.os, d.hostname, d.afk, d."grant", ' +
+  'd.id, d.os, d.hostname, d.afk, ' +
   '(d.revoked_at IS NULL AND d.disabled_at IS NULL) AS enabled, ' +
   "(SELECT count(*) FROM sessions s WHERE s.device_id = d.id AND s.state <> 'ended') " +
   'AS session_count';
@@ -459,23 +452,6 @@ export async function setDeviceAfk(args: {
   return row ? toDeviceInfo(row) : undefined;
 }
 
-/** Set a device's machine-wide session grant (off|edits|full). FULL is reachable
- *  only via the authenticated device/dashboard path; the LLM is capped at EDITS
- *  upstream (orchestrator capGrant), never here. */
-export async function setDeviceGrant(args: {
-  deviceId: string;
-  accountId: string;
-  grant: GrantLevel;
-}): Promise<DeviceInfo | undefined> {
-  const row = await queryOne<DeviceStateRow>(
-    `UPDATE devices d SET "grant" = $1
-      WHERE d.id = $2 AND d.account_id = $3
-     RETURNING ${DEVICE_COLUMNS}`,
-    [args.grant, args.deviceId, args.accountId],
-  );
-  return row ? toDeviceInfo(row) : undefined;
-}
-
 /**
  * Set AFK on the DEVICES behind a named set of the account's LIVE sessions. Used
  * by the orchestrator's `set_afk` tool (the phone steering AFK on/off): the model
@@ -485,8 +461,8 @@ export async function setDeviceGrant(args: {
  * caller can report what took effect. Each device's live streams pick the change
  * up via the `device_state` notify → SSE `state` flush.
  *
- * AFK carries no auto-approve power on its own (grant untouched), so — unlike a
- * FULL grant — it is safe for the LLM to flip.
+ * AFK only moves WHERE prompts surface; it carries no auto-approve power, so it
+ * is safe for the LLM to flip.
  */
 export async function setDevicesAfkForSessions(args: {
   accountId: string;
@@ -513,7 +489,7 @@ export async function setDevicesAfkForSessions(args: {
 }
 
 /** The account's ACTIVE devices (non-revoked + at least one live session), each
- *  with its machine-wide afk/grant + live-session count. Most-recently-active
+ *  with its machine-wide afk + live-session count. Most-recently-active
  *  first. The live-session filter both keeps the list to machines worth toggling
  *  and collapses stale re-pair duplicates (which carry no live sessions). */
 export async function listDevicesForAccount(
@@ -536,16 +512,16 @@ export async function listDevicesForAccount(
 
 /**
  * Current device state for the GET /api/device/state killswitch + state probe.
- * `enabled` = revoked_at IS NULL AND disabled_at IS NULL; afk/grant are the
- * device's own machine-wide columns (the single source of truth). A missing
- * device row reports disabled + off/off (fail-closed).
+ * `enabled` = revoked_at IS NULL AND disabled_at IS NULL; afk is the device's own
+ * machine-wide column (the single source of truth). A missing device row reports
+ * disabled + off (fail-closed).
  */
 export async function getDeviceState(args: {
   deviceId: string;
   accountId: string;
-}): Promise<{ enabled: boolean; afk: AfkState; grant: GrantLevel }> {
-  const dev = await queryOne<{ enabled: boolean; afk: string; grant: string }>(
-    `SELECT (revoked_at IS NULL AND disabled_at IS NULL) AS enabled, afk, "grant"
+}): Promise<{ enabled: boolean; afk: AfkState }> {
+  const dev = await queryOne<{ enabled: boolean; afk: string }>(
+    `SELECT (revoked_at IS NULL AND disabled_at IS NULL) AS enabled, afk
        FROM devices
       WHERE id = $1 AND account_id = $2`,
     [args.deviceId, args.accountId],
@@ -553,7 +529,6 @@ export async function getDeviceState(args: {
   return {
     enabled: dev?.enabled ?? false,
     afk: (dev?.afk as AfkState | undefined) ?? AfkState.OFF,
-    grant: (dev?.grant as GrantLevel | undefined) ?? GrantLevel.OFF,
   };
 }
 
@@ -891,7 +866,6 @@ export async function resolveAttention(args: {
   attentionId: string;
   behavior?: DecisionBehavior | undefined;
   answerText?: string | undefined;
-  grant?: GrantLevel | undefined;
   source: DecisionSource;
 }): Promise<Decision | undefined> {
   return withTransaction(async (client) => {
@@ -905,33 +879,17 @@ export async function resolveAttention(args: {
     );
     if (claim.rows.length === 0) return undefined;
 
-    const optionalGrant = args.grant ?? null;
     const decRes = await client.query<DecisionRow>(
-      `INSERT INTO decisions (attention_id, behavior, answer_text, "grant", source)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO decisions (attention_id, behavior, answer_text, source)
+       VALUES ($1, $2, $3, $4)
        RETURNING *`,
       [
         args.attentionId,
         args.behavior ?? null,
         args.answerText ?? null,
-        optionalGrant,
         args.source,
       ],
     );
-
-    // If the decision carries a grant escalation (a phone plan-approval), apply
-    // it to the attention's DEVICE — grant is machine-wide, and the hook reads
-    // the device-pushed grant.state. Writing sessions.grant would never reach
-    // the hook. The device picks it up via the device_state notify → SSE `state`.
-    if (optionalGrant !== null) {
-      await client.query(
-        `UPDATE devices d
-            SET "grant" = $1
-           FROM attention_events ae
-          WHERE ae.id = $2 AND ae.device_id = d.id AND d.account_id = $3`,
-        [optionalGrant, args.attentionId, args.accountId],
-      );
-    }
 
     const row = decRes.rows[0];
     if (!row) throw new Error('resolveAttention: decision insert returned no row');

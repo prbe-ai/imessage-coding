@@ -14,15 +14,15 @@
  *   - a permission_request, or message_user(expect_reply) → an AttentionEvent
  *     enqueued in the durable outbox + POSTed to /api/device/attention; a plain
  *     message_user status is POSTed to /api/device/message (Bearer device_token).
- *   - verdicts + answers + remote grant changes arrive over the SSE stream
- *     GET /api/device/events; a verdict is relayed back to Claude Code via the
- *     claude/channel/permission notification, an answer is pushed into the
- *     session as a <channel> message, and a grant escalation is written to the
- *     local grant.state so the PreToolUse hook honors it. After injecting, the
- *     device POSTs /api/device/ack so the server marks those decisions delivered
- *     and never re-serves them (at-least-once + in-process dedup).
- *   - afk/grant are mirrored from the local state files (set by the CLI and by
- *     this server when it learns of a remote change) and heartbeated up.
+ *   - verdicts + answers arrive over the SSE stream GET /api/device/events; a
+ *     verdict is relayed back to Claude Code via the claude/channel/permission
+ *     notification, and an answer is pushed into the session as a <channel>
+ *     message. After injecting, the device POSTs /api/device/ack so the server
+ *     marks those decisions delivered and never re-serves them (at-least-once +
+ *     in-process dedup).
+ *   - afk is mirrored DOWN from the control plane into the local afk.state file
+ *     (set from the dashboard or the CLI's POST /api/device/state) so the hook
+ *     picks it up; the device does not push afk up on the heartbeat.
  *
  * Auth = Bearer device_token from keychain (file fallback). Egress is gated by
  * the fail-OPEN killswitch. The APPROVAL path is fail-CLOSED: with no decision,
@@ -42,13 +42,11 @@ import {
   ChannelMethod,
   DecisionBehavior,
   DeviceApiRoute,
-  GrantLevel,
   SseEvent,
   type AttentionEvent,
   type Decision,
   isAfkState,
   isDecisionBehavior,
-  isGrantLevel,
 } from '@imsg/shared';
 import {
   HEARTBEAT_INTERVAL_MS,
@@ -64,7 +62,7 @@ import { Classification, postJson } from './httpclient.ts';
 import { HaltError, drain, enqueue } from './outbox.ts';
 import { egressEnabled } from './killswitch.ts';
 import { sanitizeOptional, sanitizeText } from './sanitize.ts';
-import { readAfk, readGrant, writeAfk, writeGrant, writePending } from './state.ts';
+import { readAfk, writeAfk, writePending } from './state.ts';
 
 // --- logging (stderr + file; never the token) -------------------------------
 mkdirSync(logDir(), { recursive: true });
@@ -145,7 +143,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.5' },
+  { name: 'imsg-device', version: '0.1.6' },
   {
     capabilities: {
       experimental: {
@@ -333,7 +331,7 @@ async function drainOutbox(): Promise<void> {
   }
 }
 
-// --- decision long-poll: pull verdicts/answers/grants from the control plane -
+// --- decision long-poll: pull verdicts/answers from the control plane --------
 // Applying a Decision (the fail-CLOSED approval path lives here on the relay
 // side: we only ever SEND a verdict we explicitly received; absence = no send).
 
@@ -353,12 +351,6 @@ async function applyDecision(d: Decision, requestIdByAttention: Map<string, stri
     // delivered and stops re-serving it.
     log('decision_dup_skipped', { attentionId: d.attentionId });
     return;
-  }
-  // Grant escalation (e.g. plan approved as "edits"/"full" from the phone) is
-  // written locally so the PreToolUse hook honors it on the next tool call.
-  if (d.grant && isGrantLevel(d.grant) && d.grant !== readGrant()) {
-    writeGrant(d.grant as GrantLevel);
-    log('grant_synced', { grant: d.grant });
   }
 
   // A permission verdict → relay back to Claude Code on the permission channel.
@@ -563,17 +555,13 @@ async function subscribeEvents(): Promise<void> {
               // delivery to the user. Fire-and-forget (mirrors the decision ACK).
               if (msgs.length > 0) void ackSteers(msgs.map((m) => m.id));
             } else if (event === SseEvent.STATE) {
-              // Mirror the control plane's authoritative afk/grant into the local
-              // state files the PreToolUse hook reads (guarded: write on change).
-              // This is the dashboard/CLI toggle finally reaching the hook.
-              const body = JSON.parse(data) as { afk?: string; grant?: string };
+              // Mirror the control plane's authoritative afk into the local
+              // afk.state file the PreToolUse hook reads (guarded: write on
+              // change). This is the dashboard/CLI toggle reaching the hook.
+              const body = JSON.parse(data) as { afk?: string };
               if (isAfkState(body.afk) && body.afk !== readAfk()) {
                 writeAfk(body.afk);
                 log('afk_synced', { afk: body.afk });
-              }
-              if (isGrantLevel(body.grant) && body.grant !== readGrant()) {
-                writeGrant(body.grant);
-                log('grant_synced', { grant: body.grant });
               }
             }
             // SseEvent.PING (keepalive) + unknown events: ignore.
@@ -600,11 +588,11 @@ async function subscribeEvents(): Promise<void> {
 }
 
 // --- heartbeat: liveness + session touch -------------------------------------
-// NOTE: afk/grant are NOT sent up here. The control plane is the source of
-// truth: afk/grant flow DOWN to the device via the `state` SSE event (set from
-// the dashboard or the CLI's POST /api/device/state), and the heartbeat route
-// ignores any afk/grant in the body anyway. Sending them would falsely imply an
-// up-sync and risk clobbering the authoritative value.
+// NOTE: afk is NOT sent up here. The control plane is the source of truth: afk
+// flows DOWN to the device via the `state` SSE event (set from the dashboard or
+// the CLI's POST /api/device/state), and the heartbeat route ignores any afk in
+// the body anyway. Sending it would falsely imply an up-sync and risk clobbering
+// the authoritative value.
 
 /** The session title captured locally by the tap daemon — Claude Code's own
  *  ai-title / a /rename custom-title, else the provisional first message — or

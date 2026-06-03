@@ -16,7 +16,6 @@
  *     (a tap-back reaction, or a single pending — a typed reply carries no link)
  *     — `message_agent` (action `allow`) checks `deterministicTarget()` +
  *     `checkDestructiveAllow()`, refuses else.
- *   - The model can never mint a FULL grant (`capGrant` caps to EDITS).
  *   - The agent-driven turns expose only `message_user` (notify; the human resolves).
  * Fail-closed everywhere: a turn error sends a safe clarify (user path) or falls
  * back to the static notification (agent-event path) — never an unsafe action.
@@ -27,11 +26,9 @@ import {
   AttentionKind,
   DecisionBehavior,
   DecisionSource,
-  GrantLevel,
   RequestAction,
   ToolName,
   isAfkState,
-  isGrantLevel,
   isUuid,
   type AttentionEvent,
   type InboundMessage,
@@ -524,7 +521,7 @@ async function execMessageAgent(ctx: DispatchCtx, args: Record<string, unknown>)
   const text = typeof args.text === 'string' ? args.text.trim() : '';
   const action = typeof args.action === 'string' ? args.action : '';
 
-  if (action) return resolveSessionAction(ctx, sessionId, action, args.grant);
+  if (action) return resolveSessionAction(ctx, sessionId, action);
 
   if (!text) return 'error: pass text (a message to the agent) or an action';
 
@@ -562,7 +559,6 @@ async function resolveSessionAction(
   ctx: DispatchCtx,
   sessionId: string,
   action: string,
-  grantArg: unknown,
 ): Promise<string> {
   if (action === RequestAction.ALLOW) {
     const perms = ctx.pending.filter((e) => e.sessionId === sessionId && isPermissionAttention(e));
@@ -598,18 +594,16 @@ async function resolveSessionAction(
       return 'error: that agent has no plan to approve (just send text to answer a question, or use action=allow for a permission)';
     }
     const target = pickStrict(ctx, plans) ?? plans[plans.length - 1]!;
-    const grant = capGrant(grantArg);
     const dec = await resolveAttention({
       accountId: ctx.accountId,
       attentionId: target.id,
       behavior: DecisionBehavior.ALLOW,
-      grant,
       source: DecisionSource.PHONE,
     });
     if (!dec) return 'error: that plan is already resolved';
-    ctx.actions.push(`approved plan ${shortId(target.id)}${grant ? ` grant=${grant}` : ''}`);
+    ctx.actions.push(`approved plan ${shortId(target.id)}`);
     ctx.deliveries.push({ id: target.id, kind: 'decision', label: 'the plan approval' });
-    return queuedForSession(grant ? `plan approved (standing grant: ${grant})` : 'plan approved');
+    return queuedForSession('plan approved');
   }
 
   return `error: unknown action ${String(action)} (use allow, deny, or approve — or just send text)`;
@@ -695,7 +689,7 @@ async function execGetSessionState(ctx: DispatchCtx, args: Record<string, unknow
         : 'not blocked';
       const title = s.title ? JSON.stringify(clip(s.title, 80)) : '(untitled)';
       return (
-        `- id=${s.id} title=${title} state=${s.state} afk=${s.afk} grant=${s.grant}` +
+        `- id=${s.id} title=${title} state=${s.state} afk=${s.afk}` +
         `${s.cwd ? ` cwd=${clip(s.cwd, 80)}` : ''}; ${blockedNote}`
       );
     })
@@ -771,17 +765,6 @@ function clip(s: string, n: number): string {
 }
 
 // --- helpers ------------------------------------------------------------------
-
-/**
- * Cap an LLM-originated grant: FULL is downgraded to EDITS, OFF/invalid dropped.
- * The model can NEVER mint a FULL (auto-allow-everything) grant — that is
- * reachable only via the authenticated device/dashboard path. (Safety Contract #1.)
- */
-export function capGrant(value: unknown): GrantLevel | undefined {
-  if (!isGrantLevel(value)) return undefined;
-  if (value === GrantLevel.OFF) return undefined;
-  return value === GrantLevel.FULL ? GrantLevel.EDITS : value;
-}
 
 /**
  * Extract an onboarding token from an inbound message. The dashboard deep link

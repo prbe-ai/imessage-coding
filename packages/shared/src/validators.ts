@@ -11,7 +11,6 @@ import {
   AttentionKind,
   DecisionBehavior,
   DecisionSource,
-  GrantLevel,
   MessageChannel,
   SessionState,
 } from './enums.ts';
@@ -55,8 +54,6 @@ function isOptArray(v: unknown): v is unknown[] | undefined {
 // --- specific enum guards ----------------------------------------------------
 
 export const isAfkState = (v: unknown): v is AfkState => isEnumValue(AfkState, v);
-export const isGrantLevel = (v: unknown): v is GrantLevel =>
-  isEnumValue(GrantLevel, v);
 export const isAttentionKind = (v: unknown): v is AttentionKind =>
   isEnumValue(AttentionKind, v);
 export const isActivityKind = (v: unknown): v is ActivityKind =>
@@ -134,7 +131,6 @@ export function isDecision(v: unknown): v is Decision {
     return false;
   }
   if (!isOptString(v['answerText'])) return false;
-  if (v['grant'] !== undefined && !isGrantLevel(v['grant'])) return false;
   if (!isString(v['resolvedAt'])) return false;
   return isDecisionSource(v['source']);
 }

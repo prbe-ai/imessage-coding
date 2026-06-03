@@ -4,7 +4,6 @@
  * One self-contained CLI (invoked as `imsg <cmd>`):
  *   pair <token>        exchange a single-use pairing token for a device_token
  *   afk on|off|toggle   set AFK; mirrors to the cloud via /api/device/state
- *   grant edits|full|off set the session grant; mirrors to the cloud
  *   status              print local pairing + state + outbox summary
  *   statusline          one-line status for the Claude Code status bar
  *
@@ -13,18 +12,12 @@
  * read-only and never blocks on the network (it's rendered on every prompt).
  */
 import { hostname, platform } from 'node:os';
-import {
-  AfkState,
-  DeviceApiRoute,
-  GrantLevel,
-  isAfkState,
-  isGrantLevel,
-} from '@imsg/shared';
+import { AfkState, DeviceApiRoute, isAfkState } from '@imsg/shared';
 import { deviceApiUrl, deviceIdFile } from './config.ts';
 import { clearToken, ensureDeviceDir, loadToken, saveToken } from './creds.ts';
 import { Classification, parseJson, postJson } from './httpclient.ts';
 import { rowCount } from './outbox.ts';
-import { readAfk, readGrant, readPending, writeAfk, writeGrant } from './state.ts';
+import { readAfk, readPending, writeAfk } from './state.ts';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -93,23 +86,23 @@ export async function pair(pairingToken: string): Promise<number> {
   return 0;
 }
 
-// ----- state mutations (afk / grant) ----------------------------------------
+// ----- state mutations (afk) -------------------------------------------------
 
 /**
  * POST the local state up so the cloud + dashboard reflect the toggle.
  *
- * DEVICE-WIDE (contract #2): `imsg afk/grant` is a per-device toggle, not a
- * per-session one, so we POST {afk, grant} with NO sessionId. The control plane
+ * DEVICE-WIDE (contract #2): `imsg afk` is a per-device toggle, not a
+ * per-session one, so we POST {afk} with NO sessionId. The control plane
  * applies it to ALL of this authenticated device's live sessions and accepts a
- * device-wide update (any 2xx == SUCCESS). The local state files are already
+ * device-wide update (any 2xx == SUCCESS). The local state file is already
  * the authoritative fast path for the hook; this sync just mirrors to cloud.
  */
-async function syncState(afk: AfkState, grant: GrantLevel): Promise<void> {
+async function syncState(afk: AfkState): Promise<void> {
   const token = loadToken();
   if (!token) return; // unpaired: local-only toggle still applied
   const resp = await postJson(
     deviceApiUrl(DeviceApiRoute.STATE),
-    JSON.stringify({ afk, grant }),
+    JSON.stringify({ afk }),
     { bearer: token },
   );
   if (resp.classification === Classification.HALT) {
@@ -133,19 +126,8 @@ export async function afk(arg: string): Promise<number> {
     return 2;
   }
   writeAfk(next);
-  await syncState(next, readGrant());
+  await syncState(next);
   process.stdout.write(`afk: ${next}\n`);
-  return 0;
-}
-
-export async function grant(arg: string): Promise<number> {
-  if (!isGrantLevel(arg)) {
-    process.stderr.write('usage: imsg grant edits|full|off\n');
-    return 2;
-  }
-  writeGrant(arg);
-  await syncState(readAfk(), arg);
-  process.stdout.write(`grant: ${arg}\n`);
   return 0;
 }
 
@@ -160,7 +142,6 @@ export function status(): number {
   process.stdout.write('imsg-device: paired\n');
   process.stdout.write(`  device:   ${deviceId}\n`);
   process.stdout.write(`  afk:      ${readAfk()}\n`);
-  process.stdout.write(`  grant:    ${readGrant()}\n`);
   process.stdout.write(`  pending:  ${readPending()}\n`);
   process.stdout.write(`  outbox:   ${rowCount()} queued\n`);
   return 0;
@@ -177,11 +158,9 @@ export function statusline(): number {
       return 0;
     }
     const afkOn = readAfk() === AfkState.ON;
-    const g = readGrant();
     const pending = readPending();
     const parts: string[] = [];
     parts.push(afkOn ? '📱 AFK' : '⌨️  here');
-    if (g !== GrantLevel.OFF) parts.push(`grant:${g}`);
     if (pending > 0) parts.push(`⏳${pending}`);
     process.stdout.write(parts.join('  '));
   } catch {

@@ -25,7 +25,7 @@ the waiting Claude Code session. Destructive approvals are
    │   apps/control-plane (Fly)      │      │   apps/dashboard (Vercel)          │
    │   Hono on Bun — stateless       │      │   Next.js 16 — Better Auth (Google)│
    │  • POST /api/agentphone/webhook │      │  • Google SSO + onboarding wizard  │
-   │    (raw-body HMAC verify)       │      │  • Home: sessions, AFK/grant toggle│
+   │    (raw-body HMAC verify)       │      │  • Home: sessions, AFK toggle      │
    │  • orchestrator (LLM intent +   │      │  • Integrations: mint pairing token│
    │    deterministic safety gate)   │      │  • same-origin /api/* BFF          │
    │  • device API (Bearer token):   │      └────────────────────────────────────┘
@@ -41,7 +41,7 @@ the waiting Claude Code session. Destructive approvals are
   │   provider      │   │  • channel MCP server (permission relay + │
   └────────┬───────┘   │    `reply` chat bridge)                   │
            │            │  • PreToolUse/PermissionRequest hooks     │
-        📱 phone        │  • imsg CLI (pair · afk · grant · status) │
+        📱 phone        │  • imsg CLI (pair · afk · status)         │
                         │  • durable outbox + killswitch + sanitize │
                         └──────────────────────────────────────────┘
 
@@ -61,7 +61,7 @@ Claude Code on the Channels permission notification (matched by `request_id`).
 ```
 apps/
   control-plane/   # Hono on Bun — agentphone webhook, orchestrator, device API
-  dashboard/       # Next.js 16 — onboarding, sessions, AFK/grant, integrations
+  dashboard/       # Next.js 16 — onboarding, sessions, AFK, integrations
 packages/
   shared/          # @imsg/shared — the contract: enums + types every package imports
   transport/       # @imsg/transport — Transport PORT + AgentPhone impl
@@ -145,7 +145,6 @@ curl -fsSL <dashboard-origin>/install.sh \
 cd packages/device
 bun run bin/imsg.ts pair <pairing-token>
 bun run bin/imsg.ts afk on        # route prompts to your phone
-bun run bin/imsg.ts grant edits   # auto-allow file edits this session
 bun run bin/imsg.ts status
 ```
 

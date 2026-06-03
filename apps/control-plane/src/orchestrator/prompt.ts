@@ -19,12 +19,10 @@
  *
  * SAFETY: the system prompt re-states the hard contract in plain language, but the
  * binding gate is enforced in code (safety.ts + the index.ts dispatcher), never on
- * the model's say-so. The LLM can never allow a destructive op by inference nor
- * mint a FULL grant.
+ * the model's say-so. The LLM can never allow a destructive op by inference.
  */
 import {
   AfkState,
-  GrantLevel,
   RequestAction,
   ToolName,
   type AttentionEvent,
@@ -88,8 +86,7 @@ export function systemPrompt(): string {
     '  you want to tell it: an instruction, a steer, or the answer to something it',
     "  asked — it is all text back and forth, you do not track 'requests'. The one",
     '  structured case is approving or rejecting a PERMISSION it is blocked on: pass',
-    "  action=allow / action=deny instead of text (action=approve, optionally",
-    "  grant='edits', for a plan).",
+    "  action=allow / action=deny instead of text (action=approve for a plan).",
     '- get_session_state — look up what your agents are doing and what they are blocked',
     '  on (one agent or all).',
     '- get_session_data — read an agent\'s actual activity log (recent events, or grep',
@@ -213,11 +210,6 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
                 `'${RequestAction.DENY}' a permission it is blocked on, or ` +
                 `'${RequestAction.APPROVE}' a plan.`,
             },
-            grant: {
-              type: 'string',
-              enum: [GrantLevel.EDITS],
-              description: `Optional standing file-edit grant — only with action='${RequestAction.APPROVE}'.`,
-            },
           },
           required: ['session'],
         },
@@ -229,10 +221,10 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
         name: ToolName.GET_SESSION_STATE,
         description:
           'Look up the current state of the coding agents: what each is doing (active / ' +
-          'waiting / idle), whether its prompts are routed to you (AFK), its standing ' +
-          'grant, and whether it is blocked on a permission, question, or plan. Pass ' +
-          'session for one agent, or omit it for all live agents. State only — for the ' +
-          'actual transcript/log use get_session_data.',
+          'waiting / idle), whether its prompts are routed to you (AFK), and whether it ' +
+          'is blocked on a permission, question, or plan. Pass session for one agent, or ' +
+          'omit it for all live agents. State only — for the actual transcript/log use ' +
+          'get_session_data.',
         parameters: {
           type: 'object',
           properties: {
@@ -353,7 +345,7 @@ function turnContext(args: {
     for (const s of sessions) {
       lines.push(
         `  - ${s.title ? JSON.stringify(truncate(s.title, 80)) : '(untitled)'}` +
-          ` [${s.state}, afk=${s.afk}, grant=${s.grant}] id=${s.id}`,
+          ` [${s.state}, afk=${s.afk}] id=${s.id}`,
       );
     }
   lines.push('  (For what an agent is doing or to search its log, call get_session_data.)');

@@ -12,7 +12,6 @@ import type {
   AttentionKind,
   DecisionBehavior,
   DecisionSource,
-  GrantLevel,
   MessageChannel,
   SessionState,
 } from './enums.ts';
@@ -49,16 +48,15 @@ export interface AttentionEvent {
 }
 
 /**
- * The resolution of an AttentionEvent. A permission yields `behavior`
- * (+ optional `grant` escalation); a question/plan yields `answerText`.
- * `source` records how it was resolved (phone reply, dashboard, local
- * keyboard, or a timeout fallback — which is always fail-closed, never allow).
+ * The resolution of an AttentionEvent. A permission yields `behavior`;
+ * a question/plan yields `answerText`. `source` records how it was resolved
+ * (phone reply, dashboard, local keyboard, or a timeout fallback — which is
+ * always fail-closed, never allow).
  */
 export interface Decision {
   attentionId: string;
   behavior?: DecisionBehavior;
   answerText?: string;
-  grant?: GrantLevel;
   /** ISO-8601 timestamp. */
   resolvedAt: string;
   source: DecisionSource;
@@ -85,7 +83,6 @@ export interface SessionInfo {
   lastEventAt: string;
   state: SessionState;
   afk: AfkState;
-  grant: GrantLevel;
 }
 
 /** Max length of a session `title` (chars). Capped device-side at capture and
@@ -93,11 +90,11 @@ export interface SessionInfo {
 export const SESSION_TITLE_MAX_LEN = 80;
 
 /**
- * A paired machine, as tracked by the control plane. AFK + session grant are
- * MACHINE-WIDE (the PreToolUse hook reads one shared state file per device), so
- * they live here, not on the session — a device toggle is the single source of
- * truth that every live session on the device syncs down. `label` is a friendly
- * name (hostname → os → short id); `sessionCount` is the device's live sessions.
+ * A paired machine, as tracked by the control plane. AFK is MACHINE-WIDE (the
+ * PreToolUse hook reads one shared state file per device), so it lives here, not
+ * on the session — a device toggle is the single source of truth that every live
+ * session on the device syncs down. `label` is a friendly name (hostname → os →
+ * short id); `sessionCount` is the device's live sessions.
  */
 export interface DeviceInfo {
   id: string;
@@ -106,7 +103,6 @@ export interface DeviceInfo {
   os?: string;
   hostname?: string;
   afk: AfkState;
-  grant: GrantLevel;
   /** Killswitch state: revoked_at IS NULL AND disabled_at IS NULL. */
   enabled: boolean;
   /** Count of the device's non-ended sessions. */

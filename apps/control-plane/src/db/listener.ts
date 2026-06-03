@@ -3,9 +3,9 @@
  * and the legacy decisions long-poll.
  *
  * The schema fires three notifications:
- *   - `decision_ready`  on a decisions INSERT (verdict/answer/grant)  [session]
+ *   - `decision_ready`  on a decisions INSERT (verdict/answer)        [session]
  *   - `session_message` on a session_messages INSERT (free-text steer) [session]
- *   - `session_state`   on a sessions afk/grant/state change           [session + account]
+ *   - `session_state`   on a sessions state change                     [session + account]
  * We hold ONE dedicated pg client LISTENing on all three channels and fan each
  * notification out to in-process waiters. Waiters subscribe by KEY — sessionId
  * (the device's per-session stream) or accountId (the dashboard's account-scoped
@@ -149,8 +149,8 @@ function handleNotification(channel: string, payloadText: string | undefined): v
   // decision_ready / session_message / session_state carry a session_id → wake
   // the device's per-session stream.
   if (payload.session_id) sessionWaiters.wake(payload.session_id);
-  // device_state (machine-wide afk/grant) carries a device_id → wake every live
-  // stream for that device so each re-flushes its device-sourced {afk,grant}.
+  // device_state (machine-wide afk) carries a device_id → wake every live
+  // stream for that device so each re-flushes its device-sourced {afk}.
   if (channel === NotifyChannel.DEVICE_STATE && payload.device_id) {
     deviceWaiters.wake(payload.device_id);
   }
@@ -232,7 +232,7 @@ export function waitForAccountEvent(
 }
 
 /**
- * Wait until a `device_state` change (machine-wide afk/grant toggle) lands for
+ * Wait until a `device_state` change (machine-wide afk toggle) lands for
  * `deviceId`, or until `timeoutMs` elapses.
  */
 export function waitForDeviceEvent(

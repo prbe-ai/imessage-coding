@@ -27,7 +27,6 @@ import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   AfkState,
-  GrantLevel,
   SessionState,
   SseEvent,
   type DeviceInfo,
@@ -40,7 +39,6 @@ import {
   listDevices,
   listSessions,
   setAfk,
-  setGrant,
 } from "@/lib/api/home";
 import { chatDeepLink } from "@/lib/deep-link";
 import { extractError } from "@/lib/utils";
@@ -53,13 +51,9 @@ export default function HomePage() {
   // The agent number to chat WITH (distinct from phoneNumber, the user's own).
   const [agentNumber, setAgentNumber] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
-  // Devices carry the machine-wide afk/grant; sessions nest under them.
+  // Devices carry the machine-wide afk; sessions nest under them.
   const [devices, setDevices] = useState<DeviceInfo[] | null>(null);
   const [afkBusy, setAfkBusy] = useState(false);
-  // Per-DEVICE grant writes in flight — serialized so two overlapping POSTs
-  // can't race, and surfaced as `grantBusy` to disable the control meanwhile.
-  const grantPending = useRef<Set<string>>(new Set<string>());
-  const [grantBusyIds, setGrantBusyIds] = useState<readonly string[]>([]);
   const bootRef = useRef(false);
 
   // ── Boot: gate auth + linked number. ──────────────────────────────────
@@ -265,62 +259,6 @@ export default function HomePage() {
     [afkBusy],
   );
 
-  // ── Per-device grant change (machine-wide). ───────────────────────────
-  const onDeviceGrant = useCallback(
-    async (deviceId: string, next: GrantLevel) => {
-      // Serialize per device: ignore a change while this device's grant write is
-      // still in flight, so two overlapping POSTs can't land out of order and
-      // leave the authoritative grant disagreeing with the user's last choice.
-      if (grantPending.current.has(deviceId)) return;
-      grantPending.current.add(deviceId);
-      setGrantBusyIds([...grantPending.current]);
-
-      // Optimistic flip; remember the prior level to roll back on failure.
-      let prevGrant: GrantLevel | undefined;
-      setDevices((prev) =>
-        prev
-          ? prev.map((d) => {
-              if (d.id !== deviceId) return d;
-              prevGrant = d.grant;
-              return { ...d, grant: next };
-            })
-          : prev,
-      );
-
-      try {
-        const res = await setGrant(next, deviceId);
-        // updated === 0 means no device matched (e.g. revoked between render and
-        // click) — the write never took, so treat it as a failure.
-        if (res.updated === 0) throw new Error("Device is no longer available.");
-        // Reconcile to the server's authoritative level, not our optimistic one,
-        // so any future server-side capping can't be masked by the UI.
-        setDevices((prev) =>
-          prev
-            ? prev.map((d) =>
-                d.id === deviceId ? { ...d, grant: res.grant } : d,
-              )
-            : prev,
-        );
-      } catch (err) {
-        if (prevGrant !== undefined) {
-          const restore = prevGrant;
-          setDevices((prev) =>
-            prev
-              ? prev.map((d) =>
-                  d.id === deviceId ? { ...d, grant: restore } : d,
-                )
-              : prev,
-          );
-        }
-        toast.error(extractError(err, "Couldn't update grant."));
-      } finally {
-        grantPending.current.delete(deviceId);
-        setGrantBusyIds([...grantPending.current]);
-      }
-    },
-    [],
-  );
-
   const userEmail = session?.user?.email ?? null;
 
   if (isPending || !phoneNumber) {
@@ -367,7 +305,7 @@ export default function HomePage() {
           </div>
         </section>
 
-        {/* Devices (AFK + grant live here, machine-wide) → sessions nest under each. */}
+        {/* Devices (AFK lives here, machine-wide) → sessions nest under each. */}
         <section className="space-y-4">
           <div className="flex items-center justify-between border-b border-outline-variant/40 pb-2">
             <h2 className="text-lg font-bold tracking-tight">Devices</h2>
@@ -398,9 +336,7 @@ export default function HomePage() {
                   device={d}
                   sessions={sessionsForDevice(d.id)}
                   afkBusy={afkBusy}
-                  grantBusy={grantBusyIds.includes(d.id)}
                   onToggleAfk={(next) => void onDeviceAfk(d.id, next)}
-                  onSetGrant={(next) => void onDeviceGrant(d.id, next)}
                 />
               ))}
             </div>

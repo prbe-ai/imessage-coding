@@ -8,6 +8,7 @@
  * names.
  */
 import {
+  ATTENTION_TEXT_MAX_LEN,
   AfkState,
   AgentKind,
   AttentionKind,
@@ -736,6 +737,12 @@ export async function insertAttentionEvent(args: {
   event: AttentionEvent;
 }): Promise<AttentionEvent> {
   const e = args.event;
+  // Re-clamp the device-supplied text at the single write path: the device caps
+  // these at egress (sanitizeText, 2000), but a forged/buggy client must not store
+  // an oversized body that the orchestrator later renders in full. Enforcing it
+  // here (not just at the route) covers every caller — routes, scripts, tests.
+  const clampText = (s: string | undefined): string | null =>
+    s === undefined ? null : s.length > ATTENTION_TEXT_MAX_LEN ? s.slice(0, ATTENTION_TEXT_MAX_LEN) : s;
   const row = await queryOne<AttentionRow>(
     `INSERT INTO attention_events
        (device_id, session_id, account_id, kind, tool_name, description,
@@ -752,8 +759,8 @@ export async function insertAttentionEvent(args: {
       args.accountId,
       e.kind,
       e.toolName ?? null,
-      e.description ?? null,
-      e.inputPreview ?? null,
+      clampText(e.description),
+      clampText(e.inputPreview),
       e.requestId ?? null,
       e.qid ?? null,
     ],

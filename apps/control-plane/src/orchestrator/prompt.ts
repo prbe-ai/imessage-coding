@@ -319,11 +319,24 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
   ];
 }
 
-function describeAttention(e: AttentionEvent): string {
+/** Render an attention as one line of turn context. `fullDescription` is set ONLY
+ *  for the attention being actively relayed (the agent_event trigger): its
+ *  `description` IS the message the user must answer, so it must arrive in full,
+ *  never clipped to a preview. In the PENDING index a short preview is enough to
+ *  identify + tap-back an item, and keeping it short bounds the prompt when many
+ *  agents are parked. Either way `description`/`inputPreview` are untrusted text, so
+ *  collapse whitespace (oneLine) first — that stops embedded newlines forging prompt
+ *  structure (fake "THE USER JUST SENT:" / PENDING sections) without losing content.
+ *  A full `description` is bounded on ingest by ATTENTION_TEXT_MAX_LEN. */
+function describeAttention(e: AttentionEvent, opts: { fullDescription?: boolean } = {}): string {
   const parts = [`id=${e.id}`, `session=${e.sessionId}`, `kind=${e.kind}`];
   if (e.toolName) parts.push(`tool=${e.toolName}`);
-  if (e.description) parts.push(`desc=${truncate(e.description, 200)}`);
-  if (e.inputPreview) parts.push(`input=${truncate(e.inputPreview, 200)}`);
+  if (e.description) {
+    const desc = oneLine(e.description);
+    parts.push(`desc=${opts.fullDescription ? desc : truncate(desc, 200)}`);
+  }
+  // `inputPreview` is the raw tool-call blob (bash command, file/diff) — always a short preview.
+  if (e.inputPreview) parts.push(`input=${truncate(oneLine(e.inputPreview), 200)}`);
   return `- ${parts.join(' ')}`;
 }
 
@@ -407,7 +420,7 @@ function turnContext(args: {
   } else if (trigger.kind === 'agent_event') {
     lines.push(
       'AN AGENT JUST NEEDS ATTENTION — decide whether/how to notify the user:',
-      `  ${describeAttention(trigger.attention)}`,
+      `  ${describeAttention(trigger.attention, { fullDescription: true })}`,
     );
   } else {
     // agent_message: a fire-and-forget status/result to relay. The text is the

@@ -99,6 +99,14 @@ export interface SessionInfo {
  *  re-clamped server-side as defense-in-depth. */
 export const SESSION_TITLE_MAX_LEN = 80;
 
+/** Max length (chars) of an attention `description` / `inputPreview` the control
+ *  plane will store. Capped device-side at egress (`sanitizeText`); re-clamped
+ *  server-side as defense-in-depth so a forged/buggy client can't bloat the
+ *  orchestrator prompt with an oversized body. Generous on purpose — a real
+ *  question or preview is far shorter; this is purely an upper bound on abuse,
+ *  not the display limit (the orchestrator renders a `description` in full). */
+export const ATTENTION_TEXT_MAX_LEN = 4_000;
+
 /**
  * A paired machine, as tracked by the control plane. AFK is MACHINE-WIDE (the
  * PreToolUse hook reads one shared state file per device), so it lives here, not

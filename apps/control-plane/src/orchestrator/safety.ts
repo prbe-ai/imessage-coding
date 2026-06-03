@@ -1,27 +1,21 @@
 /**
- * SAFETY — the deterministic destructive-approval gate.
+ * SAFETY HINTS — advisory signals the orchestrator LLM weighs; NOT hard gates.
  *
- * The hard invariant (fail-CLOSED): the orchestrator must NEVER auto-`allow` a
- * DESTRUCTIVE permission by LLM inference. A destructive allow is permitted
- * ONLY deterministically:
+ * Per the user's directive ("drop binding everywhere; the LLM has final say"),
+ * there is no longer a code-enforced destructive-approval gate. The model decides
+ * every allow/deny. This module just provides the pure, tested signals it uses:
  *
- *   (a) the inbound is a TAP-BACK (iMessage reaction) BOUND to a specific
- *       attention event (matched by the notifyMessageId of the outbound phone
- *       notification that fronted it). NOTE: only tap-backs carry this binding —
- *       AgentPhone does not forward typed inline-reply linkage (verified live
- *       2026-06-02), so a typed reply never reaches (a); it can only match (b). OR
- *   (b) there is EXACTLY ONE pending attention event for the account and it is
- *       unambiguously the target.
- *
- * If neither holds and the reply would allow a destructive op, the orchestrator
- * must REPLY asking which (it never guesses). Steering, questions, plan
- * approvals, denials, and answers are handled by the LLM; only the destructive
- * ALLOW path is locked behind this deterministic gate.
+ *   - `deterministicTarget` — which pending attention a reply UNAMBIGUOUSLY refers
+ *     to (a tap-back reaction bound by notifyMessageId, or a lone pending). Used as
+ *     a HINT to pick a target and surfaced to the model; never a refusal.
+ *   - `isDestructiveTool` — classifies a permission's tool (file-edits are safe;
+ *     Bash/network/unknown are destructive). Used to decide whether to NOTIFY the
+ *     user before a permission and to phrase the hint — not to block an allow.
+ *   - `actionAllowedForKind` — the action↔kind shape rules (approve→plan, allow→
+ *     permission, answer/deny→any). Structural validity, not a safety lock.
  *
  * "Destructive" = anything other than the file-edit tools (Edit/Write/MultiEdit/
- * NotebookEdit). File-edits are non-destructive (always allowable); Bash and
- * everything else are destructive and require a deterministic binding — never
- * allowed by inference. We classify conservatively: UNKNOWN tools are destructive.
+ * NotebookEdit). We classify conservatively: UNKNOWN tools are destructive.
  */
 import {
   AttentionKind,
@@ -120,37 +114,6 @@ export function deterministicTarget(
   return undefined;
 }
 
-/** A destructive-allow safety verdict. */
-export interface DestructiveAllowCheck {
-  /** True if a destructive ALLOW is permitted for `target` under the rules. */
-  permitted: boolean;
-  /** Reason (for logging / clarify message), when not permitted. */
-  reason?: string;
-}
-
-/**
- * Decide whether allowing `target` (a permission) is safe given how the inbound
- * reply bound to it. Non-destructive tools are always allowable; destructive
- * tools require a deterministic binding.
- */
-export function checkDestructiveAllow(
-  target: AttentionEvent,
-  binding: 'deterministic' | 'inferred',
-): DestructiveAllowCheck {
-  if (!isPermissionAttention(target)) {
-    // Only permission events can be "allowed"; non-permissions are answered.
-    return { permitted: false, reason: 'target is not a permission' };
-  }
-  if (!isDestructiveTool(target.toolName)) {
-    return { permitted: true };
-  }
-  if (binding === 'deterministic') {
-    return { permitted: true };
-  }
-  return {
-    permitted: false,
-    reason:
-      'destructive permission may only be allowed via a deterministic binding ' +
-      '(a tap-back reaction, or a single pending request) — never by inference',
-  };
-}
+// NOTE: the former `checkDestructiveAllow` hard gate has been removed — the model
+// now decides every allow/deny (the user dropped binding everywhere). `isDestructiveTool`
+// above stays as a HINT/notify classifier, and `deterministicTarget` as a binding hint.

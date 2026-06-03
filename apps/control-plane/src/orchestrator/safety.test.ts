@@ -1,9 +1,10 @@
 /**
- * Critical-path unit tests for the deterministic destructive-approval gate
- * (Lane E, D5). These are the hard fail-closed invariants: a destructive op
- * (Bash, etc.) must NEVER be auto-allowed by inference, and an ambiguous /
- * unresolvable binding must force a clarify rather than silently approving the
- * wrong thing. Pure logic — no DB, no network.
+ * Unit tests for the SAFETY HINT helpers. There is no longer a code-enforced
+ * destructive-approval gate (the user dropped binding everywhere — the LLM has
+ * final say). What remains are the pure signals the model weighs: which pending
+ * attention a reply unambiguously refers to (`deterministicTarget`), tool
+ * classification (`isDestructiveTool`/`isPermissionAttention`), and the action↔kind
+ * shape rules (`actionAllowedForKind`). Pure logic — no DB, no network.
  */
 import { describe, expect, test } from 'bun:test';
 import {
@@ -15,7 +16,6 @@ import {
 } from '@imsg/shared';
 import {
   actionAllowedForKind,
-  checkDestructiveAllow,
   deterministicTarget,
   isDestructiveTool,
   isPermissionAttention,
@@ -80,37 +80,6 @@ describe('deterministicTarget', () => {
 
   test('zero pending, no binding -> undefined', () => {
     expect(deterministicTarget(inbound(), [])).toBeUndefined();
-  });
-});
-
-describe('checkDestructiveAllow', () => {
-  test('destructive tool (Bash) is blocked under an inferred binding', () => {
-    const target = attention({ toolName: 'Bash', kind: AttentionKind.PERMISSION });
-    const res = checkDestructiveAllow(target, 'inferred');
-    expect(res.permitted).toBe(false);
-    expect(res.reason).toBeDefined();
-  });
-
-  test('destructive tool (Bash) is permitted under a deterministic binding', () => {
-    const target = attention({ toolName: 'Bash', kind: AttentionKind.PERMISSION });
-    expect(checkDestructiveAllow(target, 'deterministic').permitted).toBe(true);
-  });
-
-  test('non-destructive tool (Edit) is permitted even under inference', () => {
-    const target = attention({ toolName: 'Edit', kind: AttentionKind.PERMISSION });
-    expect(checkDestructiveAllow(target, 'inferred').permitted).toBe(true);
-  });
-
-  test('unknown tool is destructive -> blocked under inference', () => {
-    const target = attention({ toolName: undefined, kind: AttentionKind.PERMISSION });
-    expect(checkDestructiveAllow(target, 'inferred').permitted).toBe(false);
-  });
-
-  test('a non-permission attention can never be allowed', () => {
-    const target = attention({ kind: AttentionKind.QUESTION, toolName: 'Edit' });
-    const res = checkDestructiveAllow(target, 'deterministic');
-    expect(res.permitted).toBe(false);
-    expect(res.reason).toMatch(/not a permission/);
   });
 });
 

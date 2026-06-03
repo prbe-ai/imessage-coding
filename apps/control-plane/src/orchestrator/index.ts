@@ -11,11 +11,15 @@
  *     This is the SPLIT: a status relay never becomes an attention / `resolved`
  *     row — the server agent relays it and drops it.
  *
- * SAFETY (unchanged contract, enforced in code — never on the model's say-so):
- *   - A destructive permission is allowed ONLY via a deterministic binding
- *     (a tap-back reaction, or a single pending — a typed reply carries no link)
- *     — `message_agent` (action `allow`) checks `deterministicTarget()` +
- *     `checkDestructiveAllow()`, refuses else.
+ * ROUTING + SAFETY (the model decides; the code no longer locks or binds):
+ *   - Plain `message_agent` text is ALWAYS a steer — a session waiting on a relayed
+ *     question simply receives the steer and treats it as the answer. There is no
+ *     code-level "this text resolves that question" auto-binding.
+ *   - allow/deny/approve are the structured verdicts; the LLM has FINAL SAY on a
+ *     destructive `allow` (no deterministic-binding gate). A tap-back reaction and a
+ *     single-pending count are surfaced as HINTS the model weighs (see safety.ts
+ *     `deterministicTarget`), never a hard refusal. `surface_request` stays available
+ *     to post a clean, tappable request when the model wants one.
  *   - The agent-driven turns expose only `message_user` (notify; the human resolves).
  * Fail-closed everywhere: a turn error sends a safe clarify (user path) or falls
  * back to the static notification (agent-event path) — never an unsafe action.
@@ -57,7 +61,6 @@ import { hashToken } from '../auth/device.ts';
 import { runAssistantTurn, type ToolExecutor } from './llm.ts';
 import { assistantTools, buildTurnMessages, type TurnMode } from './prompt.ts';
 import {
-  checkDestructiveAllow,
   deterministicTarget,
   isDestructiveTool,
   isPermissionAttention,
@@ -330,7 +333,7 @@ async function runAgentEventTurnLocked(
  * pile. Best-effort: a status update is not safety-critical.
  */
 export function relayAgentMessage(
-  message: { sessionId: string; text: string },
+  message: { sessionId: string; text: string; expectsReply?: boolean },
   accountId: string,
   transport: Transport,
 ): Promise<TurnResult> {
@@ -340,7 +343,7 @@ export function relayAgentMessage(
 }
 
 async function relayAgentMessageLocked(
-  message: { sessionId: string; text: string },
+  message: { sessionId: string; text: string; expectsReply?: boolean },
   accountId: string,
   transport: Transport,
 ): Promise<TurnResult> {
@@ -363,7 +366,12 @@ async function relayAgentMessageLocked(
       deliveries: [],
     };
     const messages = buildTurnMessages({
-      trigger: { kind: 'agent_message', sessionId: message.sessionId, text: message.text },
+      trigger: {
+        kind: 'agent_message',
+        sessionId: message.sessionId,
+        text: message.text,
+        expectsReply: message.expectsReply,
+      },
       pending,
       sessions,
       history,
@@ -508,11 +516,12 @@ async function execMessageUser(ctx: DispatchCtx, args: Record<string, unknown>):
 }
 
 /**
- * message_agent: send a message to a coding agent. Plain text is "just text back
- * and forth" — if the agent is blocked on a question/plan that text IS the answer
- * (resolve it, so it leaves the pending pile and the agent's expect_reply matches),
- * otherwise it's a steer. An `action` is the one structured path: a permission
- * verdict (allow/deny) or a plan approval, gated in code for destructive allows.
+ * message_agent: send a message to a coding agent. Plain text is ALWAYS a steer —
+ * "just text back and forth". A session that was waiting on a relayed question
+ * simply receives the steer and treats it as the answer; there is no code-level
+ * auto-binding of "this text resolves that question" (the model decides what its
+ * text means, and `expect_reply` is only a hint — see prompt.ts). An `action` is the
+ * one structured path: a permission verdict (allow/deny) or a plan approval.
  */
 async function execMessageAgent(ctx: DispatchCtx, args: Record<string, unknown>): Promise<string> {
   const sessionId = typeof args.session === 'string' ? args.session.trim() : '';
@@ -523,21 +532,6 @@ async function execMessageAgent(ctx: DispatchCtx, args: Record<string, unknown>)
   if (action) return resolveSessionAction(ctx, sessionId, action);
 
   if (!text) return 'error: pass text (a message to the agent) or an action';
-
-  const answerable = pickSessionTarget(ctx, sessionId, [AttentionKind.QUESTION, AttentionKind.PLAN]);
-  if (answerable) {
-    const dec = await resolveAttention({
-      accountId: ctx.accountId,
-      attentionId: answerable.id,
-      answerText: text,
-    });
-    if (dec) {
-      ctx.actions.push(`answered ${answerable.kind} ${shortId(answerable.id)}`);
-      ctx.deliveries.push({ id: dec.inboxId, label: 'your answer' });
-      return queuedForSession('answer recorded');
-    }
-    // Raced to resolved between snapshot and now — fall through to a plain steer.
-  }
 
   // Tenant-scoped enqueue: only succeeds for a live session in this account.
   const res = await enqueueReply({ sessionId, accountId: ctx.accountId, text });
@@ -606,32 +600,13 @@ async function resolveSessionAction(
 }
 
 /**
- * The destructive-allow gate, keyed to a specific permission attention. A
- * destructive allow goes through ONLY with a deterministic tap-back binding; else
- * we re-surface the exact request and ask the user to tap-back. (Unchanged contract.)
+ * Allow a permission. The LLM has FINAL SAY — there is no deterministic-binding
+ * gate (per the user's "drop binding everywhere"). The tap-back / single-pending
+ * signal is handed to the model as a HINT (see prompt.ts + `deterministicTarget`),
+ * and the model may still `surface_request` to post a clean tappable request, but
+ * neither is required to allow — even a destructive op.
  */
 async function allowPermission(ctx: DispatchCtx, target: AttentionEvent): Promise<string> {
-  // Require PROOF the user saw a code-generated, accurate notification for THIS
-  // request (notify_message_id is set only by the system — notifyStatic /
-  // surfaceRequestMessage — never by LLM prose). If it's missing, surface it now
-  // rather than approving an op the user never saw described.
-  if (isDestructiveTool(target.toolName) && !target.notifyMessageId) {
-    await surfaceRequestMessage(ctx, target);
-    return 'refused: I had not shown the user this exact request with a description yet — I just posted it as a fresh message. Ask them to TAP-BACK 👍 allow / 👎 deny on THAT message.';
-  }
-  // THE GATE: destructive allows require a deterministic binding. The model names a
-  // target; we only treat it as deterministic if it IS the bound one.
-  const binding =
-    ctx.boundTarget && ctx.boundTarget.id === target.id ? 'deterministic' : 'inferred';
-  const check = checkDestructiveAllow(target, binding);
-  if (!check.permitted) {
-    // CODE BACKSTOP for the approve-loop: re-post the request as a fresh, tap-backable
-    // message (move the binding onto it) so a tap-back has something to land on, then
-    // point the user at THAT message — never tell them to "reply" (a typed reply
-    // carries no link — see safety.ts).
-    await surfaceRequestMessage(ctx, target);
-    return `refused: ${check.reason}. I re-posted that exact request as a fresh message — ask the user to TAP-BACK 👍 allow / 👎 deny on THAT message (a typed reply cannot bind).`;
-  }
   const dec = await resolveAttention({
     accountId: ctx.accountId,
     attentionId: target.id,
@@ -650,21 +625,6 @@ function pickStrict(ctx: DispatchCtx, candidates: AttentionEvent[]): AttentionEv
   if (bound) return bound;
   if (candidates.length === 1) return candidates[0];
   return undefined;
-}
-
-/** Pick the target a plain-text message resolves: the bound one, the lone candidate,
- *  else the most-recent of the given kinds (answering text is safe to apply to the
- *  latest question/plan; the destructive gate guards the only unsafe path). */
-function pickSessionTarget(
-  ctx: DispatchCtx,
-  sessionId: string,
-  kinds: AttentionKind[],
-): AttentionEvent | undefined {
-  const candidates = ctx.pending.filter(
-    (e) => e.sessionId === sessionId && kinds.includes(e.kind),
-  );
-  if (candidates.length === 0) return undefined;
-  return pickStrict(ctx, candidates) ?? candidates[candidates.length - 1];
 }
 
 /** get_session_state: a compact state line per session (one, or all live). */

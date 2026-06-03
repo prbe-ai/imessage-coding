@@ -262,9 +262,13 @@ deviceRoutes.post(DeviceApiRoute.MESSAGE, async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as {
     sessionId?: unknown;
     text?: unknown;
+    expectsReply?: unknown;
   };
   const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
   const text = typeof body.text === 'string' ? body.text.trim() : '';
+  // `expectsReply` is the demoted `expect_reply`: a HINT (not a lock) that the agent
+  // is awaiting an answer, so the orchestrator surfaces the relay as a question.
+  const expectsReply = body.expectsReply === true;
   if (!sessionId) return c.json({ error: 'missing_session_id' }, 400);
   if (!isUuid(sessionId)) return c.json({ error: 'invalid_session_id' }, 400);
   if (!text) return c.json({ error: 'missing_text' }, 400);
@@ -297,9 +301,11 @@ deviceRoutes.post(DeviceApiRoute.MESSAGE, async (c) => {
   }
   lastStatusRelayAt.set(sessionId, now);
 
-  void relayAgentMessage({ sessionId, text }, auth.accountId, getTransport()).catch((err) => {
-    console.error('[device/message] relay turn failed', err);
-  });
+  void relayAgentMessage({ sessionId, text, expectsReply }, auth.accountId, getTransport()).catch(
+    (err) => {
+      console.error('[device/message] relay turn failed', err);
+    },
+  );
   return c.json({ relayed: true });
 });
 

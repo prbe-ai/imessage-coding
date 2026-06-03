@@ -79,7 +79,7 @@ function emitPerm(behavior: 'allow' | 'deny'): never {
 // channel source name differs, set by the channel server).
 const ASK_REASON =
   'The user is AFK (away). Do NOT answer this yourself and do NOT retry AskUserQuestion. Call the `message_user` tool now ' +
-  'with expect_reply: true, the exact question and ALL options, and a unique reply_tag. Then STOP and end your turn. The user ' +
+  'with expect_reply: true and the exact question and ALL options. Then STOP and end your turn. The user ' +
   'will reply via a <channel source="imsg-device"> message; resume using that answer.';
 
 const raw = await Bun.stdin.text();

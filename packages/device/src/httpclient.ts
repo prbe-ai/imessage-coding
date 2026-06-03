@@ -81,7 +81,7 @@ async function request(
   }
 
   const headers: Record<string, string> = {
-    'User-Agent': 'imsg-device/0.1.7',
+    'User-Agent': 'imsg-device/0.1.10',
     'X-Trace-Id': traceId(),
   };
   if (body !== null) headers['Content-Type'] = 'application/json';

@@ -146,7 +146,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.9' },
+  { name: 'imsg-device', version: '0.1.10' },
   {
     capabilities: {
       experimental: {
@@ -160,21 +160,19 @@ const mcp = new Server(
       'they drive you remotely, use the `message_user` tool — report your result when you FINISH a task or hit a ' +
       'meaningful milestone (leave expect_reply false; it is delivered and needs no response). IF a hook denies an ' +
       'AskUserQuestion or ExitPlanMode call, the user is away from their keyboard (AFK): follow it — call ' +
-      '`message_user` with expect_reply: true, the full question/plan text (all options verbatim), and the reply_tag ' +
-      'it gives you, then STOP and end your turn (do not exit, do not guess, do not retry the denied tool). Their ' +
-      'answer arrives later as a <channel source="imsg-device"> message; match it by reply_tag, treat it as ' +
-      "authoritative, and resume. message_user reaches the user's phone over iMessage.",
+      '`message_user` with expect_reply: true and the full question/plan text (all options verbatim), then STOP and ' +
+      'end your turn (do not exit, do not guess, do not retry the denied tool). The user\'s reply arrives later as a ' +
+      '<channel source="imsg-device"> message; treat it as authoritative and resume. message_user reaches the ' +
+      "user's phone over iMessage.",
   },
 );
 
-// message_user: the ONE communication tool the model calls to reach the user.
-// Two modes, split by expect_reply:
-//   expect_reply=false (default) → STATUS/RESULT. Fire-and-forget: POST to the
-//     /message route; the server agent relays it and drops it (no attention,
-//     no pending lifecycle).
-//   expect_reply=true            → NEEDS AN ANSWER. Durable round-trip via the
-//     attention path (QUESTION); the agent stops and waits, and the user's answer
-//     is pushed back as a <channel> message.
+// message_user: the ONE communication tool the model calls to reach the user. It
+// ALWAYS relays the message to the server agent via the /message route (no durable
+// attention, no binding, no pending lifecycle). `expect_reply` is just a HINT: when
+// true the relay is tagged so the orchestrator surfaces it as a question — the agent
+// stops and the user's reply comes back as a <channel> message. The orchestrator (an
+// LLM) decides where that reply goes; nothing is locked or auto-bound in code.
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -183,9 +181,9 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         'Send a message to the user (who is driving you remotely over iMessage). Use this to keep them posted: ' +
         'report your result when you FINISH a task or hit a meaningful milestone (do NOT narrate every step). Leave ' +
         'expect_reply false for those status updates — they are delivered and need no response. Set expect_reply: true ' +
-        'ONLY when you genuinely need an answer to continue (e.g. a hook just told you the user is AFK and to relay a ' +
-        'question or plan); then STOP and wait — the answer arrives as a <channel source="imsg-device"> message you ' +
-        'should treat as authoritative.',
+        'when you need an answer to continue (e.g. a hook told you the user is AFK and to relay a question or plan); ' +
+        'then STOP and wait — the user\'s reply arrives as a <channel source="imsg-device"> message you should treat ' +
+        'as authoritative.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -193,12 +191,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           expect_reply: {
             type: 'boolean',
             description:
-              'True only if you need an answer before continuing (you will stop and wait). Omit/false for status or results.',
-          },
-          reply_tag: {
-            type: 'string',
-            description:
-              'Optional correlation id echoed back with the answer (use the reply_tag a hook gave you). Only meaningful with expect_reply: true.',
+              'True if you want an answer (you will stop and wait); the orchestrator surfaces your message as a question. Omit/false for status or results.',
           },
         },
         required: ['text'],
@@ -209,27 +202,24 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === MESSAGE_USER_TOOL) {
-    const { text, expect_reply, reply_tag } = req.params.arguments as {
+    const { text, expect_reply } = req.params.arguments as {
       text: string;
       expect_reply?: boolean;
-      reply_tag?: string;
     };
     const clean = sanitizeText(text);
-    if (expect_reply) {
-      // Needs an answer → durable round-trip via the attention path. The agent
-      // stops and waits; the user's answer is pushed back as a <channel> message.
-      await emitAttention({
-        kind: AttentionKind.QUESTION,
-        description: clean,
-        qid: reply_tag ?? randomUUID(),
-      });
-      log('message_user_ask', { len: text.length });
-      return { content: [{ type: 'text', text: "sent; waiting for the user's reply" }] };
-    }
-    // Fire-and-forget status/result → relayed by the server agent and dropped.
-    await sendStatusMessage(clean);
-    log('message_user_status', { len: text.length });
-    return { content: [{ type: 'text', text: 'sent' }] };
+    // Either way we RELAY (no durable attention, no binding). `expect_reply` only
+    // TAGS the relay so the orchestrator surfaces it as a question; the agent stops
+    // and the user's reply comes back as a <channel> message, routed by the LLM.
+    await sendStatusMessage(clean, { expectsReply: Boolean(expect_reply) });
+    log(expect_reply ? 'message_user_ask' : 'message_user_status', { len: text.length });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: expect_reply ? "sent; the user's reply will come back as a message" : 'sent',
+        },
+      ],
+    };
   }
   throw new Error(`unknown tool: ${req.params.name}`);
 });
@@ -240,7 +230,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
  * by the killswitch; best-effort (a status update is not safety-critical), never
  * throws. AFK-gating lives server-side (mirrors the attention path).
  */
-async function sendStatusMessage(text: string): Promise<void> {
+async function sendStatusMessage(
+  text: string,
+  opts: { expectsReply?: boolean } = {},
+): Promise<void> {
   await sessionReady; // tag under the REAL session id so the relay attributes it
   const token = loadToken();
   if (!token) {
@@ -254,7 +247,7 @@ async function sendStatusMessage(text: string): Promise<void> {
   try {
     const resp = await postJson(
       deviceApiUrl(DeviceApiRoute.MESSAGE),
-      JSON.stringify({ sessionId: SESSION_ID, text }),
+      JSON.stringify({ sessionId: SESSION_ID, text, expectsReply: opts.expectsReply ?? false }),
       { bearer: token },
     );
     if (resp.classification === Classification.SUCCESS) log('status_sent', { len: text.length });

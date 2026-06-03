@@ -169,14 +169,13 @@ describe('describeAttention — full question, capped tool preview', () => {
   });
 });
 
-// REGRESSION GUARD for the approve-loop: AgentPhone forwards NO link for a typed
-// inline reply, so "reply directly to this message" guidance can never bind and
-// traps the user in a loop (only a tap-back/reaction binds). The model's standing
-// instructions must never instruct a typed reply to choose/approve — only a
-// tap-back — and message_user must keep its `surface_request` option as the way to
-// present a tappable permission. Locks the invariants so a future copy edit can't
-// reintroduce them.
-describe('binding guidance — never instruct a typed reply to bind', () => {
+// REGRESSION GUARD for the approve-loop UX: AgentPhone forwards NO link for a typed
+// inline reply, so "reply directly to this message" guidance traps the user in a loop
+// (only a tap-back/reaction points at a specific message). Binding is no longer a hard
+// gate (the LLM has final say on allow/deny), but tap-back stays the clean SIGNAL: the
+// prompt must still never tell the user to "reply directly" to choose, and message_user
+// must keep `surface_request` as the tappable way to present a request.
+describe('binding guidance — tap-back is the signal, never "reply directly"', () => {
   const agentDesc = (): string =>
     assistantTools('user_message').find((t) => t.function.name === 'message_agent')!.function
       .description;
@@ -198,6 +197,23 @@ describe('binding guidance — never instruct a typed reply to bind', () => {
   test('message_user keeps surface_request — the tappable way to present a permission', () => {
     expect(userDesc().includes('surface_request')).toBe(true);
     expect(/tap-backable|tap-back/i.test(userDesc())).toBe(true);
+  });
+});
+
+// REGRESSION GUARD for the misroute bug: a stale pending question made the orchestrator
+// funnel an unrelated user text ("hello?", "respond with yes") into that question as its
+// answer. The code no longer auto-binds (plain text always steers); the prompt carries the
+// guardrail + the "final say" framing. Lock them so a copy edit can't silently drop them.
+describe('routing guardrail — do not funnel unrelated messages; LLM has final say', () => {
+  const sp = systemPrompt();
+
+  test('a reply is an answer only if it clearly responds — never funnel an unrelated message', () => {
+    expect(/clearly responds/i.test(sp)).toBe(true);
+    expect(/funnel/i.test(sp)).toBe(true);
+  });
+
+  test('allow/deny is framed as the model\'s final say (no code gate)', () => {
+    expect(/final say/i.test(sp)).toBe(true);
   });
 });
 

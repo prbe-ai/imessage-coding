@@ -53,6 +53,7 @@ import {
   resolveAttention,
   setAttentionNotifyMessageId,
   setDevicesAfkForSessions,
+  type OnboardingLinkFailure,
   type ReapedSession,
   type SessionActivityLine,
 } from '../db/repo.ts';
@@ -110,20 +111,33 @@ export async function orchestrate(
     // ONBOARDING: an unverified number texts "hey! this is <token>".
     const token = extractOnboardingToken(inbound.text);
     if (token) {
-      const linked = await consumeOnboardingTokenAndLinkNumber({
+      const result = await consumeOnboardingTokenAndLinkNumber({
         onboardingTokenHash: hashToken(token),
         phoneNumber: inbound.from,
       });
-      if (linked) {
-        await logMessage({ accountId: linked.accountId, direction: 'inbound', body: inbound.text });
+      if (result.ok) {
+        await logMessage({ accountId: result.accountId, direction: 'inbound', body: inbound.text });
         await sendToUser(
           transport,
-          linked.accountId,
+          result.accountId,
           "You're all set — your number is linked. Let's get coding.",
           { replyToMessageId: inbound.messageId, fallbackTo: inbound.from },
         );
-        return { handled: true, accountId: linked.accountId, reason: 'onboarding_linked' };
+        return { handled: true, accountId: result.accountId, reason: 'onboarding_linked' };
       }
+      // Token-shaped but it didn't link — tell the sender WHY (expired / used /
+      // invalid) instead of staying silent. They already proved intent by texting
+      // a code, so a targeted reason leaks no account recognition (a non-token
+      // text still falls through to the silent no-op below). Sent directly to the
+      // sender — there's no verified account thread to route through yet.
+      await transport
+        .send({
+          to: inbound.from,
+          text: onboardingFailureReply(result.reason),
+          replyToMessageId: inbound.messageId,
+        })
+        .catch((err) => console.error('[onboarding] failed-reply send failed', err));
+      return { handled: true, reason: `onboarding_failed_${result.reason}` };
     }
     // Unknown/unverified, no valid token: no-op (don't leak recognition).
     return { handled: false, reason: 'unknown_or_unverified_sender' };
@@ -779,6 +793,23 @@ export function extractOnboardingToken(text: string): string | undefined {
   const bare = text.trim();
   if (/^[A-Za-z0-9_-]{28,}$/.test(bare)) return bare;
   return undefined;
+}
+
+/**
+ * User-facing reply when a texted-in onboarding code didn't link. Each reason
+ * points the user back to the dashboard to recover; sent only when the inbound
+ * actually contained a token-shaped string (see orchestrate), so it never fires
+ * on ordinary chatter and leaks no account recognition.
+ */
+function onboardingFailureReply(reason: OnboardingLinkFailure): string {
+  switch (reason) {
+    case 'expired':
+      return 'That linking code has expired. Open the dashboard and tap “Start texting” to grab a fresh one.';
+    case 'used':
+      return 'That linking code was already used. If you still need to link this number, start over from the dashboard.';
+    case 'invalid':
+      return "That linking code isn't valid. Open the dashboard and tap “Start texting” to get a new one.";
+  }
 }
 
 /** Resolve a model-named attention id to an account-scoped attention. */

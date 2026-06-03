@@ -219,26 +219,36 @@ export async function findVerifiedPhoneForAccount(
  * completes onboarding: the user texts "hey! this is <token>" from their phone,
  * we bind that number to their account so all future inbound resolves via
  * findAccountByPhone, and the dashboard's status poll sees a verified
- * conversation. Returns the account/conversation, or undefined if the token is
- * unknown / expired / already used.
+ * conversation. Returns { ok: true, ... } on success, or { ok: false, reason }
+ * naming WHY it failed (invalid / expired / used) so the caller can text the
+ * sender a specific message instead of staying silent.
  */
+export type OnboardingLinkFailure = 'invalid' | 'expired' | 'used';
+
+export type OnboardingLinkResult =
+  | { ok: true; accountId: string; conversationId: string }
+  | { ok: false; reason: OnboardingLinkFailure };
+
 export async function consumeOnboardingTokenAndLinkNumber(args: {
   onboardingTokenHash: string;
   phoneNumber: string;
-}): Promise<{ accountId: string; conversationId: string } | undefined> {
+}): Promise<OnboardingLinkResult> {
   return withTransaction(async (client) => {
-    // Lock the token row; only succeed if unused and unexpired (single-use).
-    const tokenRes = await client.query<OnboardingTokenRow>(
-      `SELECT token_hash, account_id, sso_session_id, expires_at, used_at, attempts
+    // Lock the token row by hash WITHOUT the validity filter so we can tell the
+    // user WHY it failed (vs. one silent miss). Single-use stays atomic: we only
+    // consume + link in the valid branch below, still under this FOR UPDATE lock.
+    const tokenRes = await client.query<OnboardingTokenRow & { is_expired: boolean }>(
+      `SELECT token_hash, account_id, sso_session_id, expires_at, used_at, attempts,
+              (expires_at <= now()) AS is_expired
          FROM onboarding_tokens
         WHERE token_hash = $1
-          AND used_at IS NULL
-          AND expires_at > now()
         FOR UPDATE`,
       [args.onboardingTokenHash],
     );
     const token = tokenRes.rows[0];
-    if (!token) return undefined;
+    if (!token) return { ok: false, reason: 'invalid' };
+    if (token.used_at) return { ok: false, reason: 'used' };
+    if (token.is_expired) return { ok: false, reason: 'expired' };
 
     await client.query(
       `UPDATE onboarding_tokens
@@ -258,8 +268,8 @@ export async function consumeOnboardingTokenAndLinkNumber(args: {
       [token.account_id, args.phoneNumber],
     );
     const conv = convRes.rows[0];
-    if (!conv) return undefined;
-    return { accountId: conv.account_id, conversationId: conv.id };
+    if (!conv) return { ok: false, reason: 'invalid' };
+    return { ok: true, accountId: conv.account_id, conversationId: conv.id };
   });
 }
 

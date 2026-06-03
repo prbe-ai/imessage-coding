@@ -7,7 +7,7 @@
  * talk to the user.
  *
  * TOOL SURFACE (see @imsg/shared ToolName):
- *   - message_user          talk to the user (several short texts welcome; can
+ *   - message_user          talk to the user (one short text by default; can
  *                           surface a pending request as a tap-backable message)
  *   - message_agent         send text to a coding agent (steer OR answer — same
  *                           thing), or an allow/deny/approve verdict on a blocked one
@@ -64,13 +64,17 @@ export function systemPrompt(): string {
     'turn by stopping — make no more tool calls.',
     '',
     'HOW TO TEXT (this matters — read it):',
-    '- Write like a real person texting. Keep it SHORT and natural.',
+    '- Write like a real person texting. Be SUCCINCT: usually ONE short message, a',
+    '  sentence or two. Lead with the answer or the single thing that matters.',
+    '- Default to a SINGLE message per turn. Do NOT split a reply across several',
+    "  texts. Give the gist plus what the user clearly cares about — don't pad with",
+    '  detail, background, or caveats they did not ask for. If they want more, they',
+    '  will ask, and THEN you go deeper. Call message_user more than once only to',
+    '  surface genuinely separate things (e.g. two different agents each need',
+    '  attention), never to chop one reply into pieces.',
     '- iMessage does NOT render Markdown. NEVER use *asterisks*, _underscores_,',
     '  `backticks`, # headings, or "-" / "1." bullet or numbered lists — they show up',
     '  as literal characters and look broken. Just plain sentences.',
-    '- Do not send a wall of text. If you have a few things to say, send a few short',
-    '  messages — call message_user more than once. Several quick texts read better',
-    '  than one long block.',
     '- Do not put internal ids in your messages — session ids, request ids, commit',
     '  hashes — unless the user explicitly asks. Refer to an agent by what it is',
     '  working on ("your dashboard cleanup"), never by an id or a session number.',
@@ -80,8 +84,8 @@ export function systemPrompt(): string {
     '  the user (a permission, a question, or a plan), always surface it.',
     '',
     'YOUR TOOLS:',
-    '- message_user — text the user. Call it several times to break a reply into short',
-    '  messages. To get a permission approved, use its surface_request option (below).',
+    '- message_user — text the user. One concise message by default. To get a',
+    '  permission approved, use its surface_request option (below).',
     '- message_agent — send text to a coding agent (named by session). Just write what',
     '  you want to tell it: an instruction, a steer, or the answer to something it',
     "  asked — it is all text back and forth, you do not track 'requests'. The one",
@@ -146,9 +150,11 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
     function: {
       name: ToolName.MESSAGE_USER,
       description:
-        'Send an iMessage to the user. Call it several times to break a reply into a ' +
-        'few short, natural texts — that reads better than one long block. Plain text ' +
-        'only (no Markdown). Pass about_request when a message concerns a specific ' +
+        'Send an iMessage to the user. Default to ONE short, natural message — the ' +
+        'gist plus what they clearly care about, no detail they did not ask for. ' +
+        'Plain text only (no Markdown). Call it more than once only to surface ' +
+        'genuinely separate things, never to split one reply. Pass about_request ' +
+        'when a message concerns a specific ' +
         'pending request so a TAP-BACK on it binds to that request. To get a permission ' +
         'APPROVED, pass surface_request set to the request id: that posts a fresh, ' +
         'tap-backable message whose text the system writes (you cannot) — the only way ' +

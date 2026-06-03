@@ -72,6 +72,9 @@ export const AttentionKind = {
   PLAN: 'plan',
   IDLE: 'idle',
   TURN_COMPLETE: 'turn_complete',
+  // State-only kinds: drive sessions.state, never a surfaced attention.
+  TURN_START: 'turn_start', // a turn started → active
+  BLOCKED: 'blocked', // a native question/plan opened at the keyboard → waiting
 } as const;
 export type AttentionKind = (typeof AttentionKind)[keyof typeof AttentionKind];
 

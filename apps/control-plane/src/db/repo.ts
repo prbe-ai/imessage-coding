@@ -696,6 +696,39 @@ export async function listPendingAttentionForAccount(
   return rows.map(toAttentionEvent);
 }
 
+/**
+ * Apply a STATE-ONLY ping (turn start/complete/blocked → active/idle/waiting) to
+ * a LIVE session. A single conditional UPDATE so there is no check-then-write
+ * race, and deliberately NOT an upsert:
+ *   - never CREATES a session (a stray ping can't conjure a ghost row; the
+ *     heartbeat owns session creation),
+ *   - never REVIVES an `ended` (reaped) session (`state <> 'ended'`),
+ *   - when `requireNoPending` (TURN_COMPLETE → idle), only applies if the session
+ *     has NO unresolved attention — a turn that ended while parked on a phone
+ *     reply (AFK `message_user(expect_reply)`) must stay WAITING, atomically.
+ * Backed by idx_attention_session_unresolved. Returns the resulting state, or
+ * null if no live row matched (caller treats that as an accepted no-op).
+ */
+export async function applySessionStatePing(args: {
+  sessionId: string;
+  accountId: string;
+  state: SessionState;
+  requireNoPending: boolean;
+}): Promise<SessionState | null> {
+  const pendingGuard = args.requireNoPending
+    ? `AND NOT EXISTS (
+         SELECT 1 FROM attention_events ae
+          WHERE ae.session_id = s.id AND ae.account_id = $2 AND ae.resolved = false)`
+    : '';
+  const row = await queryOne<{ state: string }>(
+    `UPDATE sessions s SET state = $3
+      WHERE s.id = $1 AND s.account_id = $2 AND s.state <> $4 ${pendingGuard}
+     RETURNING s.state`,
+    [args.sessionId, args.accountId, args.state, SessionState.ENDED],
+  );
+  return row ? (row.state as SessionState) : null;
+}
+
 /** Load a single attention event scoped to an account. */
 export async function getAttentionForAccount(args: {
   attentionId: string;

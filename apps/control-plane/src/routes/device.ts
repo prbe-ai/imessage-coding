@@ -51,6 +51,7 @@ import {
 } from '../auth/device.ts';
 import {
   consumePairingTokenAndCreateDevice,
+  applySessionStatePing,
   getDeviceState,
   getSessionForDevice,
   insertAttentionEvent,
@@ -83,6 +84,18 @@ const PHONE_ROUTED_KINDS: ReadonlySet<AttentionKind> = new Set([
   AttentionKind.PERMISSION,
   AttentionKind.QUESTION,
   AttentionKind.PLAN,
+]);
+
+/**
+ * STATE-ONLY kinds: they ONLY drive sessions.state and carry no attention to
+ * surface. They must NOT create an attention_events row (those join the
+ * unresolved pile the orchestrator reads) and are never routed to the phone.
+ *   TURN_START    -> active     TURN_COMPLETE -> idle (guarded)    BLOCKED -> waiting
+ */
+const STATE_ONLY_KINDS: ReadonlySet<AttentionKind> = new Set([
+  AttentionKind.TURN_START,
+  AttentionKind.TURN_COMPLETE,
+  AttentionKind.BLOCKED,
 ]);
 
 /**
@@ -172,15 +185,34 @@ deviceRoutes.post(DeviceApiRoute.ATTENTION, async (c) => {
       continue;
     }
     try {
+      // STATE-ONLY kinds just drive sessions.state — no attention row, no phone.
+      // applySessionStatePing is a single conditional UPDATE: it never creates or
+      // revives a session, and TURN_COMPLETE→idle defers to the unresolved
+      // attention pile (so an AFK turn parked on a phone reply stays WAITING).
+      if (STATE_ONLY_KINDS.has(e.kind)) {
+        const state =
+          e.kind === AttentionKind.TURN_START
+            ? SessionState.ACTIVE
+            : e.kind === AttentionKind.TURN_COMPLETE
+              ? SessionState.IDLE
+              : SessionState.WAITING; // BLOCKED
+        await applySessionStatePing({
+          sessionId: e.sessionId,
+          accountId: auth.accountId,
+          state,
+          requireNoPending: e.kind === AttentionKind.TURN_COMPLETE,
+        });
+        accepted.push(e.id);
+        continue;
+      }
+
+      // Real attention (permission/question/plan): WAITING + persist + maybe phone.
       // Ensure the session exists (device may report a new session here).
       await upsertSession({
         sessionId: e.sessionId,
         deviceId: auth.deviceId,
         accountId: auth.accountId,
-        state:
-          e.kind === AttentionKind.TURN_COMPLETE
-            ? SessionState.IDLE
-            : SessionState.WAITING,
+        state: SessionState.WAITING,
       });
       const stored = await insertAttentionEvent({
         deviceId: auth.deviceId,

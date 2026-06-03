@@ -55,7 +55,7 @@ import { readNew } from '../src/transcript.ts';
 import { extractActivity } from '../src/activity.ts';
 
 // --- cadence + safety constants ----------------------------------------------
-const ACTIVE_INTERVAL_MS = 20_000; // transcript advancing → near-real-time
+const ACTIVE_INTERVAL_MS = 10_000; // transcript advancing → near-real-time
 const IDLE_INTERVAL_MS = 120_000; // quiet session → back off
 const IDLE_THRESHOLD_TICKS = 2; // empty ticks in a row before going idle
 const MISSING_LIMIT = 5; // transcript gone this many ticks → exit

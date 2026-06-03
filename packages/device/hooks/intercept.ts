@@ -47,9 +47,10 @@
  */
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { AfkState, GrantLevel } from '@imsg/shared';
-import { logDir } from '../src/config.ts';
+import { AfkState, AttentionKind, GrantLevel } from '@imsg/shared';
+import { logDir, pickEagerSessionId } from '../src/config.ts';
 import { readAfk, readGrant } from '../src/state.ts';
+import { postState } from './state-ping.ts';
 
 mkdirSync(logDir(), { recursive: true });
 const HOOK_LOG = join(logDir(), 'pretooluse.log');
@@ -110,6 +111,8 @@ try {
 }
 const evt = String(input['hook_event_name'] ?? input['hookEventName'] ?? '');
 const tool = String(input['tool_name'] ?? input['toolName'] ?? '');
+const sessionId =
+  (typeof input['session_id'] === 'string' && input['session_id']) || pickEagerSessionId() || '';
 const afk = readAfk() === AfkState.ON;
 const grant = readGrant(); // GrantLevel: off | edits | full
 log({ event: 'hook_fired', hook_event: evt, tool_name: tool, afk: afk ? 'on' : 'off', grant });
@@ -131,6 +134,13 @@ if (evt === PRE_TOOL_USE && tool !== ASK_USER_QUESTION && tool !== EXIT_PLAN_MOD
     emitPre('allow', 'Session grant: allow-all-edits — auto-approved file edit.');
   }
   // grant=off, OR grant=edits with a non-edit tool: fall through (no auto-allow).
+}
+
+// AFK OFF + a native question/plan prompt is about to open → mark the session
+// WAITING for the dashboard (state-only — not a surfaced attention). The
+// PostToolUse state hook flips it back to ACTIVE once the prompt is answered.
+if (!afk && evt === PRE_TOOL_USE && (tool === ASK_USER_QUESTION || tool === EXIT_PLAN_MODE)) {
+  await postState(AttentionKind.BLOCKED, sessionId);
 }
 
 // 2) AFK routing for question/plan tools. At the keyboard (AFK off) -> native.

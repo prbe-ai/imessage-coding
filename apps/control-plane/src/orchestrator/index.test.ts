@@ -153,35 +153,29 @@ describe('composeSessionsEndedMessage', () => {
   const item = (o: Partial<EndedSessionItem> = {}): EndedSessionItem => ({
     id: '0123456789abcdef',
     title: 'fix the reaper',
-    summary: 'done — all tests green',
     ...o,
   });
 
-  test('single session: title + last-activity summary', () => {
+  test('single session: names the session only, no summary', () => {
     const msg = composeSessionsEndedMessage([item()]);
-    expect(msg).toBe('Session "fix the reaper" stopped.\nLast: done — all tests green');
-  });
-
-  test('single session with no activity: omits the "Last:" line', () => {
-    const msg = composeSessionsEndedMessage([item({ summary: null })]);
-    expect(msg).toBe('Session "fix the reaper" stopped.');
+    expect(msg).toBe('Lost connection with session "fix the reaper".');
     expect(msg.includes('Last:')).toBe(false);
   });
 
   test('null/blank title falls back to the short id', () => {
-    expect(composeSessionsEndedMessage([item({ title: null, summary: null })])).toBe(
-      'Session "01234567" stopped.',
+    expect(composeSessionsEndedMessage([item({ title: null })])).toBe(
+      'Lost connection with session "01234567".',
     );
-    expect(composeSessionsEndedMessage([item({ title: '   ', summary: null })])).toBe(
-      'Session "01234567" stopped.',
+    expect(composeSessionsEndedMessage([item({ title: '   ' })])).toBe(
+      'Lost connection with session "01234567".',
     );
   });
 
-  test('multiple sessions coalesce into one bulleted message', () => {
+  test('multiple sessions coalesce into one bulleted message, no summaries', () => {
     const msg = composeSessionsEndedMessage([
-      item({ id: 'aaaaaaaa1111', title: 'A', summary: 'wrote the docs' }),
-      item({ id: 'bbbbbbbb2222', title: 'B', summary: null }),
+      item({ id: 'aaaaaaaa1111', title: 'A' }),
+      item({ id: 'bbbbbbbb2222', title: 'B' }),
     ]);
-    expect(msg).toBe('2 sessions stopped:\n• A — wrote the docs\n• B');
+    expect(msg).toBe('Lost connection with 2 sessions:\n• A\n• B');
   });
 });

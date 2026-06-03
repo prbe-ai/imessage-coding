@@ -891,74 +891,30 @@ function shortId(id: string): string {
 }
 
 // -----------------------------------------------------------------------------
-// "Your session stopped" notification (reaper-driven).
+// "Lost connection" notification (reaper-driven).
 // -----------------------------------------------------------------------------
 
-/** One ended session, resolved to its label + last-activity summary, ready to
- *  render into the coalesced "stopped" message. */
+/** One ended session, resolved to its display label. */
 export interface EndedSessionItem {
   id: string;
   title: string | null;
-  /** One-line summary of the last thing the session sent us; null if it shipped
-   *  no activity (e.g. afk was just toggled on, or it died before the tap flushed). */
-  summary: string | null;
 }
 
-/** Build the coalesced "session(s) stopped" iMessage. Pure + deterministic (no
- *  LLM) — the activity tap already reduces blocks to one-liners, so "summarize
- *  the last message" is just surfacing that line. Exported for unit tests. */
+/** Build the coalesced "lost connection" iMessage. Pure + deterministic (no LLM).
+ *  Per product decision this names the session(s) only — NO activity summary, so a
+ *  dropped laptop never leaks its last transcript line to the phone. Exported for
+ *  unit tests. */
 export function composeSessionsEndedMessage(items: ReadonlyArray<EndedSessionItem>): string {
-  // clip the title too: it's device-sanitized but keep the notification on one
-  // line per session (a stray newline would split a bullet).
+  // clip the title: it's device-sanitized but keep one line per session (a stray
+  // newline would split a bullet).
   const label = (it: EndedSessionItem): string =>
     it.title?.trim() ? clip(it.title, 80) : shortId(it.id);
   const [first] = items;
   if (items.length === 1 && first) {
-    const head = `Session "${label(first)}" stopped.`;
-    return first.summary ? `${head}\nLast: ${first.summary}` : head;
+    return `Lost connection with session "${label(first)}".`;
   }
-  const lines = items.map((it) => (it.summary ? `• ${label(it)} — ${it.summary}` : `• ${label(it)}`));
-  return `${items.length} sessions stopped:\n${lines.join('\n')}`;
-}
-
-/** A user-facing one-liner for an activity line (no `[lineNo]` prefix — that's
- *  for the LLM turn context, not the phone). */
-function activityOneLiner(a: SessionActivityLine): string {
-  switch (a.kind) {
-    case ActivityKind.ASSISTANT_TEXT:
-      return clip(a.body ?? '', 200);
-    case ActivityKind.USER_MESSAGE:
-      return `you: ${clip(a.body ?? '', 180)}`;
-    case ActivityKind.TOOL_USE:
-      return a.summary
-        ? `running ${a.toolName}: ${clip(a.summary, 140)}`
-        : `running ${a.toolName ?? 'a tool'}`;
-    case ActivityKind.TOOL_RESULT:
-      return a.isError ? 'a tool errored' : 'a tool finished';
-    default:
-      return clip(a.kind, 60);
-  }
-}
-
-/** The "last message the session sent us": prefer the most recent assistant_text
- *  within the last few lines (the most human-meaningful), else a one-liner of the
- *  very last line. null on no activity or a read error (best-effort). */
-async function lastActivitySummary(sessionId: string, accountId: string): Promise<string | null> {
-  let lines: SessionActivityLine[];
-  try {
-    lines = await getSessionActivity({ sessionId, accountId, limit: 5 });
-  } catch {
-    return null;
-  }
-  // getSessionActivity returns oldest-first; scan from the newest.
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const l = lines[i];
-    if (l && l.kind === ActivityKind.ASSISTANT_TEXT && (l.body ?? '').trim()) {
-      return clip(l.body ?? '', 200);
-    }
-  }
-  const last = lines[lines.length - 1];
-  return last ? activityOneLiner(last) : null;
+  const lines = items.map((it) => `• ${label(it)}`);
+  return `Lost connection with ${items.length} sessions:\n${lines.join('\n')}`;
 }
 
 /**
@@ -988,13 +944,7 @@ export async function notifyEndedSessions(
 
   for (const [accountId, sessions] of byAccount) {
     try {
-      const items: EndedSessionItem[] = await Promise.all(
-        sessions.map(async (s) => ({
-          id: s.id,
-          title: s.title,
-          summary: await lastActivitySummary(s.id, accountId),
-        })),
-      );
+      const items: EndedSessionItem[] = sessions.map((s) => ({ id: s.id, title: s.title }));
       // sendToUser is itself best-effort (logs + swallows transport errors).
       await sendToUser(transport, accountId, composeSessionsEndedMessage(items));
     } catch (err) {

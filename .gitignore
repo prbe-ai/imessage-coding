@@ -1,5 +1,7 @@
-# dependencies
-node_modules/
+# dependencies — match dirs AND symlinks named node_modules, at any depth
+# (a bare `node_modules/` only matches directories, so a stray symlink slips through)
+node_modules
+**/node_modules
 
 # env — per-app secret files are gitignored; only the *.example templates are tracked.
 .env

@@ -71,8 +71,8 @@ const MAX_ROUNDS = 8;
  */
 const ASSISTANT_TEMPERATURE = 0.3;
 
-/** Outcome of running a turn (for logging). */
-export interface TurnOutcome {
+/** Result of running a turn loop — round/tool-call counts, for logging. */
+export interface TurnRunResult {
   rounds: number;
   toolCalls: number;
   /**
@@ -95,6 +95,14 @@ export async function runAssistantTurn(args: {
   tools: ReadonlyArray<ToolDef>;
   /** OpenAI `user` field — the account id, for per-user spend attribution. */
   user: string;
+  /**
+   * Optional per-request `metadata` forwarded verbatim in the chat body. The
+   * LiteLLM proxy reads Langfuse-recognized keys here (trace_id, trace_name,
+   * session_id, trace_user_id, tags) so the whole multi-round turn collapses to
+   * ONE trace instead of N disconnected per-round traces. Ignored when the proxy
+   * has no Langfuse callback configured (it's just an extra body field).
+   */
+  metadata?: Record<string, unknown>;
   execTool: ToolExecutor;
   /**
    * Called with terminal assistant text when the turn ends with prose instead
@@ -118,7 +126,7 @@ export async function runAssistantTurn(args: {
    * this turn — only while still uncommitted. Defaults to a private latch.
    */
   commit?: { committed: boolean };
-}): Promise<TurnOutcome> {
+}): Promise<TurnRunResult> {
   const { llm } = loadEnv();
   if (!llm.apiKey) {
     throw new Error('runAssistantTurn: LLM_API_KEY is not set');
@@ -135,7 +143,7 @@ export async function runAssistantTurn(args: {
 
     let msg: { content?: string | null; tool_calls?: ToolCall[] };
     try {
-      msg = await callModel(llm, messages, tools, user, signal);
+      msg = await callModel(llm, messages, tools, user, signal, args.metadata);
     } catch (err) {
       // A fetch rejection WHILE interrupted is a clean coalesce, not an error:
       // swallow it (don't let the caller fire its fail-closed clarify text).
@@ -197,6 +205,7 @@ async function callModel(
   tools: ReadonlyArray<ToolDef>,
   user: string,
   external?: AbortSignal,
+  metadata?: Record<string, unknown>,
 ): Promise<{ content?: string | null; tool_calls?: ToolCall[] }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -221,6 +230,7 @@ async function callModel(
         tool_choice: 'auto',
         messages,
         user,
+        ...(metadata ? { metadata } : {}),
       }),
       signal: controller.signal,
     });

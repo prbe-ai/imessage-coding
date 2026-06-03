@@ -266,6 +266,41 @@ CREATE TABLE IF NOT EXISTS processed_webhooks (
 );
 
 -- -----------------------------------------------------------------------------
+-- turns — observability ledger: one row per orchestrator turn (assistant run).
+-- The orchestrator is otherwise a black box: a "Read, no reply" could be the
+-- model choosing silence, the turn erroring, a coalesce-abort, or a steer with
+-- no user-facing text. Each turn records its OUTCOME so that's answerable with a
+-- query instead of a guess.
+--
+-- One row per turn across all three triggers (a user message, an agent
+-- attention, an agent status relay). `webhook_id` is the inbound delivery's
+-- X-Webhook-ID (user turns only; NULL for device-triggered turns) — LEFT JOIN it
+-- against processed_webhooks to spot a claimed delivery that produced NO turn row
+-- (the process died mid-turn, e.g. a deploy). `id` is the turn uuid the
+-- orchestrator generates, reused as the Langfuse trace_id so a row and its trace
+-- line up.
+--
+-- Best-effort writes (the orchestrator inserts these detached) so an
+-- observability blip never breaks a turn. Append-only + small; prune old rows
+-- out of band like processed_webhooks.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS turns (
+  id          UUID        PRIMARY KEY,                 -- per-turn uuid (also Langfuse trace_id)
+  account_id  UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  session_id  UUID,                                    -- the agent session, when the turn is about one
+  webhook_id  TEXT,                                    -- inbound X-Webhook-ID (user turns); join to processed_webhooks
+  trigger     TEXT        NOT NULL,                    -- user_message | agent_event | agent_message
+  outcome     TEXT        NOT NULL,                    -- replied | acted | silent | errored | aborted
+  rounds      INT,                                     -- model rounds in the tool-calling loop
+  tool_calls  INT,
+  error       TEXT,                                    -- error message when outcome = errored
+  latency_ms  INT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_turns_account_created ON turns(account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_turns_outcome_created ON turns(outcome, created_at DESC);
+
+-- -----------------------------------------------------------------------------
 -- LEGACY delivery tables — replaced by session_inbox (above). Dropped here so a
 -- re-apply of this schema cleans an already-provisioned DB. They held only
 -- transient in-flight delivery state (verdicts/answers/steers), never durable

@@ -24,6 +24,7 @@
  * Fail-closed everywhere: a turn error sends a safe clarify (user path) or falls
  * back to the static notification (agent-event path) — never an unsafe action.
  */
+import { randomUUID } from 'node:crypto';
 import {
   ActivityKind,
   AfkState,
@@ -31,6 +32,8 @@ import {
   DecisionBehavior,
   RequestAction,
   ToolName,
+  TurnOutcome,
+  TurnTrigger,
   isAfkState,
   isUuid,
   type AttentionEvent,
@@ -45,6 +48,7 @@ import {
   findVerifiedPhoneForAccount,
   getAttentionForAccount,
   getSessionActivity,
+  insertTurn,
   isInboxDelivered,
   listLiveSessionsForAccount,
   listPendingAttentionForAccount,
@@ -94,6 +98,56 @@ export interface TurnResult {
    *  newer inbound arrived, so the drain re-runs one combined turn (it delivered
    *  nothing; `handled` is false). See drainUserQueue. */
   aborted?: boolean;
+}
+
+// --- turn observability -------------------------------------------------------
+
+/**
+ * Classify a finished turn for the `turns` ledger (see schema `turns`). Pure, so
+ * it's unit-tested directly — the SILENT case is the screenshot bug: the model
+ * returned no tool call and no text, so nothing ever reached the user.
+ */
+export function classifyTurnOutcome(args: {
+  errored: boolean;
+  aborted: boolean;
+  sentCount: number;
+  actionCount: number;
+}): TurnOutcome {
+  if (args.errored) return TurnOutcome.ERRORED;
+  if (args.aborted) return TurnOutcome.ABORTED;
+  if (args.sentCount > 0) return TurnOutcome.REPLIED;
+  if (args.actionCount > 0) return TurnOutcome.ACTED;
+  return TurnOutcome.SILENT;
+}
+
+/**
+ * Langfuse-recognized request metadata so one assistant turn (its ≤8 model
+ * rounds) collapses to ONE trace, tagged by trigger + account. `turnId` is the
+ * DB `turns.id`, reused as the trace_id so a row and its trace line up.
+ */
+function turnMeta(
+  turnId: string,
+  trigger: TurnTrigger,
+  accountId: string,
+  sessionId?: string,
+): Record<string, unknown> {
+  return {
+    trace_id: turnId,
+    trace_name: `orchestrator:${trigger}`,
+    session_id: sessionId ?? accountId,
+    trace_user_id: accountId,
+    tags: [trigger],
+  };
+}
+
+/**
+ * Persist a turn's outcome — DETACHED + best-effort. Observability must never
+ * block or break a turn, so a write failure is logged and swallowed.
+ */
+function recordTurn(args: Parameters<typeof insertTurn>[0]): void {
+  void insertTurn(args).catch((err) => {
+    console.error('[turns] record failed', err);
+  });
 }
 
 // --- public entrypoints -------------------------------------------------------
@@ -179,6 +233,12 @@ async function runUserTurn(
   const last = batch[batch.length - 1];
   if (!last) return { handled: false, accountId, reason: 'empty_batch' };
 
+  const turnId = randomUUID();
+  const startedAt = Date.now();
+  let classified: TurnOutcome | undefined;
+  let rounds: number | undefined;
+  let toolCalls: number | undefined;
+  let errMsg: string | undefined;
   try {
     // (Inbound messages are logged once on receipt in orchestrate, NOT here —
     //  re-running an interrupted batch must not double-log them.)
@@ -217,6 +277,7 @@ async function runUserTurn(
       messages,
       tools: assistantTools('user_message'),
       user: accountId,
+      metadata: turnMeta(turnId, TurnTrigger.USER_MESSAGE, accountId),
       signal,
       commit,
       execTool: makeExecTool(ctx),
@@ -228,9 +289,12 @@ async function runUserTurn(
         sent.count += 1;
       },
     });
+    rounds = outcome.rounds;
+    toolCalls = outcome.toolCalls;
     // Interrupted before committing anything: deliver nothing and let the drain
     // re-run a fresh combined turn that includes the newer inbound(s).
     if (outcome.aborted) {
+      classified = TurnOutcome.ABORTED;
       return { handled: false, accountId, reason: 'interrupted', aborted: true };
     }
     await recordActions(accountId, actions);
@@ -243,12 +307,20 @@ async function runUserTurn(
     if (ctx.deliveries.length > 0) {
       void watchDeliveries(accountId, transport, ctx.deliveries);
     }
+    classified = classifyTurnOutcome({
+      errored: false,
+      aborted: false,
+      sentCount: sent.count,
+      actionCount: actions.length,
+    });
     return { handled: true, accountId, rounds: outcome.rounds, toolCalls: outcome.toolCalls, actions };
   } catch (err) {
     // Fail-closed: never leave the user hanging; never take an action. (Also
     // covers a prologue blip — logMessage / context load — which used to escape
     // to the webhook; now the drain is detached, so we absorb it here.)
-    console.error('[assistant] user turn error', err);
+    errMsg = err instanceof Error ? err.message : String(err);
+    classified = TurnOutcome.ERRORED;
+    console.error(`[assistant] user turn error [turn ${turnId}]`, err);
     await sendToUser(
       transport,
       accountId,
@@ -256,6 +328,22 @@ async function runUserTurn(
       { replyToMessageId: last.messageId, fallbackTo: last.from },
     ).catch(() => {});
     return { handled: true, accountId, reason: 'turn_error' };
+  } finally {
+    // Best-effort observability write (detached). webhookId = the inbound
+    // X-Webhook-ID so a claimed-but-no-turn row in processed_webhooks is spottable.
+    if (classified) {
+      recordTurn({
+        id: turnId,
+        accountId,
+        webhookId: last.messageId,
+        trigger: TurnTrigger.USER_MESSAGE,
+        outcome: classified,
+        rounds,
+        toolCalls,
+        error: errMsg,
+        latencyMs: Date.now() - startedAt,
+      });
+    }
   }
 }
 
@@ -279,6 +367,8 @@ async function runAgentEventTurnLocked(
   accountId: string,
   transport: Transport,
 ): Promise<TurnResult> {
+  const turnId = randomUUID();
+  const startedAt = Date.now();
   // SAFETY: a DESTRUCTIVE permission gets a CODE-generated, accurate notification
   // — never LLM-authored prose. The deterministic-allow gate trusts that the user
   // saw a truthful description of what a tap-back/reply approves; an LLM notifier
@@ -286,9 +376,21 @@ async function runAgentEventTurnLocked(
   // the assistant turn for destructive permissions and send the canonical notice.
   if (isPermissionAttention(attention) && isDestructiveTool(attention.toolName)) {
     await notifyStatic(transport, accountId, attention);
+    recordTurn({
+      id: turnId,
+      accountId,
+      sessionId: attention.sessionId,
+      trigger: TurnTrigger.AGENT_EVENT,
+      outcome: TurnOutcome.ACTED,
+      latencyMs: Date.now() - startedAt,
+    });
     return { handled: true, accountId, reason: 'destructive_static_notify' };
   }
   const sent = { count: 0 };
+  let classified: TurnOutcome | undefined;
+  let rounds: number | undefined;
+  let toolCalls: number | undefined;
+  let errMsg: string | undefined;
   try {
     const [pending, sessions, history] = await Promise.all([
       listPendingAttentionForAccount(accountId),
@@ -318,6 +420,7 @@ async function runAgentEventTurnLocked(
       messages,
       tools: assistantTools('agent_event'),
       user: accountId,
+      metadata: turnMeta(turnId, TurnTrigger.AGENT_EVENT, accountId, attention.sessionId),
       execTool: makeExecTool(ctx),
       onUnsentText: async (text) => {
         const id = await sendToUser(transport, accountId, text);
@@ -327,15 +430,44 @@ async function runAgentEventTurnLocked(
         }
       },
     });
+    rounds = outcome.rounds;
+    toolCalls = outcome.toolCalls;
+    let staticNotified = false;
     if (sent.count === 0) {
-      // Assistant chose to stay silent — still surface the event reliably.
+      // Assistant chose to stay silent — still surface the event reliably via a
+      // CODE notification. That IS a user-facing message, so the turn ACTED
+      // (notified), NOT silent — `silent` must keep meaning "nothing reached the
+      // user" for the headline debugging query. (Mirrors the destructive bypass.)
       await notifyStatic(transport, accountId, attention);
+      staticNotified = true;
     }
+    classified = classifyTurnOutcome({
+      errored: false,
+      aborted: false,
+      sentCount: sent.count,
+      actionCount: actions.length + (staticNotified ? 1 : 0),
+    });
     return { handled: true, accountId, rounds: outcome.rounds, toolCalls: outcome.toolCalls };
   } catch (err) {
-    console.error('[assistant] agent-event turn error; static fallback', err);
+    errMsg = err instanceof Error ? err.message : String(err);
+    classified = TurnOutcome.ERRORED;
+    console.error(`[assistant] agent-event turn error; static fallback [turn ${turnId}]`, err);
     await notifyStatic(transport, accountId, attention);
     return { handled: true, accountId, reason: 'turn_error_static_fallback' };
+  } finally {
+    if (classified) {
+      recordTurn({
+        id: turnId,
+        accountId,
+        sessionId: attention.sessionId,
+        trigger: TurnTrigger.AGENT_EVENT,
+        outcome: classified,
+        rounds,
+        toolCalls,
+        error: errMsg,
+        latencyMs: Date.now() - startedAt,
+      });
+    }
   }
 }
 
@@ -361,7 +493,13 @@ async function relayAgentMessageLocked(
   accountId: string,
   transport: Transport,
 ): Promise<TurnResult> {
+  const turnId = randomUUID();
+  const startedAt = Date.now();
   const sent = { count: 0 };
+  let classified: TurnOutcome | undefined;
+  let rounds: number | undefined;
+  let toolCalls: number | undefined;
+  let errMsg: string | undefined;
   try {
     const [pending, sessions, history] = await Promise.all([
       listPendingAttentionForAccount(accountId),
@@ -394,28 +532,53 @@ async function relayAgentMessageLocked(
       messages,
       tools: assistantTools('agent_message'),
       user: accountId,
+      metadata: turnMeta(turnId, TurnTrigger.AGENT_MESSAGE, accountId, message.sessionId),
       execTool: makeExecTool(ctx),
       onUnsentText: async (text) => {
         const id = await sendToUser(transport, accountId, text);
         if (id) sent.count += 1;
       },
     });
+    rounds = outcome.rounds;
+    toolCalls = outcome.toolCalls;
     // A status relay is NOT guaranteed delivery: the assistant may judge an update
     // trivial and stay silent (the user asked for "don't text unless necessary").
     // So no forced forward on a silent happy-path turn — only the catch below
     // raw-forwards, and only when a turn ERROR (not a deliberate silence) would
-    // otherwise eat a real update.
+    // otherwise eat a real update. (A deliberate silence records outcome=silent.)
+    classified = classifyTurnOutcome({
+      errored: false,
+      aborted: false,
+      sentCount: sent.count,
+      actionCount: actions.length,
+    });
     return { handled: true, accountId, rounds: outcome.rounds, toolCalls: outcome.toolCalls };
   } catch (err) {
     // Best-effort: forward the raw status so a turn-engine error never eats the
     // agent's answer. Guard on sent.count === 0 (mirrors the success path) — if
     // the model already delivered a summary before the turn threw mid-round, a
     // raw forward here would DUPLICATE it. Never throws out (caller fired + moved on).
-    console.error('[assistant] agent-message relay error', err);
+    errMsg = err instanceof Error ? err.message : String(err);
+    classified = TurnOutcome.ERRORED;
+    console.error(`[assistant] agent-message relay error [turn ${turnId}]`, err);
     if (sent.count === 0) {
       await sendToUser(transport, accountId, message.text).catch(() => {});
     }
     return { handled: true, accountId, reason: 'relay_error_raw_forward' };
+  } finally {
+    if (classified) {
+      recordTurn({
+        id: turnId,
+        accountId,
+        sessionId: message.sessionId,
+        trigger: TurnTrigger.AGENT_MESSAGE,
+        outcome: classified,
+        rounds,
+        toolCalls,
+        error: errMsg,
+        latencyMs: Date.now() - startedAt,
+      });
+    }
   }
 }
 

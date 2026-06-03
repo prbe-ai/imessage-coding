@@ -6,8 +6,9 @@
  * (Pool/env are lazy).
  */
 import { describe, expect, test } from 'bun:test';
-import { MessageChannel, type InboundMessage } from '@imsg/shared';
+import { MessageChannel, TurnOutcome, type InboundMessage } from '@imsg/shared';
 import {
+  classifyTurnOutcome,
   composeDeliveryFollowup,
   composeSessionsEndedMessage,
   extractOnboardingToken,
@@ -177,5 +178,41 @@ describe('composeSessionsEndedMessage', () => {
       item({ id: 'bbbbbbbb2222', title: 'B' }),
     ]);
     expect(msg).toBe('Lost connection with 2 sessions:\n• A\n• B');
+  });
+});
+
+describe('classifyTurnOutcome — the observability ledger classifier', () => {
+  const base = { errored: false, aborted: false, sentCount: 0, actionCount: 0 };
+
+  test('REGRESSION (the screenshot): no text, no action → silent', () => {
+    // The model returned no tool call and no terminal text, so nothing reached
+    // the user. Before the turns ledger this was an invisible black box.
+    expect(classifyTurnOutcome(base)).toBe(TurnOutcome.SILENT);
+  });
+
+  test('texted the user → replied', () => {
+    expect(classifyTurnOutcome({ ...base, sentCount: 1 })).toBe(TurnOutcome.REPLIED);
+  });
+
+  test('acted without texting (e.g. a silent steer) → acted', () => {
+    expect(classifyTurnOutcome({ ...base, actionCount: 1 })).toBe(TurnOutcome.ACTED);
+  });
+
+  test('errored takes precedence over everything', () => {
+    expect(
+      classifyTurnOutcome({ errored: true, aborted: true, sentCount: 5, actionCount: 5 }),
+    ).toBe(TurnOutcome.ERRORED);
+  });
+
+  test('aborted (coalesced) beats replied/acted, but not errored', () => {
+    expect(classifyTurnOutcome({ ...base, aborted: true, sentCount: 1 })).toBe(
+      TurnOutcome.ABORTED,
+    );
+  });
+
+  test('replied wins over acted when the assistant both texted and acted', () => {
+    expect(classifyTurnOutcome({ ...base, sentCount: 1, actionCount: 2 })).toBe(
+      TurnOutcome.REPLIED,
+    );
   });
 });

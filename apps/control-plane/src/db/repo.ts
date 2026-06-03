@@ -1152,6 +1152,47 @@ export async function releaseWebhook(webhookId: string): Promise<void> {
   await query(`DELETE FROM processed_webhooks WHERE webhook_id = $1`, [webhookId]);
 }
 
+// --- turns (observability ledger) --------------------------------------------
+
+/**
+ * Record one orchestrator turn's outcome (see schema `turns`). BEST-EFFORT: the
+ * caller invokes this DETACHED (void + .catch), so an observability write never
+ * blocks or breaks a turn. `id` is the turn's generated uuid — reused as the
+ * Langfuse trace_id so a DB row and its trace line up. `webhookId` is set for
+ * user turns only (the inbound X-Webhook-ID); join it against processed_webhooks
+ * to spot a claimed delivery that produced NO turn row (a process death mid-turn).
+ */
+export async function insertTurn(args: {
+  id: string;
+  accountId: string;
+  sessionId?: string;
+  webhookId?: string;
+  trigger: string;
+  outcome: string;
+  rounds?: number;
+  toolCalls?: number;
+  error?: string;
+  latencyMs?: number;
+}): Promise<void> {
+  await query(
+    `INSERT INTO turns
+       (id, account_id, session_id, webhook_id, trigger, outcome, rounds, tool_calls, error, latency_ms)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [
+      args.id,
+      args.accountId,
+      args.sessionId ?? null,
+      args.webhookId ?? null,
+      args.trigger,
+      args.outcome,
+      args.rounds ?? null,
+      args.toolCalls ?? null,
+      args.error ?? null,
+      args.latencyMs ?? null,
+    ],
+  );
+}
+
 // --- free-text steers (a reply with no attention to resolve) ------------------
 
 /**

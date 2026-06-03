@@ -119,6 +119,38 @@ export const ToolName = {
 export type ToolName = (typeof ToolName)[keyof typeof ToolName];
 
 // -----------------------------------------------------------------------------
+// Observability ledger (`turns` table). The orchestrator is otherwise a black
+// box: a "Read, no reply" could be the model choosing silence, the turn
+// erroring, a coalesce-abort, or a steer with no user-facing text. Each turn
+// records what TRIGGERED it and how it ENDED so that's a query, not a guess.
+// Referenced by the recorder (orchestrator/index.ts) and the repo writer
+// (db/repo.ts insertTurn); never hardcode the literal strings.
+// -----------------------------------------------------------------------------
+export const TurnTrigger = {
+  /** An inbound user text (webhook → coalesced drain). */
+  USER_MESSAGE: 'user_message',
+  /** A coding agent needs attention (permission / question / plan / idle). */
+  AGENT_EVENT: 'agent_event',
+  /** A coding agent's fire-and-forget status/result relay. */
+  AGENT_MESSAGE: 'agent_message',
+} as const;
+export type TurnTrigger = (typeof TurnTrigger)[keyof typeof TurnTrigger];
+
+export const TurnOutcome = {
+  /** The assistant texted the user. */
+  REPLIED: 'replied',
+  /** The assistant took an action (steer / resolve / notify) but sent no text. */
+  ACTED: 'acted',
+  /** The assistant produced nothing — no text, no action (the silent black box). */
+  SILENT: 'silent',
+  /** The turn threw; a safe fallback was sent. */
+  ERRORED: 'errored',
+  /** Interrupted before committing a side effect (a newer inbound coalesced in). */
+  ABORTED: 'aborted',
+} as const;
+export type TurnOutcome = (typeof TurnOutcome)[keyof typeof TurnOutcome];
+
+// -----------------------------------------------------------------------------
 // Session activity (the realtime transcript tap). One per surfaced transcript block:
 // a user message, an assistant reply, a tool call marker, or a failed tool call.
 // Deliberately coarse — it captures WHAT a session is doing, not the full data.

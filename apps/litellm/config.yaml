@@ -44,6 +44,21 @@ litellm_settings:
   # One high per-end-user sanity cap (USD). Every iMessage account (sent as the
   # OpenAI `user` field) auto-gets this budget without explicit registration.
   max_end_user_budget: 50
+  # Observability: stream every request/response to Langfuse so the orchestrator
+  # turn is no longer a black box (you see the exact prompt, the tool calls or
+  # the absence of any = the model staying silent, latency, and cost, tagged per
+  # iMessage user). success_callback logs completed calls; failure_callback logs
+  # errors/timeouts so a turn the MODEL failed is visible too. Both are async and
+  # non-blocking — a Langfuse outage or a callback error NEVER blocks or fails a
+  # completion.
+  #
+  # Requires LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY (+ optional LANGFUSE_HOST,
+  # default https://cloud.langfuse.com) in the env. DEPLOY ORDER MATTERS: set
+  # those secrets FIRST via apps/litellm/scripts/sync-fly-secrets.sh, THEN deploy
+  # this config — enabling the callback before the keys exist risks a boot-time
+  # credential/decrypt error on this DB-backed proxy (LITELLM_SALT_KEY is pinned).
+  success_callback: ["langfuse"]
+  failure_callback: ["langfuse"]
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

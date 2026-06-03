@@ -12,6 +12,9 @@
 #   DATABASE_URL         Neon Postgres — DIRECT/UNPOOLED (Prisma migrate needs it)
 #   GEMINI_API_KEY       Google AI Studio key (backs gemini-3.5-flash)
 #   CEREBRAS_API_KEY     Cerebras Inference key (backs gpt-oss-120b) — OPTIONAL
+#   LANGFUSE_PUBLIC_KEY  Langfuse observability — OPTIONAL (with SECRET_KEY)
+#   LANGFUSE_SECRET_KEY  Langfuse observability — OPTIONAL (with PUBLIC_KEY)
+#   LANGFUSE_HOST        Langfuse host — OPTIONAL (blank = cloud.langfuse.com)
 #
 # .env-key -> fly-secret-name MAPPING (see SECRET_MAP below): the proxy needs an
 # UNPOOLED DATABASE_URL, distinct from the control-plane's pooled DATABASE_URL.
@@ -60,9 +63,14 @@ REQUIRED_SECRETS=(
 # absent. Keeps a Gemini-only deploy from having to provision an unused backend
 # key, and never blocks rotating a REQUIRED secret just because an opt-in backend
 # isn't configured. CEREBRAS_API_KEY backs the opt-in gpt-oss-120b model — only
-# needed if the control-plane flips LLM_MODEL to it.
+# needed if the control-plane flips LLM_MODEL to it. LANGFUSE_* enable the
+# Langfuse observability callback (litellm_settings in config.yaml) — both keys
+# needed to trace; LANGFUSE_HOST is blank for Langfuse Cloud's default host.
 OPTIONAL_SECRETS=(
   "CEREBRAS_API_KEY:CEREBRAS_API_KEY"
+  "LANGFUSE_PUBLIC_KEY:LANGFUSE_PUBLIC_KEY"
+  "LANGFUSE_SECRET_KEY:LANGFUSE_SECRET_KEY"
+  "LANGFUSE_HOST:LANGFUSE_HOST"
 )
 
 say()  { printf '[sync-fly-secrets] %s\n' "$*"; }

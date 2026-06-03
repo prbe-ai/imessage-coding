@@ -309,7 +309,11 @@ export class AgentPhoneTransport implements Transport {
     }
     // A reaction binds to the exact agent message it targets (`data.messageId`).
     // This is the deterministic handle the safety gate uses to bind a tapback to
-    // a specific pending prompt.
+    // a specific pending prompt. NOTE: this is the ONLY inbound reply linkage
+    // AgentPhone forwards — a typed inline reply (the iMessage "Reply" thread)
+    // arrives as a plain agent.message with no target field (verified live
+    // against the conversations API 2026-06-02), so there is nothing to map for
+    // it and it can never bind to a specific message.
     if (isReaction && data.messageId !== undefined) {
       inbound.reactionTo = data.messageId;
     }

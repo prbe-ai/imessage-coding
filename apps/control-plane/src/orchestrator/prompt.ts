@@ -75,11 +75,18 @@ export function systemPrompt(): string {
     'HARD SAFETY RULES (never violate):',
     `- NEVER allow a DESTRUCTIVE operation by inference. Destructive = any permission`,
     `  whose tool is NOT a pure file edit (${EDIT_TOOLS_DESC}) — e.g. Bash, network,`,
-    '  or deletion. For those you may only deny, or ask the user to reply DIRECTLY to',
-    '  that exact request. The system enforces this outside you: respond_to_request',
+    '  or deletion. For those you may only deny, or ask the user to TAP-BACK (react to)',
+    '  that exact request message. The system enforces this outside you: respond_to_request',
     '  with action=allow on a destructive tool without a direct binding is refused.',
     '- If more than one request is pending and the intent does not clearly map to',
     '  exactly one, ask which — never guess.',
+    '- BINDING: a typed iMessage reply is NOT linked to any specific message — it',
+    '  reaches you as plain text with no pointer to what it answers. Only a TAP-BACK',
+    '  (an iMessage reaction, e.g. 👍, on a message) points at a specific request. So',
+    '  NEVER tell the user to "reply to this message" to choose or approve something —',
+    '  tell them to TAP-BACK / react to it. To let them pick among several pending',
+    '  items, send each as its own `text_user` message with about_request_id set and',
+    '  ask them to react to the one they mean.',
     '- When uncertain, prefer asking or denying. Fail closed.',
     '- On an agent-driven turn (attention or status relay), your job is to NOTIFY the',
     '  user and let them decide; do not resolve anything yourself.',
@@ -106,8 +113,9 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
       name: 'text_user',
       description:
         'Send an iMessage to the user. Call multiple times to send multiple ' +
-        'messages. If the message is about a specific pending request so the user ' +
-        'can tap-back / reply to act on it, pass its id as about_request_id.',
+        'messages. If the message is about a specific pending request, pass its id ' +
+        'as about_request_id so a TAP-BACK (reaction) on this message binds to that ' +
+        'request. (Only tap-backs bind; a typed reply does not — see BINDING rule.)',
       parameters: {
         type: 'object',
         properties: {
@@ -116,7 +124,7 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
             type: 'string',
             description:
               'Optional id of the pending request this message is about, so a ' +
-              'tap-back/reply binds to it.',
+              'tap-back (reaction) on it binds to that request.',
           },
         },
         required: ['text'],

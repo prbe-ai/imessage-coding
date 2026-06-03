@@ -153,7 +153,12 @@ export interface InboundMessage {
   conversationState?: Record<string, unknown>;
   /** Recent message history the provider includes for context, if any. */
   recentHistory?: RecentMessage[];
-  /** If this is a reaction/tapback, the id of the agent message it targets. */
+  /**
+   * Set ONLY for a tap-back (iMessage reaction): the id of the agent message it
+   * targets. This is the only inbound reply linkage AgentPhone forwards — a typed
+   * inline reply carries NO target (verified live 2026-06-02), so it never
+   * populates this field and cannot be bound to a specific message.
+   */
   reactionTo?: string;
   /**
    * Per-delivery id (AgentPhone's `X-Webhook-ID`). Unique per inbound message

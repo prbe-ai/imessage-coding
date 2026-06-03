@@ -5,9 +5,11 @@
  * DESTRUCTIVE permission by LLM inference. A destructive allow is permitted
  * ONLY deterministically:
  *
- *   (a) the inbound reply is a tapback / inline-reply BOUND to a specific
+ *   (a) the inbound is a TAP-BACK (iMessage reaction) BOUND to a specific
  *       attention event (matched by the notifyMessageId of the outbound phone
- *       notification that fronted it), OR
+ *       notification that fronted it). NOTE: only tap-backs carry this binding —
+ *       AgentPhone does not forward typed inline-reply linkage (verified live
+ *       2026-06-02), so a typed reply never reaches (a); it can only match (b). OR
  *   (b) there is EXACTLY ONE pending attention event for the account and it is
  *       unambiguously the target.
  *
@@ -94,12 +96,14 @@ export function deterministicTarget(
   inbound: InboundMessage,
   pending: ReadonlyArray<AttentionEvent>,
 ): AttentionEvent | undefined {
-  // (a) Explicit binding via the reacted-to / replied-to provider message id.
-  //     The control plane persists the OUTBOUND notification's provider id on
-  //     the attention (notifyMessageId), so a tapback or inline reply that
-  //     carries that id binds deterministically to THAT exact attention. We do
-  //     NOT match requestId/qid here — those are device-side ids the phone
-  //     never sees, so they can't be a reply target.
+  // (a) Explicit binding via the reacted-to provider message id. The control
+  //     plane persists the OUTBOUND notification's provider id on the attention
+  //     (notifyMessageId), so a TAP-BACK that carries that id binds
+  //     deterministically to THAT exact attention. Only tap-backs set
+  //     reactionTo — AgentPhone gives no target id for typed replies — so a
+  //     typed reply has boundId undefined and falls through to (b). We do NOT
+  //     match requestId/qid here — those are device-side ids the phone never
+  //     sees, so they can't be a reply target.
   const boundId = inbound.reactionTo;
   if (boundId) {
     const matches = pending.filter((e) => e.notifyMessageId === boundId);
@@ -148,6 +152,6 @@ export function checkDestructiveAllow(
     permitted: false,
     reason:
       'destructive permission may only be allowed via a deterministic binding ' +
-      '(tapback/inline-reply or a single pending request) — never by inference',
+      '(a tap-back reaction, or a single pending request) — never by inference',
   };
 }

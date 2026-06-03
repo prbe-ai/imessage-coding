@@ -1,4 +1,4 @@
-/* Neutral product mark — a simple geometric glyph with no brand identity.
+/* Neutral product mark — a simple phone glyph with no brand identity.
  * `currentColor` lets the mark invert against light or dark surfaces. */
 
 export function BrandMark({ className }: { className?: string }) {
@@ -13,8 +13,8 @@ export function BrandMark({ className }: { className?: string }) {
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <rect x="3" y="4" width="18" height="14" rx="3" />
-      <path d="M8 21l4-3 4 3" />
+      <rect x="5" y="2" width="14" height="20" rx="3" />
+      <path d="M12 18h.01" />
     </svg>
   );
 }

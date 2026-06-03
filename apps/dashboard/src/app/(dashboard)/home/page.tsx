@@ -321,7 +321,7 @@ export default function HomePage() {
             </div>
           ) : liveDevices.length === 0 ? (
             <div className="py-12 text-center text-sm text-outline">
-              No active devices. Start Claude Code on a paired machine, or pair
+              No active devices. Start Claude Code or Codex on a paired machine, or pair
               one from{" "}
               <a className="text-primary underline" href="/integrations">
                 Integrations

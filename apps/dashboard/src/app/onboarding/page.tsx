@@ -207,7 +207,7 @@ export default function OnboardingPage() {
         }
       >
         <p className="onb-confirm-body">
-          Link your phone so you can steer Claude Code from iMessage. Tap the
+          Link your phone so you can steer Claude Code and Codex from iMessage. Tap the
           button below — it opens Messages with a one-time code prefilled. Just
           hit send, and we&apos;ll link your number automatically.
         </p>
@@ -247,7 +247,7 @@ export default function OnboardingPage() {
         <div className="onb-callout onb-callout--ok">
           <p className="onb-callout-title">{phoneNumber}</p>
           <p className="onb-callout-body">
-            Messages from this number will steer your Claude Code sessions.
+            Messages from this number will steer your Claude Code and Codex sessions.
           </p>
         </div>
         {errorMsg && <p className="onb-signup-error">{errorMsg}</p>}

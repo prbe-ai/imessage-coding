@@ -80,7 +80,7 @@ export default function IntegrationsPage() {
             Pair a device
           </h1>
           <p className="max-w-prose text-sm text-on-surface-variant">
-            Run this one-liner on the machine where you use Claude Code. It
+            Run this one-liner on the machine where you use Claude Code or Codex. It
             installs the Probe plugin, links the device to your account, and
             sets up the status line. The token is single-use — generate a fresh
             command for each machine.
@@ -149,7 +149,7 @@ export default function IntegrationsPage() {
           <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-on-surface-variant">
             <li>The script pairs this device and stores a device token.</li>
             <li>
-              Start Claude Code — your session shows up live on the{" "}
+              Start Claude Code or Codex — your session shows up live on the{" "}
               <a className="text-primary underline" href="/home">
                 Home
               </a>{" "}

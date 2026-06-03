@@ -17,9 +17,9 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Probe — iMessage for Claude Code",
+  title: "Probe — iMessage for Claude Code & Codex",
   description:
-    "Steer your Claude Code sessions from iMessage. Approve, answer, and stay in flow from your phone.",
+    "Steer your Claude Code and Codex sessions from iMessage. Approve, answer, and stay in flow from your phone.",
   // Theme-adaptive Probe favicon, shared with the knowledge.prbe.ai dashboard.
   icons: { icon: "/logo-light.svg" },
 };

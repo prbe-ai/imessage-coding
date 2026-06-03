@@ -61,7 +61,7 @@ function SignInInner() {
         <div className="signin-options">
           <h1 className="signin-options-title">Sign in</h1>
           <p className="signin-tagline">
-            Steer your Claude Code sessions from iMessage.
+            Steer your Claude Code and Codex sessions from iMessage.
           </p>
           <button
             type="button"

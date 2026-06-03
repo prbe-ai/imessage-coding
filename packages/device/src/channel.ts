@@ -145,7 +145,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.4' },
+  { name: 'imsg-device', version: '0.1.5' },
   {
     capabilities: {
       experimental: {

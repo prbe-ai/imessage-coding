@@ -10,7 +10,8 @@
 #   LITELLM_MASTER_KEY   sk-... admin key (mints virtual keys)
 #   LITELLM_SALT_KEY     sk-... encrypts stored creds — set ONCE, never rotate
 #   DATABASE_URL         Neon Postgres — DIRECT/UNPOOLED (Prisma migrate needs it)
-#   GEMINI_API_KEY       Google AI Studio key
+#   GEMINI_API_KEY       Google AI Studio key (backs gemini-3.5-flash)
+#   CEREBRAS_API_KEY     Cerebras Inference key (backs gpt-oss-120b) — OPTIONAL
 #
 # .env-key -> fly-secret-name MAPPING (see SECRET_MAP below): the proxy needs an
 # UNPOOLED DATABASE_URL, distinct from the control-plane's pooled DATABASE_URL.
@@ -54,6 +55,14 @@ REQUIRED_SECRETS=(
   "LITELLM_SALT_KEY:LITELLM_SALT_KEY"
   "LITELLM_DATABASE_URL:DATABASE_URL"
   "GEMINI_API_KEY:GEMINI_API_KEY"
+)
+# Optional secrets: synced when present in .env, SKIPPED (not a hard error) when
+# absent. Keeps a Gemini-only deploy from having to provision an unused backend
+# key, and never blocks rotating a REQUIRED secret just because an opt-in backend
+# isn't configured. CEREBRAS_API_KEY backs the opt-in gpt-oss-120b model — only
+# needed if the control-plane flips LLM_MODEL to it.
+OPTIONAL_SECRETS=(
+  "CEREBRAS_API_KEY:CEREBRAS_API_KEY"
 )
 
 say()  { printf '[sync-fly-secrets] %s\n' "$*"; }
@@ -144,6 +153,18 @@ for pair in "${REQUIRED_SECRETS[@]}"; do
     printf '  %-22s -> %-20s set (%d chars)\n' "$env_key" "$fly_name" "${#v}"
   fi
 done
+for pair in "${OPTIONAL_SECRETS[@]}"; do
+  env_key="${pair%%:*}"
+  fly_name="${pair##*:}"
+  v="$(env_value "$env_key")"
+  if [ -z "$v" ]; then
+    printf '  %-22s -> %-20s skipped (optional, not set)\n' "$env_key" "$fly_name"
+  else
+    SYNC_ENV+=("$env_key")
+    SYNC_FLY+=("$fly_name")
+    printf '  %-22s -> %-20s set (%d chars)\n' "$env_key" "$fly_name" "${#v}"
+  fi
+done
 printf '\n'
 
 # --- remote presence + orphan check (read-only) ------------------------------
@@ -152,6 +173,7 @@ if ! $OFFLINE && [ -n "$FLY" ]; then
   if [ -n "$remote" ]; then
     declare -A managed=()
     for pair in "${REQUIRED_SECRETS[@]}"; do managed["${pair##*:}"]=1; done
+    for pair in "${OPTIONAL_SECRETS[@]}"; do managed["${pair##*:}"]=1; done
     orphans=()
     while IFS= read -r r; do
       [ -n "$r" ] || continue

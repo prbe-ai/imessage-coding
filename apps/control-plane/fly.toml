@@ -23,6 +23,12 @@ primary_region = "sjc"
   # LLM_API_KEY (a LiteLLM virtual key) is synced from .env.control via
   # apps/control-plane/scripts/sync-fly-secrets.sh.
   LLM_API_BASE = "http://imsg-litellm.flycast/v1"
+  # Which backend the proxy routes to — must match a `model_name` in
+  # apps/litellm/config.yaml. Two are wired:
+  #   gemini-3.5-flash  (default) | gpt-oss-120b  (Cerebras, ~3000 tok/s)
+  # To flip WITHOUT a rebuild: `fly secrets set LLM_MODEL=gpt-oss-120b -a imsg-control-plane`
+  # (a Fly secret overrides this [env] value and restarts the machine). Revert
+  # the same way with LLM_MODEL=gemini-3.5-flash. Editing this line needs a redeploy.
   LLM_MODEL = "gemini-3.5-flash"
   # PUBLIC origin of THIS control plane (the device + install.sh point at it).
   # Intentionally NOT set here: a hardcoded host would re-brand this OSS repo.

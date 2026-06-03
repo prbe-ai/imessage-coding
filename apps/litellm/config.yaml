@@ -1,12 +1,20 @@
 # =============================================================================
 # LiteLLM proxy config for imessage-coding's conversational assistant.
 #
-# Serves an OpenAI-compatible /v1/chat/completions endpoint backed by Google
-# Gemini, with per-iMessage-user spend tracking (the control-plane tags each
-# request with `user: <accountId>` -> LiteLLM_EndUserTable).
+# Serves an OpenAI-compatible /v1/chat/completions endpoint with per-iMessage-user
+# spend tracking (the control-plane tags each request with `user: <accountId>` ->
+# LiteLLM_EndUserTable — proxy-side, so attribution works for EVERY backend below).
+#
+# TWO interchangeable backends live here; the control-plane picks one by sending
+# its `model` field == LLM_MODEL (apps/control-plane/fly.toml [env]):
+#   * gemini-3.5-flash  — Google Gemini (DEFAULT).
+#   * gpt-oss-120b      — Cerebras gpt-oss-120B (~3000 tok/s; low-latency option).
+# Flip by changing LLM_MODEL on the control-plane — both stay live here, so
+# switching back and forth needs NO redeploy of this proxy.
 #
 # Secrets arrive via env (set with `fly secrets set` on the imsg-litellm app):
-#   GEMINI_API_KEY       Google AI Studio key
+#   GEMINI_API_KEY       Google AI Studio key (backs gemini-3.5-flash)
+#   CEREBRAS_API_KEY     Cerebras Inference key (backs gpt-oss-120b; optional)
 #   LITELLM_MASTER_KEY   sk-... admin key (mints virtual keys)
 #   LITELLM_SALT_KEY     sk-... encrypts stored creds — set ONCE, never rotate
 #   DATABASE_URL         Neon Postgres (DIRECT/unpooled — Prisma migrate needs it)
@@ -21,6 +29,15 @@ model_list:
       # conversational assistant that must understand fuzzy/multi-turn intent,
       # not a single-shot extractor. Lower it later with reasoning_effort if
       # latency/cost warrant.
+
+  - model_name: gpt-oss-120b                # the id the control-plane sends (LLM_MODEL)
+    litellm_params:
+      model: cerebras/gpt-oss-120b           # Cerebras Inference (OpenAI-compatible)
+      api_key: os.environ/CEREBRAS_API_KEY
+      # gpt-oss is a reasoning model; reasoning_effort caps the hidden reasoning
+      # tokens. `low` keeps turns fast/conversational — raise to medium|high if
+      # answer quality warrants. (drop_params below tolerates it on any provider.)
+      reasoning_effort: low
 
 litellm_settings:
   drop_params: true                          # tolerate cross-provider params (response_format, etc.)

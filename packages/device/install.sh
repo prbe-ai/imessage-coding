@@ -391,16 +391,24 @@ install_for_claude_code() {
 #   2. Hooks:     Codex loads hooks/hooks.json by convention — so we install the
 #                 Codex hooks (hooks/codex/hooks.json) AS hooks/hooks.json in the
 #                 Codex plugin dir, and drop the CC hooks. plugin_hooks must be on.
-#   3. MCP:       registered by the plugin manifest's mcpServers pointer (the
-#                 .mcp.codex.json, command=bun + IMSG_AGENT_KIND=codex). We do NOT
-#                 also write [mcp_servers.imsg-device] into config.toml — the
-#                 plugin-declared server is the single source of truth (mirrors
-#                 the cloudflare plugin). [FLAG: if a future Codex drops manifest
-#                 mcpServers support, fall back to the config.toml merge — see the
-#                 commented block in this function.]
-#   4. Register:  `codex plugin marketplace add <local-dir>` writes [marketplaces.*];
-#                 enabling the plugin + plugin_hooks is written into config.toml
-#                 non-destructively (no `codex plugin install` CLI exists).
+#                 Those hook commands use RELATIVE script paths (./hooks/codex/*.ts)
+#                 resolved against the plugin root, NOT ${CLAUDE_PLUGIN_ROOT} —
+#                 Codex does not expand that CC variable (curated figma plugin
+#                 precedent), so the placeholder form silently failed every hook.
+#   3. MCP:       registered by the plugin manifest's mcpServers pointer
+#                 (.mcp.codex.json, IMSG_AGENT_KIND=codex). That file uses Codex's
+#                 local-MCP convention — top-level "cwd": "." + relative `start`,
+#                 NOT "--cwd ${CLAUDE_PLUGIN_ROOT}" (same non-expansion gotcha as
+#                 the hooks; it was the "MCP failed to start" bug). We do NOT also
+#                 write [mcp_servers.imsg-device] into config.toml — the plugin-
+#                 declared server is the single source of truth.
+#   4. Register:  `codex plugin marketplace add <local-dir>` writes [marketplaces.*],
+#                 then `codex plugin add <plugin@marketplace>` installs (snapshots
+#                 into ~/.codex/plugins/cache) AND enables it — the same thing the
+#                 interactive /plugin flow does. The global [features] plugin_hooks
+#                 flag is still written into config.toml non-destructively (`plugin
+#                 add` does not set feature flags). A config.toml-only enable is kept
+#                 solely as a fallback for a codex too old to have `plugin add`.
 #   5. NO channels alias, NO statusLine, NO --dangerously-load-development-channels
 #                 (all CC-only). NO SessionEnd hook (Codex has none; the tap daemon
 #                 self-exits via its lsof orphan check).
@@ -482,38 +490,61 @@ install_for_codex() {
   rewrite_bun "$CODEX_PLUGIN_DIR/.mcp.codex.json"
   say "rewrote bun command to absolute path in Codex hooks.json + .mcp.codex.json"
 
-  # --- register the marketplace (writes [marketplaces.*] into config.toml) ----
-  # [LIVE-VERIFY] `codex plugin marketplace add <local-dir>` — confirm it reads
-  # our marketplace.json name ($MARKETPLACE_NAME) so the plugin ref resolves to
-  # imsg-device@$MARKETPLACE_NAME.
+  # --- register the marketplace, then INSTALL the plugin ----------------------
+  # `codex plugin marketplace add <local-dir>` writes [marketplaces.*]; the
+  # follow-up `codex plugin add <plugin@marketplace>` is the REAL install — it
+  # snapshots the plugin into ~/.codex/plugins/cache AND flips it enabled in one
+  # step, exactly what the interactive `/plugin` flow does. Skipping it (and just
+  # hand-writing `enabled=true`) leaves the plugin enabled-but-NOT-installed, so
+  # Codex never loads it and the user has to run /plugin by hand. `codex plugin
+  # add` is idempotent (re-running re-snapshots the same version).
+  INSTALLED_VIA_CLI=""
   if [ -n "$CODEX_BIN" ]; then
     "$CODEX_BIN" plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
     if "$CODEX_BIN" plugin marketplace add "$CODEX_MARKETPLACE_DIR" >/dev/null 2>&1; then
       say "registered Codex marketplace from $CODEX_MARKETPLACE_DIR"
+      if "$CODEX_BIN" plugin add "${PLUGIN_NAME}@${MARKETPLACE_NAME}" >/dev/null 2>&1; then
+        say "installed + enabled ${PLUGIN_NAME}@${MARKETPLACE_NAME} (codex plugin add)"
+        INSTALLED_VIA_CLI="1"
+      else
+        # Older codex without `plugin add`, or a transient failure: fall back to
+        # the config.toml enable write below so behavior degrades, not breaks.
+        say "note: 'codex plugin add' failed (older codex?) — falling back to config.toml enable; you may need: codex plugin add ${PLUGIN_NAME}@${MARKETPLACE_NAME}"
+      fi
     else
       say "note: 'codex plugin marketplace add' failed — run manually:"
       say "  codex plugin marketplace add $CODEX_MARKETPLACE_DIR"
+      say "  codex plugin add ${PLUGIN_NAME}@${MARKETPLACE_NAME}"
     fi
   else
-    say "note: register the Codex marketplace manually with:"
+    say "note: 'codex' CLI not on PATH — install manually with:"
     say "  codex plugin marketplace add $CODEX_MARKETPLACE_DIR"
+    say "  codex plugin add ${PLUGIN_NAME}@${MARKETPLACE_NAME}"
   fi
 
-  # --- enable the plugin + plugin_hooks in config.toml (non-destructive) ------
-  # There is NO `codex plugin install` CLI (only marketplace mgmt), so we write
-  # the enable + feature flags directly into config.toml WITHOUT clobbering the
-  # user's existing mcp_servers / plugins / marketplaces. Idempotent: a present
-  # block is left as-is; a missing one is appended.
-  CODEX_CONFIG="$CODEX_CONFIG" PLUGIN_REF="${PLUGIN_NAME}@${MARKETPLACE_NAME}" "$BUN" -e '
+  # --- ensure config flags (non-destructive) ----------------------------------
+  # [features] plugin_hooks = true is ALWAYS required — it is a global feature
+  # flag that `codex plugin add` does NOT set, and Codex won't run plugin hooks
+  # without it. The per-plugin [plugins."ref"] enabled=true block is only a
+  # FALLBACK for when `codex plugin add` didn't run (CLI missing / too old);
+  # when add succeeded it already wrote that block, so we skip it to avoid drift.
+  # Both writes leave the user's existing mcp_servers / plugins / marketplaces
+  # untouched.
+  CODEX_CONFIG="$CODEX_CONFIG" PLUGIN_REF="${PLUGIN_NAME}@${MARKETPLACE_NAME}" \
+  INSTALLED_VIA_CLI="$INSTALLED_VIA_CLI" "$BUN" -e '
     const fs = require("fs");
     const f = process.env.CODEX_CONFIG;
     const ref = process.env.PLUGIN_REF;
+    const installedViaCli = process.env.INSTALLED_VIA_CLI === "1";
     let s = ""; try { s = fs.readFileSync(f, "utf8"); } catch {}
-    // [plugins."imsg-device@imsg"] enabled = true — append if no such table.
-    const pluginHeader = `[plugins."${ref}"]`;
-    if (s.indexOf(pluginHeader) === -1) {
-      if (s.length && !s.endsWith("\n")) s += "\n";
-      s += `\n${pluginHeader}\nenabled = true\n`;
+    // [plugins."imsg-device@imsg"] enabled = true — FALLBACK only (codex plugin
+    // add already owns this block on the happy path).
+    if (!installedViaCli) {
+      const pluginHeader = `[plugins."${ref}"]`;
+      if (s.indexOf(pluginHeader) === -1) {
+        if (s.length && !s.endsWith("\n")) s += "\n";
+        s += `\n${pluginHeader}\nenabled = true\n`;
+      }
     }
     // [features] plugin_hooks = true — ensure the table + the key (non-destructive).
     // Match a real `plugin_hooks =` key assignment, not any substring mention: a
@@ -535,37 +566,45 @@ install_for_codex() {
     fs.mkdirSync(require("path").dirname(f), { recursive: true });
     fs.writeFileSync(f, s);
   '
-  say "enabled ${PLUGIN_NAME}@${MARKETPLACE_NAME} + [features] plugin_hooks=true in $CODEX_CONFIG (non-destructive merge)"
+  say "ensured [features] plugin_hooks=true in $CODEX_CONFIG (non-destructive merge)"
 
   # --- MCP server registration ------------------------------------------------
   # The plugin manifest's "mcpServers": "./.mcp.codex.json" registers the MCP
-  # server when Codex loads the plugin (command=bun, env IMSG_AGENT_KIND=codex) —
-  # the single source of truth, mirroring the cloudflare plugin. We deliberately
-  # do NOT also write [mcp_servers.imsg-device] into config.toml (that would be a
-  # second, drift-prone registration).
-  #
-  # [FALLBACK / FLAG] If a live `codex` run shows the manifest mcpServers pointer
-  # is NOT honored in this Codex version, register it in config.toml instead with
-  # a non-destructive merge like the plugins block above, e.g.:
-  #   [mcp_servers.imsg-device]
-  #   command = "<abs bun>"
-  #   args = ["run", "--cwd", "<CODEX_PLUGIN_DIR>", "--silent", "start"]
-  #   [mcp_servers.imsg-device.env]
-  #   IMSG_AGENT_KIND = "codex"
-  say "MCP server registered via plugin manifest mcpServers (.mcp.codex.json) [LIVE-VERIFY]"
+  # server when Codex loads the plugin. CRITICAL: that file uses the CODEX local-
+  # MCP convention — a top-level "cwd": "." (resolved to the plugin root) + the
+  # relative `start` script — NOT Claude Code's "--cwd ${CLAUDE_PLUGIN_ROOT}".
+  # Codex does NOT expand ${CLAUDE_PLUGIN_ROOT} in MCP args, so the old form made
+  # bun chdir into a literal "${CLAUDE_PLUGIN_ROOT}" → ENOENT → the server died on
+  # the initialize handshake ("MCP client for imsg-device failed to start"), which
+  # is also why Codex sessions never reached the dashboard (no heartbeat). The
+  # curated openai-developers plugin uses exactly this cwd:"." + relative form.
+  # rewrite_bun (above) made "bun" absolute; the relative `start` resolves against
+  # the cwd Codex sets from the manifest. We deliberately do NOT also write
+  # [mcp_servers.imsg-device] into config.toml (a second, drift-prone source).
+  say "MCP server registered via plugin manifest mcpServers (.mcp.codex.json, cwd:'.')"
 
   # --- pair (shared) ----------------------------------------------------------
   pair_device "${CODEX_PLUGIN_DIR}/bin/imsg.ts"
 
   # --- hook hash-trust --------------------------------------------------------
-  # Codex hash-trusts plugin hooks before running them (a security gate). The
-  # first `codex` session after install will prompt to trust the imsg-device
-  # hooks; accept once via the /hooks UI. [LIVE-VERIFY: confirm the exact trust
-  # affordance in this Codex version — it may be a /hooks command or a startup
-  # prompt; there is no documented non-interactive bypass flag we rely on here.]
-  say "ACTION REQUIRED: start Codex once and TRUST the imsg-device hooks (the /hooks"
-  say "  trust step) — Codex hash-trusts plugin hooks before it will run them."
-  say "done (Codex). The plugin + MCP load on your next Codex session after trusting hooks."
+  # Codex stores a per-hook sha256 in config.toml ([hooks.state."imsg-device@imsg:
+  # hooks/hooks.json:<event>:0:0"].trusted_hash) and will NOT run a plugin hook
+  # until its current hash is trusted. There is no reliable non-interactive way to
+  # pre-seed those hashes (the digest input is undocumented + version-specific), so
+  # the user must approve them once — until then the AFK relay/gating + session
+  # registration hooks stay dormant. Spell the step out loudly below.
+  printf '\n'
+  say "============================================================================"
+  say " ACTION REQUIRED — approve the imsg-device hooks in Codex (one time):"
+  say "   1. Start a Codex session:   codex"
+  say "   2. Codex detects the imsg-device plugin hooks and asks you to review +"
+  say "      TRUST them. Approve all of them (SessionStart, UserPromptSubmit,"
+  say "      PermissionRequest, Stop). If you are not prompted, run /hooks inside"
+  say "      Codex and trust the imsg-device hooks there."
+  say "   Until you trust them, AFK approvals/questions are NOT relayed to your"
+  say "   phone and your Codex sessions will NOT appear on the dashboard."
+  say "============================================================================"
+  say "done (Codex). Plugin + MCP load next session; the relay activates once hooks are trusted."
 }
 
 # =============================================================================

@@ -1,3 +1,7 @@
+---
+description: Toggle AFK (away-from-keyboard) mode — route Codex destructive-tool approvals and questions to your phone over iMessage.
+---
+
 # /afk
 
 Toggle AFK (away-from-keyboard) mode for the imsg-device bridge.

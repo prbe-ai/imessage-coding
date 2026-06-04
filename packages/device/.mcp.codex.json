@@ -1,8 +1,9 @@
 {
   "mcpServers": {
     "imsg-device": {
+      "cwd": ".",
       "command": "bun",
-      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--silent", "start"],
+      "args": ["run", "--silent", "start"],
       "env": {
         "IMSG_AGENT_KIND": "codex"
       }

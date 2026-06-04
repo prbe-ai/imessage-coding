@@ -92,13 +92,17 @@ uninstall_claude_code() {
 
 # --- Codex uninstall --------------------------------------------------------
 uninstall_codex() {
-  # 1. remove the Codex marketplace registration (also deletes its install dir).
+  # 1. uninstall the plugin (clears the ~/.codex/plugins/cache snapshot + the
+  #    config enable block), THEN remove the marketplace registration. `codex
+  #    plugin remove` is the counterpart to the install's `codex plugin add`;
+  #    `marketplace remove` then drops the [marketplaces.*] source.
   CODEX_BIN="$(command -v codex || true)"
   if [ -n "$CODEX_BIN" ]; then
+    "$CODEX_BIN" plugin remove "${PLUGIN_NAME}@${MARKETPLACE_NAME}" >/dev/null 2>&1 || true
     "$CODEX_BIN" plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
-    say "unregistered Codex marketplace ${MARKETPLACE_NAME}"
+    say "uninstalled ${PLUGIN_NAME}@${MARKETPLACE_NAME} + unregistered Codex marketplace ${MARKETPLACE_NAME}"
   else
-    say "note: 'codex' CLI not on PATH — remove the marketplace manually: codex plugin marketplace remove ${MARKETPLACE_NAME}"
+    say "note: 'codex' CLI not on PATH — remove manually: codex plugin remove ${PLUGIN_NAME}@${MARKETPLACE_NAME} && codex plugin marketplace remove ${MARKETPLACE_NAME}"
   fi
 
   # 2. strip OUR blocks from config.toml non-destructively (the [plugins."ref"]
@@ -131,8 +135,8 @@ uninstall_codex() {
     say "note: bun not on PATH — remove the Codex plugin block from $CODEX_CONFIG by hand"
   fi
 
-  # 3. remove the staged Codex plugin tree.
-  rm -rf "$CODEX_MARKETPLACE_DIR"
+  # 3. remove the staged Codex plugin tree + the (now-empty) install cache.
+  rm -rf "$CODEX_MARKETPLACE_DIR" "${CODEX_HOME}/plugins/cache/${MARKETPLACE_NAME}"
   say "removed Codex plugin files"
 }
 

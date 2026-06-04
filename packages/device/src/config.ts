@@ -247,6 +247,21 @@ export function agentKind(env: NodeJS.ProcessEnv = process.env): AgentKind {
 }
 
 /**
+ * True iff `dir` sits inside Codex's plugin cache (`…/.codex/plugins/…`) or a
+ * marketplace clone (`…/codex/marketplaces/…`) — i.e. one of Codex's OWN
+ * throwaway sessions for installing/validating a plugin, which carry no user
+ * turn. Both the SessionStart tap AND the long-lived MCP server's heartbeat key a
+ * dashboard `sessions` row off the project dir, so each skips its work for such a
+ * cwd — otherwise these register a titleless row labelled by the plugin's version
+ * folder (e.g. ".../imsg-device/0.1.11"). Matches a `codex/{plugins,marketplaces}/`
+ * path segment (with or without the leading dot), so an unrelated dir that merely
+ * contains the word "codex" (e.g. `…/mycodex-app`) does NOT match.
+ */
+export function isPluginHousekeepingDir(dir: string): boolean {
+  return /(?:^|\/)\.?codex\/(?:plugins|marketplaces)(?:\/|$)/.test(dir);
+}
+
+/**
  * Build-baked config, written into the plugin ROOT (next to package.json) at
  * build time by apps/dashboard/scripts/copy-install-script.mjs. This is how the
  * long-lived MCP server + CLI learn the control-plane URL: Claude Code spawns

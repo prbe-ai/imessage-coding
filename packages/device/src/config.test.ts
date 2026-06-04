@@ -21,6 +21,7 @@ import {
   agentKind,
   defaultDeviceDir,
   deviceDir,
+  isPluginHousekeepingDir,
   legacyDeviceDir,
   pickEagerSessionId,
   relocateLegacyState,
@@ -124,6 +125,34 @@ describe('agentKind', () => {
 
   test('blank / whitespace-only value defaults to CLAUDE_CODE', () => {
     expect(agentKind({ IMSG_AGENT_KIND: '   ' })).toBe(AgentKind.CLAUDE_CODE);
+  });
+});
+
+describe('isPluginHousekeepingDir (skip Codex plugin housekeeping sessions)', () => {
+  test('the plugin cache dir is housekeeping (the source of the "0.1.11" rows)', () => {
+    expect(isPluginHousekeepingDir('/Users/me/.codex/plugins/cache/imsg/imsg-device/0.1.11')).toBe(true);
+  });
+
+  test('a marketplace clone is housekeeping', () => {
+    expect(isPluginHousekeepingDir('/Users/me/.codex/marketplaces/imsg-local/imsg-device')).toBe(true);
+  });
+
+  test('a temp marketplace clone (no leading dot on codex) is housekeeping', () => {
+    expect(isPluginHousekeepingDir('/private/var/folders/x/T/tmp.AbC/codex/marketplaces/imsg-local/imsg-device')).toBe(true);
+  });
+
+  test('a real project checkout is NOT housekeeping', () => {
+    expect(isPluginHousekeepingDir('/Users/me/Documents/GitHub/imessage-coding')).toBe(false);
+  });
+
+  test('~/.codex itself and its other subdirs (skills) are NOT housekeeping', () => {
+    expect(isPluginHousekeepingDir('/Users/me/.codex')).toBe(false);
+    expect(isPluginHousekeepingDir('/Users/me/.codex/skills/foo')).toBe(false);
+  });
+
+  test('a dir that merely contains the word "codex" does NOT match', () => {
+    expect(isPluginHousekeepingDir('/Users/me/projects/mycodex-app/plugins')).toBe(false);
+    expect(isPluginHousekeepingDir('/Users/me/codexplugins/x')).toBe(false);
   });
 });
 

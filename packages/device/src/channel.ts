@@ -51,6 +51,7 @@ import {
   agentKind,
   deviceApiUrl,
   deviceIdFile,
+  isPluginHousekeepingDir,
   logDir,
   migrateLegacyDeviceDir,
   pickEagerSessionId,
@@ -598,11 +599,23 @@ function sleep(ms: number): Promise<void> {
 // --- boot --------------------------------------------------------------------
 await mcp.connect(new StdioServerTransport());
 log('connected', { device: DEVICE_ID, project: PROJECT_CWD, control: deviceApiUrl(DeviceApiRoute.ATTENTION) });
-// Session id resolves async from the handshake; record it once known.
-void sessionReady.then(() => log('session_resolved', { session: SESSION_ID }));
 
-// Fire the background loops; they own their own retry/backoff and never throw
-// out (errors are logged + retried) so the MCP stdio loop stays alive. Each
-// awaits `sessionReady` so it operates under the real session id.
-void subscribeEvents();
-void heartbeatLoop();
+// Codex boots this MCP server even for its OWN plugin install / marketplace
+// validation sessions (rooted under ~/.codex/{plugins,marketplaces}/…). Those
+// carry no user, so we stay connected (Codex expects the configured server) but
+// never run the heartbeat/SSE loops — a heartbeat would register a titleless
+// dashboard session row labelled by the plugin's version folder. This is the
+// path that actually creates those rows (the MCP server's random-id fallback),
+// so the SessionStart tap guard alone is not enough.
+if (isPluginHousekeepingDir(PROJECT_CWD)) {
+  log('housekeeping_session_inert', { project: PROJECT_CWD });
+} else {
+  // Session id resolves async from the handshake; record it once known.
+  void sessionReady.then(() => log('session_resolved', { session: SESSION_ID }));
+
+  // Fire the background loops; they own their own retry/backoff and never throw
+  // out (errors are logged + retried) so the MCP stdio loop stays alive. Each
+  // awaits `sessionReady` so it operates under the real session id.
+  void subscribeEvents();
+  void heartbeatLoop();
+}

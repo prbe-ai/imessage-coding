@@ -115,6 +115,32 @@ function isStartupContextMessage(content: unknown): boolean {
   return texts.length > 0 && texts.every(isStartupContextText);
 }
 
+/** True for Codex's injected AGENTS.md project-instructions frame — the AGENTS.md
+ *  file dumped in as a user turn (`# AGENTS.md instructions for <dir>`). It's pure
+ *  context, never a real prompt, so it must not surface as a user message nor
+ *  become the session title. */
+function isAgentsInstructions(text: string): boolean {
+  return text.trimStart().startsWith('# AGENTS.md instructions for ');
+}
+
+/** When a user turn carries attached-files or in-app-browser context, Codex
+ *  prepends that context and delimits the user's real prompt with this marker on
+ *  its OWN line. Strip everything up to and including the marker line so we
+ *  surface the prompt, not the wrapper. Returns the original text unchanged when
+ *  the marker is absent (no wrapper), is not on its own line (a real prompt that
+ *  merely quotes the string), or has an empty body (attachment-only turn) — so a
+ *  real turn is never reduced to nothing. The LAST marker line wins (a nested
+ *  wrapper). */
+const CODEX_REQUEST_MARKER = '## My request for Codex:';
+function unwrapCodexRequest(text: string): string {
+  const lines = text.split('\n');
+  let marker = -1;
+  for (let i = 0; i < lines.length; i++) if (lines[i]!.trim() === CODEX_REQUEST_MARKER) marker = i;
+  if (marker === -1) return text;
+  const body = lines.slice(marker + 1).join('\n').trim();
+  return body || text;
+}
+
 /** A `local_shell_call`'s `action.command` (array or string) → a one-line summary. */
 function summarizeShellAction(action: unknown): string {
   if (typeof action !== 'object' || action === null) return '';
@@ -142,7 +168,8 @@ function toolUseActivity(toolName: string, summaryRaw: string): ExtractedActivit
   return entry;
 }
 
-/** A `response_item.message` → zero or more text activities (startup frames dropped). */
+/** A `response_item.message` → zero or more text activities (injected-context
+ *  frames dropped, attached-files/browser turns unwrapped to the real prompt). */
 function extractMessage(payload: Record<string, unknown>): ExtractedActivity[] {
   const role = typeof payload['role'] === 'string' ? payload['role'] : 'user';
   // Developer instructions are pure system framing; startup-context user frames
@@ -151,9 +178,15 @@ function extractMessage(payload: Record<string, unknown>): ExtractedActivity[] {
   if (role === 'user' && isStartupContextMessage(payload['content'])) return [];
 
   const kind = role === 'assistant' ? ActivityKind.ASSISTANT_TEXT : ActivityKind.USER_MESSAGE;
+  const isUser = kind === ActivityKind.USER_MESSAGE;
   const out: ExtractedActivity[] = [];
-  for (const text of contentTexts(payload['content'])) {
-    const t = sanitizeText(text);
+  for (const raw of contentTexts(payload['content'])) {
+    // The AGENTS.md project-instructions frame is pure injected context with no
+    // prompt — drop it so it can't become the "first user message" (the session
+    // title). An attached-files / in-app-browser turn prepends context and
+    // delimits the real prompt with a marker — unwrap back to that prompt.
+    if (isUser && isAgentsInstructions(raw)) continue;
+    const t = sanitizeText(isUser ? unwrapCodexRequest(raw) : raw);
     if (t.trim()) out.push({ kind, text: t });
   }
   return out;
@@ -208,10 +241,10 @@ export function extractCodexActivity(raw: unknown): ExtractedActivity[] {
  * The first real user message in a Codex rollout — the Codex analog of the CC
  * tap's provisional first-message title seed (tap.ts `scanForTitle`, which takes
  * the first USER_MESSAGE that `extractActivity` yields). Walks lines FORWARD,
- * reuses {@link extractCodexActivity} so startup-context/developer frames are
- * already filtered, and returns the first surfaced user text (sanitized), or
- * null. Pure; unparseable lines are skipped. Signature mirrors the pure scans in
- * transcript.ts.
+ * reuses {@link extractCodexActivity} so developer / startup-context / AGENTS.md
+ * frames are filtered and attached-files/browser turns are unwrapped to the real
+ * prompt, and returns the first surfaced user text (sanitized), or null. Pure;
+ * unparseable lines are skipped. Signature mirrors the pure scans in transcript.ts.
  */
 export function firstCodexUserMessage(lines: string[]): string | null {
   for (const line of lines) {

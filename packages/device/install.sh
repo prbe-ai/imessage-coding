@@ -52,11 +52,13 @@ set -eu
 IMSG_INSTALL_BASE="${IMSG_INSTALL_BASE:-__IMSG_INSTALL_BASE__}"
 PLUGIN_NAME="imsg-device"
 MARKETPLACE_NAME="imsg"
-# Which coding agent to install the plugin for. DEFAULT claude-code so an existing
-# install one-liner is byte-for-byte unchanged. Set IMSG_AGENT_TARGET=codex for a
-# Codex-only install, or =both to install for both agents on this machine.
+# Which coding agent to install the plugin for. DEFAULT both: set up every agent
+# present on this machine. The Codex path SELF-SKIPS when the `codex` CLI is not
+# installed, so a Claude-Code-only machine gets exactly the CC install and no
+# stray ~/.codex artifacts. Override with IMSG_AGENT_TARGET=claude-code or =codex
+# for a single-agent install.
 #   claude-code | codex | both
-IMSG_AGENT_TARGET="${IMSG_AGENT_TARGET:-claude-code}"
+IMSG_AGENT_TARGET="${IMSG_AGENT_TARGET:-both}"
 CLAUDE_DIR="${HOME}/.claude"
 SETTINGS="${CLAUDE_DIR}/settings.json"
 # Mutable state dir (matches src/config.ts deviceDir()): the neutral,
@@ -413,7 +415,14 @@ CODEX_MARKETPLACE_DIR="${CODEX_HOME}/marketplaces/${MARKETPLACE_NAME}-local"
 CODEX_PLUGIN_DIR="${CODEX_MARKETPLACE_DIR}/${PLUGIN_NAME}"
 
 install_for_codex() {
-  command -v codex >/dev/null 2>&1 || say "note: 'codex' CLI not on PATH — registration steps below print manual commands"
+  # Self-skip when the Codex CLI is absent. With DEFAULT=both, a Claude-Code-only
+  # machine must NOT get ~/.codex config/plugin artifacts it can't use; and an
+  # explicit IMSG_AGENT_TARGET=codex on a codex-less machine should say so plainly
+  # rather than stage a plugin nothing will load.
+  if ! command -v codex >/dev/null 2>&1; then
+    say "codex CLI not found on PATH — skipping Codex install. Install codex, then re-run with IMSG_AGENT_TARGET=codex."
+    return 0
+  fi
   CODEX_BIN="$(command -v codex || true)"
 
   # --- stage the Codex plugin into a local marketplace ------------------------

@@ -307,7 +307,7 @@ describe('agent_message attribution — name the source session (title + id), es
 // The system prompt must carry the "brevity ≠ drop the decision" carve-out so a copy
 // edit can't silently re-introduce the vague-summary regression on the question path.
 describe('brevity carve-out — surface the actual decision, not a vague summary', () => {
-  const sp = systemPrompt();
+  const sp = systemPrompt('user_message');
 
   test('tells the model brevity does not mean dropping the specific ask', () => {
     expect(/brevity does\s+NOT mean dropping the substance/i.test(sp)).toBe(true);
@@ -330,7 +330,7 @@ describe('binding guidance — tap-back is the signal, never "reply directly"', 
       .description;
 
   test('system prompt steers to tap-back, never "reply directly"', () => {
-    const sp = systemPrompt();
+    const sp = systemPrompt('user_message');
     expect(/reply directly/i.test(sp)).toBe(false);
     expect(/tap-back/i.test(sp)).toBe(true);
   });
@@ -351,7 +351,7 @@ describe('binding guidance — tap-back is the signal, never "reply directly"', 
 // answer. The code no longer auto-binds (plain text always steers); the prompt carries the
 // guardrail + the "final say" framing. Lock them so a copy edit can't silently drop them.
 describe('routing guardrail — do not funnel unrelated messages; LLM has final say', () => {
-  const sp = systemPrompt();
+  const sp = systemPrompt('user_message');
 
   test('a reply is an answer only if it clearly responds — never funnel an unrelated message', () => {
     expect(/clearly responds/i.test(sp)).toBe(true);
@@ -367,7 +367,7 @@ describe('routing guardrail — do not funnel unrelated messages; LLM has final 
 // Markdown, so the model must write plain text; it must not leak internal ids; and
 // it is explicitly allowed to stay silent when nothing needs saying.
 describe('texting style — plain text, no ids, may stay silent', () => {
-  const sp = systemPrompt();
+  const sp = systemPrompt('user_message');
 
   test('forbids Markdown explicitly', () => {
     expect(/Markdown/i.test(sp)).toBe(true);
@@ -379,5 +379,36 @@ describe('texting style — plain text, no ids, may stay silent', () => {
 
   test('permits staying silent when nothing needs saying', () => {
     expect(/Silence is fine|do NOT have to reply/i.test(sp)).toBe(true);
+  });
+});
+
+// The system prompt is mode-aware: the two agent-driven turns are notify-only (only
+// message_user is in their tool surface), so they get a NOTIFY-ONLY clarifier APPENDED.
+// The clarifier is a strict SUFFIX — the invariant body is byte-identical across modes —
+// so the body stays a cache-stable prefix (the tools, which already differ by mode, are
+// the only other thing the prefix turns on). Lock both halves: the suffix is present on
+// notify-only turns and absent on user_message, AND the notify-only prompt starts with the
+// full user_message prompt (so a future edit can't slip a per-mode change INTO the body).
+describe('mode-aware system prompt — notify-only suffix, cache-stable prefix', () => {
+  const userSp = systemPrompt('user_message');
+  const eventSp = systemPrompt('agent_event');
+  const messageSp = systemPrompt('agent_message');
+
+  test('user_message gets no notify-only clarifier', () => {
+    expect(/NOTIFY-ONLY/i.test(userSp)).toBe(false);
+  });
+
+  test('both agent-driven modes get the notify-only clarifier (message_user only)', () => {
+    for (const sp of [eventSp, messageSp]) {
+      expect(/NOTIFY-ONLY/i.test(sp)).toBe(true);
+      expect(/only tool you have right now is message_user/i.test(sp)).toBe(true);
+    }
+  });
+
+  test('the clarifier is a strict SUFFIX — body unchanged, so the prefix stays cache-stable', () => {
+    expect(eventSp.startsWith(userSp)).toBe(true);
+    expect(messageSp.startsWith(userSp)).toBe(true);
+    // And the notify-only prompts are longer only by the appended suffix.
+    expect(eventSp.length > userSp.length).toBe(true);
   });
 });

@@ -34,3 +34,6 @@ bun-debug.log*
 # misc
 coverage/
 .turbo/
+
+# local-only working notes (never published)
+*.internal.md

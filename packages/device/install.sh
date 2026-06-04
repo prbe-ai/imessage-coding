@@ -384,7 +384,7 @@ install_for_claude_code() {
 }
 
 # =============================================================================
-# Codex target — additive; mirrors prbe-codex-tap-plugin's install shape.
+# Codex target — additive; mirrors the Codex plugin install shape.
 #
 # Codex differs from Claude Code in five ways, all handled below:
 #   1. Manifest:  .codex-plugin/plugin.json (declares mcpServers: ./.mcp.codex.json).

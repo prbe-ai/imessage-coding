@@ -1,7 +1,7 @@
 /**
  * @imsg/device — Claude Code transcript tailer (byte-offset cursor).
  *
- * Ported from prbe-cc-tap-plugin's tap/transcript.py. We track BYTES (not line
+ * Ported from an internal Claude Code tap plugin's transcript reader. We track BYTES (not line
  * counts) so a partial trailing line — written mid-flush by Claude Code — does
  * not advance the cursor and gets re-read next tick once the newline lands.
  *

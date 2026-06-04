@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "iMessage-driven remote control + steering for Claude Code coding sessions.",
+  "license": "MIT",
   "workspaces": [
     "apps/*",
     "packages/*"

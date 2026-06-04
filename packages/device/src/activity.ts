@@ -1,7 +1,7 @@
 /**
  * @imsg/device — transcript → lightweight activity extractor.
  *
- * Ported in spirit from prbe-cc-tap-plugin's tap/sanitize.py, but reshaped: the
+ * Ported in spirit from an internal Claude Code tap plugin's sanitizer, but reshaped: the
  * tap-plugin ships trimmed RAW events; we emit a coarse, typed activity stream
  * that says WHAT a session is doing, never the full data. Per the product
  * decision (AFK tap):

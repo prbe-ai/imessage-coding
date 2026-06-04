@@ -10,8 +10,8 @@
  * never appear.
  *
  * The fixture `__fixtures__/codex-rollout-sample.jsonl` is the real captured
- * Codex session ("Say hello in five words. Do not call any tools.") copied from
- * prbe-codex-tap-plugin.
+ * Codex session ("Say hello in five words. Do not call any tools.") captured
+ * from an internal Codex tap plugin.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

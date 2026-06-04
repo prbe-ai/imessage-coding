@@ -6,7 +6,7 @@
  *   {"type": <variant>, "payload": {...}, "timestamp": "..."}
  * with variant ∈ {session_meta, turn_context, response_item, event_msg, …}.
  *
- * Ported in spirit from prbe-codex-tap-plugin's tap/sanitize.py — but that
+ * Ported in spirit from an internal Codex tap plugin's sanitizer — but that
  * plugin shim-translates each line into the full Claude-Code transcript shape;
  * we instead emit THIS repo's coarse, typed {@link ExtractedActivity} stream
  * (the SAME shape `extractActivity` produces), so the activity tap can treat a

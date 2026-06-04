@@ -72,7 +72,6 @@ import {
 import { streamSSE } from 'hono/streaming';
 import { getTransport } from '../transport.ts';
 import { relayAgentMessage, runAgentEventTurn } from '../orchestrator/index.ts';
-import { markSessionConnected, markSessionDisconnected } from '../device-connections.ts';
 import {
   PERMISSION_DEADLINE_MS,
   assertDeadlineBelowHookTimeout,
@@ -558,70 +557,60 @@ deviceRoutes.get(DeviceApiRoute.EVENTS, async (c) => {
       aborted = true;
     });
 
-    // Presence: this session now holds a live SSE stream (read by the delivery
-    // watcher to decide warn-timing). Cleared in the finally below when the
-    // stream ends for ANY reason (abort, killswitch break, error), so a closed
-    // laptop is seen as disconnected within one stream lifetime.
-    markSessionConnected(sessionId);
-    try {
-      // Flush the session's undelivered inbox rows (a `reply` to inject, or a
-      // permission `verdict` to relay) + afk on change. Rows are NOT marked here:
-      // delivered_at is set only on the device's ACK, so a dropped frame is
-      // re-served on the next flush (at-least-once; the device dedups by id).
-      const flush = async (): Promise<void> => {
-        const items = await listUndeliveredInbox({
-          sessionId,
-          deviceId: auth.deviceId,
-          accountId: auth.accountId,
-        });
-        if (items.length > 0) {
-          await stream.writeSSE({ event: SseEvent.INBOX, data: JSON.stringify({ items }) });
-        }
-        // Push afk on change so a dashboard/CLI toggle reaches the device's
-        // PreToolUse hook (which reads the local state file). Re-query for the
-        // freshest value; the session may have ended mid-stream (cur undefined).
-        const cur = await getSessionForDevice({
-          sessionId,
-          deviceId: auth.deviceId,
-          accountId: auth.accountId,
-        });
-        if (cur && cur.afk !== lastAfk) {
-          await stream.writeSSE({
-            event: SseEvent.STATE,
-            data: JSON.stringify({ afk: cur.afk }),
-          });
-          lastAfk = cur.afk;
-        }
-      };
-
-      // Catch-up on connect, then stream live. Wake on a new inbox row for THIS
-      // session OR a machine-wide afk toggle on THIS device (device_state),
-      // so a dashboard/CLI device toggle reaches every session's hook sub-second.
-      // On timeout we ping to stay alive.
-      await flush();
-      while (!aborted && !c.req.raw.signal.aborted) {
-        const woken = await waitForSessionOrDeviceEvent(
-          sessionId,
-          auth.deviceId,
-          SSE_HEARTBEAT_MS,
-          c.req.raw.signal,
-        );
-        if (aborted || c.req.raw.signal.aborted) break;
-        // Honor a mid-stream device revoke/disable: the stream authed once at connect,
-        // but the killswitch must still cut delivery (the old long-poll re-authed on
-        // every poll). Breaking forces a reconnect back through requireDevice.
-        const ds = await getDeviceState({ deviceId: auth.deviceId, accountId: auth.accountId });
-        if (!ds.enabled) break;
-        // Re-query EVERY iteration (not only on wake): a NOTIFY firing in the window
-        // between flush() returning and the next waiter registering would otherwise
-        // be stranded until an unrelated NOTIFY. The timeout path bounds worst-case
-        // delivery latency to one heartbeat (matches the old long-poll's behavior).
-        await flush();
-        if (!woken) await stream.writeSSE({ event: SseEvent.PING, data: '{}' });
+    // Flush the session's undelivered inbox rows (a `reply` to inject, or a
+    // permission `verdict` to relay) + afk on change. Rows are NOT marked here:
+    // delivered_at is set only on the device's ACK, so a dropped frame is
+    // re-served on the next flush (at-least-once; the device dedups by id).
+    const flush = async (): Promise<void> => {
+      const items = await listUndeliveredInbox({
+        sessionId,
+        deviceId: auth.deviceId,
+        accountId: auth.accountId,
+      });
+      if (items.length > 0) {
+        await stream.writeSSE({ event: SseEvent.INBOX, data: JSON.stringify({ items }) });
       }
-    } finally {
-      // Stream ended (abort, killswitch break, or error) — drop presence.
-      markSessionDisconnected(sessionId);
+      // Push afk on change so a dashboard/CLI toggle reaches the device's
+      // PreToolUse hook (which reads the local state file). Re-query for the
+      // freshest value; the session may have ended mid-stream (cur undefined).
+      const cur = await getSessionForDevice({
+        sessionId,
+        deviceId: auth.deviceId,
+        accountId: auth.accountId,
+      });
+      if (cur && cur.afk !== lastAfk) {
+        await stream.writeSSE({
+          event: SseEvent.STATE,
+          data: JSON.stringify({ afk: cur.afk }),
+        });
+        lastAfk = cur.afk;
+      }
+    };
+
+    // Catch-up on connect, then stream live. Wake on a new inbox row for THIS
+    // session OR a machine-wide afk toggle on THIS device (device_state),
+    // so a dashboard/CLI device toggle reaches every session's hook sub-second.
+    // On timeout we ping to stay alive.
+    await flush();
+    while (!aborted && !c.req.raw.signal.aborted) {
+      const woken = await waitForSessionOrDeviceEvent(
+        sessionId,
+        auth.deviceId,
+        SSE_HEARTBEAT_MS,
+        c.req.raw.signal,
+      );
+      if (aborted || c.req.raw.signal.aborted) break;
+      // Honor a mid-stream device revoke/disable: the stream authed once at connect,
+      // but the killswitch must still cut delivery (the old long-poll re-authed on
+      // every poll). Breaking forces a reconnect back through requireDevice.
+      const ds = await getDeviceState({ deviceId: auth.deviceId, accountId: auth.accountId });
+      if (!ds.enabled) break;
+      // Re-query EVERY iteration (not only on wake): a NOTIFY firing in the window
+      // between flush() returning and the next waiter registering would otherwise
+      // be stranded until an unrelated NOTIFY. The timeout path bounds worst-case
+      // delivery latency to one heartbeat (matches the old long-poll's behavior).
+      await flush();
+      if (!woken) await stream.writeSSE({ event: SseEvent.PING, data: '{}' });
     }
   });
 });

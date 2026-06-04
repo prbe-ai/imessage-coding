@@ -158,6 +158,24 @@ CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_device  ON sessions(device_id);
 
 -- -----------------------------------------------------------------------------
+-- account_locks — CROSS-MACHINE per-account turn serialization (a LEASE).
+-- The orchestrator serializes turns per account in-process, but the app runs on
+-- >1 machine; this row is the shared mutex so two machines never run a turn for
+-- the same account at once (see db/account-lock.ts). One row per CURRENTLY-held
+-- lease: acquire upserts it, the turn deletes it at the end. `expires_at` is a
+-- CRASH BACKSTOP — a machine that dies mid-turn never deletes its row, so another
+-- can steal the lease once expires_at lapses (acquire's `WHERE expires_at < now()`).
+-- Ephemeral (not durable state): rows come and go per turn; no FK so a future
+-- account delete can't be blocked by a stray lease, and a stray lease self-heals
+-- via its TTL. PK lookup only, so no extra index.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS account_locks (
+  account_id  UUID        PRIMARY KEY,
+  owner       TEXT        NOT NULL,
+  expires_at  TIMESTAMPTZ NOT NULL
+);
+
+-- -----------------------------------------------------------------------------
 -- attention_events — points where the agent needs the user's attention.
 -- kind ∈ permission|question|plan|idle|turn_complete
 -- request_id (permission verdict target) and qid (question/plan correlation).

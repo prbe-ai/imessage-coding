@@ -51,6 +51,7 @@ import {
   getSessionActivity,
   insertTurn,
   isInboxDelivered,
+  isSessionLive,
   listLiveSessionsForAccount,
   listPendingAttentionForAccount,
   logMessage,
@@ -63,7 +64,7 @@ import {
   type SessionActivityLine,
 } from '../db/repo.ts';
 import { waitForDelivered } from '../db/listener.ts';
-import { isSessionConnected } from '../device-connections.ts';
+import { withAccountLease } from '../db/account-lock.ts';
 import { hashToken } from '../auth/device.ts';
 import { runAssistantTurn, type ToolExecutor } from './llm.ts';
 import { assistantTools, buildTurnMessages, type TurnMode } from './prompt.ts';
@@ -1259,9 +1260,10 @@ function queuedForSession(recorded: string): string {
  * redeploy, a brief blip, a laptop waking) doesn't cry wolf: those resolve in
  * seconds-to-minutes and the message DOES land. Per row (see watchOneDelivery):
  *   1. quick check (DELIVERY_CONFIRM_TIMEOUT_MS) — a healthy device passes here;
- *   2. if still unacked, branch on whether the session holds a live SSE stream:
- *      connected/slow → wait out DELIVERY_DEBOUNCE_MS; no stream → a shorter
- *      grace to ride a reconnect, then warn if still gone.
+ *   2. if still unacked, branch on whether the session's device is still
+ *      heartbeating (DB last_event_at, cross-machine): live/slow → wait out
+ *      DELIVERY_DEBOUNCE_MS; not heartbeating → a shorter grace to ride a
+ *      reconnect, then warn if still gone.
  * If we do warn, we keep watching the warned rows for DELIVERY_RETRACT_WINDOW_MS
  * and send a "reached the session after all" note if a late ACK arrives.
  *
@@ -1311,19 +1313,25 @@ async function watchDeliveries(
  */
 async function watchOneDelivery(accountId: string, d: DeliveryWatch): Promise<boolean> {
   const done = (): Promise<boolean> => isInboxDelivered({ id: d.id, accountId });
-  // Phase 1 — quick check. A connected, healthy device ACKs sub-second.
+  // Liveness = the session's device is actively heartbeating (sessions.last_event_at,
+  // bumped every 10s by the heartbeat route). DB-backed so it's correct across
+  // machines — the SSE stream and the delivery watcher may live on different Fly
+  // instances. On a DB blip default to LIVE: prefer waiting the full debounce over
+  // firing a false "couldn't confirm" warning.
+  const isLive = (): Promise<boolean> => isSessionLive(d.sessionId).catch(() => true);
+  // Phase 1 — quick check. A live, healthy device ACKs sub-second.
   if (await waitForDelivered(d.id, DELIVERY_CONFIRM_TIMEOUT_MS, done)) return true;
   // The whole debounce is measured from now-ish; track the hard deadline so the
   // disconnected grace below counts against (not on top of) the total window.
   const deadline = Date.now() + (DELIVERY_DEBOUNCE_MS - DELIVERY_CONFIRM_TIMEOUT_MS);
-  // Phase 2 — no live SSE stream: give a short grace for a (re)connect (deploy /
-  // sleep blip), then if STILL no stream, warn — nothing is there to receive it.
-  if (!isSessionConnected(d.sessionId)) {
+  // Phase 2 — device not heartbeating: give a short grace for it to come back (a
+  // deploy / sleep blip), then if it's STILL gone, warn — nothing's there to receive it.
+  if (!(await isLive())) {
     if (await waitForDelivered(d.id, DELIVERY_DISCONNECTED_GRACE_MS, done)) return true;
-    if (!isSessionConnected(d.sessionId)) return false;
+    if (!(await isLive())) return false;
   }
-  // Phase 3 — connected (or reconnected during the grace): probably mid-flush, so
-  // wait out the remainder of the debounce before deciding it's truly lost.
+  // Phase 3 — live (or came back during the grace): probably mid-flush, so wait
+  // out the remainder of the debounce before deciding it's truly lost.
   const remaining = deadline - Date.now();
   if (remaining > 0 && (await waitForDelivered(d.id, remaining, done))) return true;
   return false;
@@ -1370,14 +1378,24 @@ const accountLocks = new Map<string, Promise<unknown>>();
  * for the same account never overlap (two fast inbound texts, or a text racing
  * an agent-event turn, would otherwise interleave the loop and double-act on the
  * same pending attentions). Back-to-back texts are additionally COALESCED on top
- * of this lock (see the inbound-coalescing section below). In-process only —
- * correct for a single instance; a multi-instance deployment would need a
- * Postgres advisory lock.
+ * of this lock (see the inbound-coalescing section below).
+ *
+ * TWO LAYERS, because the app runs on >1 machine:
+ *   - this in-process chain is the same-machine fast path (no DB round-trip for
+ *     back-to-back turns on one box, and it means only one turn per machine ever
+ *     contends for the lease at a time);
+ *   - `withAccountLease` is the CROSS-machine layer — a Postgres lease row so a
+ *     turn on machine A and a turn on machine B for the same account serialize
+ *     (see db/account-lock.ts). The lease wraps `fn` so it's held only while the
+ *     turn actually runs.
  */
 function withAccountLock<T>(accountId: string, fn: () => Promise<T>): Promise<T> {
   const prev = accountLocks.get(accountId) ?? Promise.resolve();
+  // Cross-machine lease wraps the actual work; the in-process chain below keeps
+  // same-machine turns from overlapping (and from contending on the lease).
+  const guarded = (): Promise<T> => withAccountLease(accountId, fn);
   // Run regardless of how the prior turn settled (don't propagate its rejection).
-  const run = prev.then(fn, fn);
+  const run = prev.then(guarded, guarded);
   const tail = run.then(
     () => {},
     () => {},

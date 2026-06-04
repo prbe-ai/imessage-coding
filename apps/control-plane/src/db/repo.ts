@@ -427,6 +427,25 @@ export async function touchSession(args: {
  */
 export const SESSION_STALE_SECONDS = 30;
 
+/**
+ * Is this session currently LIVE — i.e. its device is actively heartbeating, so
+ * it can receive a pushed steer right now? Cross-machine by construction: it
+ * reads `last_event_at` (bumped every 10s by the heartbeat route, on whatever
+ * machine holds the SSE stream), not any per-machine in-memory state. The
+ * delivery watcher uses this to decide how long to wait for an ACK before
+ * warning — a live-but-slow session is worth waiting out; a dead one isn't.
+ * Same liveness definition the reaper uses (state not ended AND within the stale
+ * window). Unknown session id → false (no such live session).
+ */
+export async function isSessionLive(sessionId: string): Promise<boolean> {
+  const rows = await query<{ live: boolean }>(
+    `SELECT (state <> 'ended' AND last_event_at > now() - ($2::int * interval '1 second')) AS live
+       FROM sessions WHERE id = $1`,
+    [sessionId, SESSION_STALE_SECONDS],
+  );
+  return rows[0]?.live ?? false;
+}
+
 /** A session the reaper just transitioned to `ended`, carrying enough to notify
  *  the user it stopped: its account, human title, its device's machine-wide afk
  *  (joined from `devices` — afk gates whether we surface it to the phone), and

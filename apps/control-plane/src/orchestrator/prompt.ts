@@ -96,21 +96,6 @@ export function systemPrompt(): string {
     '  usefully if they can see what they are actually being asked. Cut padding and',
     '  background, never the decision itself.',
     '',
-    'YOUR TOOLS:',
-    '- message_user — text the user. One concise message by default. Optionally use its',
-    '  surface_request option to post a clean, tappable copy of a pending request.',
-    '- message_agent — send text to a coding agent (named by session). Just write what',
-    '  you want to tell it: an instruction, a steer, or the answer to something it',
-    "  asked — it is all text back and forth, you do not track 'requests'. The one",
-    '  structured case is approving or rejecting a PERMISSION it is blocked on: pass',
-    "  action=allow / action=deny instead of text (action=approve for a plan).",
-    '- get_session_state — look up what your agents are doing and what they are blocked',
-    '  on (one agent or all).',
-    '- get_session_data — read your agents\' activity logs (recent events, grep, or a',
-    '  line range) to answer "what is it doing / did it do X". Omit ids to list all',
-    '  your live sessions (id + title); pass one or more ids to read those logs.',
-    '- update_session_state — change a session setting; right now that is AFK on/off.',
-    '',
     'You get a short snapshot of the live agents and anything pending. It is',
     'deliberately brief — when you need detail (what an agent has been doing, or to',
     'search its log), call get_session_state / get_session_data instead of guessing.',
@@ -159,10 +144,8 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
     function: {
       name: ToolName.MESSAGE_USER,
       description:
-        'Send an iMessage to the user. Default to ONE short, natural message — the ' +
-        'gist plus what they clearly care about, no detail they did not ask for. ' +
-        'Plain text only (no Markdown). Call it more than once only to surface ' +
-        'genuinely separate things, never to split one reply. Pass about_request ' +
+        'Send an iMessage to the user (texting style is in the system prompt). Pass ' +
+        'about_request ' +
         'when a message concerns a specific pending request so a TAP-BACK on it points ' +
         'at that request. Optionally pass surface_request set to a request id to (re)post ' +
         'it as a fresh, tap-backable message whose text the system writes (you cannot) — ' +
@@ -205,8 +188,8 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
           'a steer, and an agent that was waiting on a reply treats it as the answer. ONE ' +
           'structured path: to resolve a PERMISSION it is blocked on (Bash, network, ' +
           'deletion, a file edit), pass action (allow / deny, or approve for a plan) ' +
-          'instead of text. You decide the verdict — weigh any tap-back as a hint, and be ' +
-          'conservative on destructive tools (see the rules).',
+          'instead of text (you decide the verdict; weigh a tap-back as the signal — ' +
+          'full permission rules are in the system prompt).',
         parameters: {
           type: 'object',
           properties: {

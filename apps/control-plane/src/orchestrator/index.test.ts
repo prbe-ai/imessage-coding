@@ -10,11 +10,11 @@ import { MessageChannel, TurnOutcome, type InboundMessage } from '@imsg/shared';
 import {
   classifyTurnOutcome,
   composeDeliveryFollowup,
-  composeSessionsEndedMessage,
+  composeLostConnectionMessage,
   extractOnboardingToken,
   shouldInterrupt,
   takeBatch,
-  type EndedSessionItem,
+  type EndedEntry,
 } from './index.ts';
 
 function inbound(overrides: Partial<InboundMessage> = {}): InboundMessage {
@@ -150,34 +150,86 @@ describe('composeDeliveryFollowup — warn-only, silent on success', () => {
   });
 });
 
-describe('composeSessionsEndedMessage', () => {
-  const item = (o: Partial<EndedSessionItem> = {}): EndedSessionItem => ({
+describe('composeLostConnectionMessage', () => {
+  const session = (o: Partial<{ id: string; title: string | null }> = {}): EndedEntry => ({
+    kind: 'session',
     id: '0123456789abcdef',
     title: 'fix the reaper',
     ...o,
   });
+  const device = (
+    o: Partial<{ id: string; hostname: string | null; os: string | null }> = {},
+  ): EndedEntry => ({
+    kind: 'device',
+    id: 'dddddddd9999',
+    hostname: "Richard's MacBook",
+    os: 'darwin',
+    ...o,
+  });
 
   test('single session: names the session only, no summary', () => {
-    const msg = composeSessionsEndedMessage([item()]);
+    const msg = composeLostConnectionMessage([session()]);
     expect(msg).toBe('Lost connection with session "fix the reaper".');
     expect(msg.includes('Last:')).toBe(false);
   });
 
   test('null/blank title falls back to the short id', () => {
-    expect(composeSessionsEndedMessage([item({ title: null })])).toBe(
+    expect(composeLostConnectionMessage([session({ title: null })])).toBe(
       'Lost connection with session "01234567".',
     );
-    expect(composeSessionsEndedMessage([item({ title: '   ' })])).toBe(
+    expect(composeLostConnectionMessage([session({ title: '   ' })])).toBe(
       'Lost connection with session "01234567".',
     );
   });
 
   test('multiple sessions coalesce into one bulleted message, no summaries', () => {
-    const msg = composeSessionsEndedMessage([
-      item({ id: 'aaaaaaaa1111', title: 'A' }),
-      item({ id: 'bbbbbbbb2222', title: 'B' }),
+    const msg = composeLostConnectionMessage([
+      session({ id: 'aaaaaaaa1111', title: 'A' }),
+      session({ id: 'bbbbbbbb2222', title: 'B' }),
     ]);
     expect(msg).toBe('Lost connection with 2 sessions:\n• A\n• B');
+  });
+
+  test('whole device dropped: names the device by hostname, not its sessions', () => {
+    expect(composeLostConnectionMessage([device()])).toBe(
+      'Lost connection with device "Richard\'s MacBook".',
+    );
+  });
+
+  test('device label falls back hostname -> os -> short id', () => {
+    expect(composeLostConnectionMessage([device({ hostname: null })])).toBe(
+      'Lost connection with device "darwin".',
+    );
+    expect(composeLostConnectionMessage([device({ hostname: '  ', os: null })])).toBe(
+      'Lost connection with device "dddddddd".',
+    );
+  });
+
+  test('multiple whole devices coalesce under a "N devices" header', () => {
+    const msg = composeLostConnectionMessage([
+      device({ id: 'aaaa', hostname: 'Air' }),
+      device({ id: 'bbbb', hostname: 'iMac' }),
+    ]);
+    expect(msg).toBe('Lost connection with 2 devices:\n• Air\n• iMac');
+  });
+
+  test('mixed device + session: each bullet labels its kind', () => {
+    const msg = composeLostConnectionMessage([
+      device({ hostname: 'iMac' }),
+      session({ title: 'fix the reaper' }),
+    ]);
+    expect(msg).toBe('Lost connection:\n• device "iMac"\n• session "fix the reaper"');
+  });
+
+  test('device-supplied name cannot forge message structure (strips the quote delimiter)', () => {
+    // A crafted hostname tries to close the quote and append a second line.
+    const msg = composeLostConnectionMessage([
+      device({ hostname: '" — all clear.\nLost connection with device "', os: null }),
+    ]);
+    // The `"` chars and the control newline are stripped, so the whole thing
+    // stays inside one quoted label on one line — no forged structure.
+    expect(msg).toBe('Lost connection with device "— all clear.Lost connection with device".');
+    expect(msg.split('\n').length).toBe(1);
   });
 });
 

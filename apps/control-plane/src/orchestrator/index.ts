@@ -43,6 +43,7 @@ import {
 import type { Transport } from '@imsg/transport';
 import {
   consumeOnboardingTokenAndLinkNumber,
+  devicesWithNoLiveSessions,
   enqueueReply,
   findAccountByPhone,
   findVerifiedPhoneForAccount,
@@ -1099,27 +1100,57 @@ function shortId(id: string): string {
 // "Lost connection" notification (reaper-driven).
 // -----------------------------------------------------------------------------
 
-/** One ended session, resolved to its display label. */
-export interface EndedSessionItem {
-  id: string;
-  title: string | null;
+/**
+ * One "lost connection" entry. A `device` entry means EVERY session on that
+ * device dropped out (a laptop closed / slept / lost network) — we name the
+ * device, not its now-gone sessions. A `session` entry is a single session that
+ * stopped while its device still has other live sessions, so naming the session
+ * is what tells the user which work halted.
+ */
+export type EndedEntry =
+  | { kind: 'device'; id: string; hostname: string | null; os: string | null }
+  | { kind: 'session'; id: string; title: string | null };
+
+// The human label for an entry: a session by its title, a device by its
+// hostname — each falling back through os/short-id.
+function entryLabel(e: EndedEntry): string {
+  const raw =
+    e.kind === 'device'
+      ? e.hostname?.trim() || e.os?.trim() || shortId(e.id)
+      : e.title?.trim() || shortId(e.id);
+  // Both title and hostname/os are device-supplied (hostname is stored verbatim
+  // at pairing). They land inside the quoted "<label>" we post to the user's
+  // phone, so strip the `"` delimiter plus control/bidi chars — otherwise a
+  // crafted name could forge extra message structure. clip() then collapses
+  // whitespace (so a newline can't split a bullet) and bounds the length.
+  return clip(raw.replace(/["\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, ''), 80);
 }
 
 /** Build the coalesced "lost connection" iMessage. Pure + deterministic (no LLM).
- *  Per product decision this names the session(s) only — NO activity summary, so a
- *  dropped laptop never leaks its last transcript line to the phone. Exported for
- *  unit tests. */
-export function composeSessionsEndedMessage(items: ReadonlyArray<EndedSessionItem>): string {
-  // clip the title: it's device-sanitized but keep one line per session (a stray
-  // newline would split a bullet).
-  const label = (it: EndedSessionItem): string =>
-    it.title?.trim() ? clip(it.title, 80) : shortId(it.id);
-  const [first] = items;
-  if (items.length === 1 && first) {
-    return `Lost connection with session "${label(first)}".`;
+ *  Per product decision this names the device/session(s) only — NO activity
+ *  summary, so a dropped laptop never leaks its last transcript line to the
+ *  phone. When all of a device's sessions drop together it collapses to one
+ *  device line rather than a list of orphaned session titles. Exported for unit
+ *  tests. */
+export function composeLostConnectionMessage(entries: ReadonlyArray<EndedEntry>): string {
+  const [first] = entries;
+  if (entries.length === 1 && first) {
+    // `with session "X"` / `with device "Y"` — the kind word names what dropped.
+    return `Lost connection with ${first.kind} "${entryLabel(first)}".`;
   }
-  const lines = items.map((it) => `• ${label(it)}`);
-  return `Lost connection with ${items.length} sessions:\n${lines.join('\n')}`;
+  // A uniform batch keeps the natural "N sessions"/"N devices" header; a mixed
+  // batch (rare — two machines' sessions reaped in one sweep) prefixes each
+  // bullet with its kind so the list stays unambiguous.
+  if (entries.every((e) => e.kind === 'session')) {
+    const lines = entries.map((e) => `• ${entryLabel(e)}`);
+    return `Lost connection with ${entries.length} sessions:\n${lines.join('\n')}`;
+  }
+  if (entries.every((e) => e.kind === 'device')) {
+    const lines = entries.map((e) => `• ${entryLabel(e)}`);
+    return `Lost connection with ${entries.length} devices:\n${lines.join('\n')}`;
+  }
+  const lines = entries.map((e) => `• ${e.kind} "${entryLabel(e)}"`);
+  return `Lost connection:\n${lines.join('\n')}`;
 }
 
 /**
@@ -1149,13 +1180,41 @@ export async function notifyEndedSessions(
 
   for (const [accountId, sessions] of byAccount) {
     try {
-      const items: EndedSessionItem[] = sessions.map((s) => ({ id: s.id, title: s.title }));
+      const entries = await buildEndedEntries(sessions);
       // sendToUser is itself best-effort (logs + swallows transport errors).
-      await sendToUser(transport, accountId, composeSessionsEndedMessage(items));
+      await sendToUser(transport, accountId, composeLostConnectionMessage(entries));
     } catch (err) {
       console.error('[reaper] notify ended sessions failed', err);
     }
   }
+}
+
+/**
+ * Turn one account's just-reaped sessions into notification entries, collapsing
+ * any device whose sessions ALL dropped into a single `device` entry. "All
+ * dropped" is decided by a post-reap live-session count (devicesWithNoLiveSessions)
+ * rather than by what's in this batch, so it's correct whether a laptop's
+ * sessions die in one sweep or trickle out across a few — the line flips to the
+ * device once nothing live remains on it. Sessions on devices that still have
+ * live work stay named individually.
+ */
+async function buildEndedEntries(
+  sessions: ReadonlyArray<ReapedSession>,
+): Promise<EndedEntry[]> {
+  const fullyDropped = await devicesWithNoLiveSessions(sessions.map((s) => s.deviceId));
+  const entries: EndedEntry[] = [];
+  const seenDevice = new Set<string>();
+  for (const s of sessions) {
+    if (fullyDropped.has(s.deviceId)) {
+      // One entry per dead device, however many of its sessions were reaped.
+      if (seenDevice.has(s.deviceId)) continue;
+      seenDevice.add(s.deviceId);
+      entries.push({ kind: 'device', id: s.deviceId, hostname: s.hostname, os: s.os });
+    } else {
+      entries.push({ kind: 'session', id: s.id, title: s.title });
+    }
+  }
+  return entries;
 }
 
 /**

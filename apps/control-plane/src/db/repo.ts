@@ -428,13 +428,19 @@ export async function touchSession(args: {
 export const SESSION_STALE_SECONDS = 30;
 
 /** A session the reaper just transitioned to `ended`, carrying enough to notify
- *  the user it stopped: its account, human title, and its device's machine-wide
- *  afk (joined from `devices` — afk gates whether we surface it to the phone). */
+ *  the user it stopped: its account, human title, its device's machine-wide afk
+ *  (joined from `devices` — afk gates whether we surface it to the phone), and
+ *  the device identity (id + hostname/os) so the notifier can coalesce a whole
+ *  device dropping out into one "lost connection with <device>" line instead of
+ *  naming each of its sessions. */
 export interface ReapedSession {
   id: string;
   accountId: string;
   title: string | null;
   afk: AfkState;
+  deviceId: string;
+  hostname: string | null;
+  os: string | null;
 }
 
 /**
@@ -460,6 +466,9 @@ export async function reapStaleSessions(
     account_id: string;
     title: string | null;
     afk: string;
+    device_id: string;
+    hostname: string | null;
+    os: string | null;
   }>(
     `UPDATE sessions s
         SET state = 'ended'
@@ -467,7 +476,8 @@ export async function reapStaleSessions(
       WHERE s.device_id = d.id
         AND s.state <> 'ended'
         AND s.last_event_at < now() - ($1::int * interval '1 second')
-      RETURNING s.id, s.account_id, s.title, d.afk`,
+      RETURNING s.id, s.account_id, s.title, d.afk, d.id AS device_id,
+                d.hostname, d.os`,
     [staleSeconds],
   );
   return rows.map((r) => ({
@@ -477,7 +487,35 @@ export async function reapStaleSessions(
     // Fail closed: an unexpected afk value reads as OFF (no notification) rather
     // than a lying cast that could slip a junk string into the afk='on' filter.
     afk: isAfkState(r.afk) ? r.afk : AfkState.OFF,
+    deviceId: r.device_id,
+    hostname: r.hostname,
+    os: r.os,
   }));
+}
+
+/**
+ * Of the given device ids, return the ones that now have ZERO live (non-ended)
+ * sessions — i.e. the whole device dropped out, not just one of its sessions.
+ * Used by the reaper's notifier to collapse a laptop-close (N sessions ending at
+ * once) into a single "lost connection with <device>" line. Run AFTER the reap
+ * has committed the `ended` transitions, so the count reflects the post-reap
+ * world. A concurrent re-pair reviving a session only ever moves a device OUT of
+ * this set (→ we fall back to naming the surviving session), the safe direction.
+ */
+export async function devicesWithNoLiveSessions(
+  deviceIds: ReadonlyArray<string>,
+): Promise<Set<string>> {
+  if (deviceIds.length === 0) return new Set();
+  const rows = await query<{ id: string }>(
+    `SELECT d.id
+       FROM unnest($1::uuid[]) AS d(id)
+      WHERE NOT EXISTS (
+        SELECT 1 FROM sessions s
+         WHERE s.device_id = d.id AND s.state <> 'ended'
+      )`,
+    [[...new Set(deviceIds)]],
+  );
+  return new Set(rows.map((r) => r.id));
 }
 
 // afk is MACHINE-WIDE and lives on `devices`. These RETURNING columns +

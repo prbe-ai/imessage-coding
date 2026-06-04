@@ -77,6 +77,89 @@ describe('extractCodexActivity', () => {
     expect(out[0]!.text).toContain('why is');
   });
 
+  test('the injected AGENTS.md project-instructions frame is dropped', () => {
+    expect(
+      extractCodexActivity(
+        responseItem({
+          type: 'message',
+          role: 'user',
+          content: [
+            {
+              type: 'input_text',
+              text: '# AGENTS.md instructions for /Users/me/repo\n\n<INSTRUCTIONS>\n## Do the thing\n</INSTRUCTIONS>',
+            },
+          ],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  test('an attached-files turn is unwrapped to the real prompt (wrapper dropped)', () => {
+    const out = extractCodexActivity(
+      responseItem({
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: '\n# Files mentioned by the user:\n\n## shot.png: /tmp/shot.png\n\n## My request for Codex:\nfix the title bug',
+          },
+        ],
+      }),
+    );
+    expect(out).toEqual([{ kind: ActivityKind.USER_MESSAGE, text: 'fix the title bug' }]);
+  });
+
+  test('an in-app-browser turn is unwrapped to the real prompt', () => {
+    const out = extractCodexActivity(
+      responseItem({
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: '\n# In app browser:\n- Current URL: http://localhost:4173/\n\n## My request for Codex:\nadd back the cursive fonts',
+          },
+        ],
+      }),
+    );
+    expect(out).toEqual([{ kind: ActivityKind.USER_MESSAGE, text: 'add back the cursive fonts' }]);
+  });
+
+  test('the request-marker unwrap does NOT touch assistant text', () => {
+    const out = extractCodexActivity(
+      responseItem({
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'use the\n## My request for Codex:\nformat' }],
+      }),
+    );
+    expect(out).toEqual([{ kind: ActivityKind.ASSISTANT_TEXT, text: 'use the\n## My request for Codex:\nformat' }]);
+  });
+
+  test('a real prompt that merely quotes the marker mid-line is NOT unwrapped', () => {
+    // The marker only delimits when it is on its OWN line; an inline mention must
+    // be left intact (no silent truncation of the user's words).
+    const text = 'please grep for "## My request for Codex:" in the logs';
+    const out = extractCodexActivity(
+      responseItem({ type: 'message', role: 'user', content: [{ type: 'input_text', text }] }),
+    );
+    expect(out).toEqual([{ kind: ActivityKind.USER_MESSAGE, text }]);
+  });
+
+  test('an attachment-only turn (marker, empty body) keeps the turn (falls back to full text)', () => {
+    // No prompt after the marker → don't drop the turn to nothing (that would lose
+    // the turn boundary the AFK Stop-gate keys off). Keep a non-empty USER_MESSAGE.
+    const text = '\n# Files mentioned by the user:\n\n## shot.png: /tmp/shot.png\n\n## My request for Codex:\n';
+    const out = extractCodexActivity(
+      responseItem({ type: 'message', role: 'user', content: [{ type: 'input_text', text }] }),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]!.kind).toBe(ActivityKind.USER_MESSAGE);
+    // Falls back to the full wrapper text rather than emitting an empty message.
+    expect(out[0]!.text).toContain('Files mentioned by the user');
+  });
+
   test('function_call → one-line TOOL_USE marker (arguments JSON parsed for summary)', () => {
     const out = extractCodexActivity(
       responseItem({
@@ -198,6 +281,24 @@ describe('extractCodexActivity (fixture)', () => {
 describe('firstCodexUserMessage', () => {
   test('returns the first real user prompt, skipping preamble frames', () => {
     expect(firstCodexUserMessage(fixtureLines())).toBe('Say hello in five words. Do not call any tools.');
+  });
+
+  test('skips the injected AGENTS.md frame so the title is the real prompt', () => {
+    // The reported bug: the AGENTS.md frame Codex injects before the first turn was
+    // becoming the session title. It must be skipped down to the user's prompt.
+    const lines = [
+      JSON.stringify(
+        responseItem({
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: '# AGENTS.md instructions for /Users/me/repo\n\n<INSTRUCTIONS>x</INSTRUCTIONS>' }],
+        }),
+      ),
+      JSON.stringify(
+        responseItem({ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'why does this fail?' }] }),
+      ),
+    ];
+    expect(firstCodexUserMessage(lines)).toBe('why does this fail?');
   });
 
   test('null when no user message is present', () => {

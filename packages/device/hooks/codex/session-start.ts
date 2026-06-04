@@ -30,6 +30,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { AgentKind } from '@imsg/shared';
 import {
+  isPluginHousekeepingDir,
   migrateLegacyDeviceDir,
   pluginRoot,
   sessionPidFile,
@@ -77,9 +78,12 @@ try {
   /* best-effort */
 }
 
-// 2) Daemon: paired + not killswitched only.
+// 2) Daemon: paired + not killswitched only — and never for Codex's OWN plugin
+// housekeeping sessions (install / marketplace validation, rooted under
+// ~/.codex/{plugins,marketplaces}/…). Those carry no user prompt, so tapping them
+// just registers titleless dashboard rows labelled by their version folder.
 const token = loadToken();
-if (!token || localDisabled()) carryOn();
+if (!token || localDisabled() || isPluginHousekeepingDir(projectDir) || isPluginHousekeepingDir(cwdIn)) carryOn();
 
 mkdirSync(sessionsDir(), { recursive: true });
 // Clear any stale shutdown sentinel from a prior run of this id (e.g. a resume).

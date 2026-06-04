@@ -4,14 +4,14 @@
       {
         "matcher": "startup|resume|clear",
         "hooks": [
-          { "type": "command", "command": "bun ./hooks/codex/session-start.ts" }
+          { "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/codex/session-start.ts" }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "bun ./hooks/codex/user-prompt-submit.ts" }
+          { "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/codex/user-prompt-submit.ts" }
         ]
       }
     ],
@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun ./hooks/codex/permission-request.ts",
+            "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/codex/permission-request.ts",
             "timeout": 3600
           }
         ]
@@ -29,7 +29,7 @@
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "bun ./hooks/codex/stop.ts" }
+          { "type": "command", "command": "bun ${CLAUDE_PLUGIN_ROOT}/hooks/codex/stop.ts" }
         ]
       }
     ]

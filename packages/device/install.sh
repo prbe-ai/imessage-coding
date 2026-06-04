@@ -190,6 +190,41 @@ rewrite_bun() {
   ' "$file"
 }
 
+# Shared: bake an ABSOLUTE plugin dir in place of the ${CLAUDE_PLUGIN_ROOT}
+# placeholder inside a hooks JSON's `command` strings. Needed for CODEX HOOKS only.
+# Codex collapses ${CLAUDE_PLUGIN_ROOT} -> "./" when it snapshots the plugin, but —
+# unlike the MCP server, which it runs from the plugin root via cwd:"." — it runs
+# HOOK commands from the WORKSPACE cwd, not the plugin root. So "bun ./hooks/codex/
+# X.ts" fails with `error: Module not found` (exit 1) and every hook silently dies
+# (and a failed PermissionRequest hook fails OPEN to the local prompt — a safety
+# regression). Baking the absolute install dir makes the command cwd-independent;
+# Codex leaves an absolute path untouched. Uses bun (no jq). CC ignores this file.
+# Do NOT apply to .mcp.codex.json — the MCP cwd:"." path already resolves correctly.
+rewrite_plugin_root() {
+  file="$1"
+  root="$2"
+  [ -f "$file" ] || return 0
+  PLUGIN_ROOT_ABS="$root" "$BUN" -e '
+    const fs = require("fs");
+    const f = process.argv[1];
+    const root = process.env.PLUGIN_ROOT_ABS;
+    const j = JSON.parse(fs.readFileSync(f, "utf8"));
+    const walk = (o) => {
+      if (Array.isArray(o)) return o.map(walk);
+      if (o && typeof o === "object") {
+        for (const k of Object.keys(o)) {
+          if (k === "command" && typeof o[k] === "string")
+            o[k] = o[k].split("${CLAUDE_PLUGIN_ROOT}").join(root);
+          else o[k] = walk(o[k]);
+        }
+        return o;
+      }
+      return o;
+    };
+    fs.writeFileSync(f, JSON.stringify(walk(j), null, 2) + "\n");
+  ' "$file"
+}
+
 # =============================================================================
 # Shared: bake the control-plane URL into a staged plugin dir (build-config.json)
 # for LOCAL/checkout installs. The SERVED tarball already carries this file
@@ -391,10 +426,12 @@ install_for_claude_code() {
 #   2. Hooks:     Codex loads hooks/hooks.json by convention — so we install the
 #                 Codex hooks (hooks/codex/hooks.json) AS hooks/hooks.json in the
 #                 Codex plugin dir, and drop the CC hooks. plugin_hooks must be on.
-#                 Those hook commands use RELATIVE script paths (./hooks/codex/*.ts)
-#                 resolved against the plugin root, NOT ${CLAUDE_PLUGIN_ROOT} —
-#                 Codex does not expand that CC variable (curated figma plugin
-#                 precedent), so the placeholder form silently failed every hook.
+#                 Hook commands must use an ABSOLUTE script path, baked at install
+#                 time (rewrite_plugin_root). ${CLAUDE_PLUGIN_ROOT} does NOT work
+#                 (Codex collapses it to a relative "./" that it then resolves
+#                 against the WORKSPACE cwd, not the plugin root — unlike the MCP
+#                 server's cwd:"." — so the placeholder/relative form fails every
+#                 hook with "Module not found", exit 1).
 #   3. MCP:       registered by the plugin manifest's mcpServers pointer
 #                 (.mcp.codex.json, IMSG_AGENT_KIND=codex). That file uses Codex's
 #                 local-MCP convention — top-level "cwd": "." + relative `start`,
@@ -447,12 +484,13 @@ install_for_codex() {
   [ -f "$CODEX_PLUGIN_DIR/hooks/codex/hooks.json" ] \
     || die "no hooks/codex/hooks.json in the staged tree — bad Codex plugin package"
   mv -f "$CODEX_PLUGIN_DIR/hooks/codex/hooks.json" "$CODEX_PLUGIN_DIR/hooks/hooks.json"
-  # IMPORTANT: do NOT remove hooks/codex/ — the just-moved hooks/hooks.json still
-  # points at ${CLAUDE_PLUGIN_ROOT}/hooks/codex/{session-start,user-prompt-submit,
-  # permission-request,stop}.ts. Those .ts scripts must stay where the JSON resolves
-  # them; deleting the dir would make every Codex hook fail to launch (and a failed
-  # PermissionRequest hook fails OPEN to the unattended local prompt — a safety
-  # regression). Only the now-duplicate hooks/codex/hooks.json (moved up) is removed.
+  # IMPORTANT: do NOT remove hooks/codex/ — the just-moved hooks/hooks.json points
+  # at hooks/codex/{session-start,user-prompt-submit,permission-request,stop}.ts
+  # (made absolute below by rewrite_plugin_root). Those .ts scripts must stay where
+  # the JSON resolves them; deleting the dir would make every Codex hook fail to
+  # launch (and a failed PermissionRequest hook fails OPEN to the unattended local
+  # prompt — a safety regression). Only the now-duplicate hooks/codex/hooks.json
+  # (moved up) is removed.
   rm -f "$CODEX_PLUGIN_DIR/hooks/codex/hooks.json"
   # Codex commands: install the prompt-style /afk under commands/ (CC's exec-style
   # afk.md would be a no-op prompt under Codex), then drop the codex/ staging dir
@@ -488,7 +526,23 @@ install_for_codex() {
   # Absolute-path the bun interpreter in the Codex hooks + MCP file.
   rewrite_bun "$CODEX_PLUGIN_DIR/hooks/hooks.json"
   rewrite_bun "$CODEX_PLUGIN_DIR/.mcp.codex.json"
-  say "rewrote bun command to absolute path in Codex hooks.json + .mcp.codex.json"
+  # Codex runs HOOK commands from the workspace cwd (NOT the plugin root — that's
+  # only true for the MCP server's cwd:"."), and it collapses ${CLAUDE_PLUGIN_ROOT}
+  # to a dangling "./" at snapshot time, so the placeholder form fails every hook
+  # with "Module not found". Bake the absolute plugin dir so the path is cwd-
+  # independent. Hooks only — the MCP file's cwd:"." already resolves correctly.
+  # ASSUMPTIONS (hold for the default install, document rather than over-engineer):
+  #  - The baked path is spliced UNQUOTED into a single space-joined command string
+  #    (same as rewrite_bun's interpreter path), so it must be free of spaces / shell
+  #    metacharacters. True for the default ~/.codex/marketplaces/... location. A
+  #    $HOME/$CODEX_HOME containing a space would break the hooks; the robust fix is
+  #    an argv-array hook command — only adopt after confirming Codex supports it
+  #    (its exec-vs-shell model is undocumented; blind quoting could regress exec).
+  #  - We bake $CODEX_PLUGIN_DIR (the marketplace source dir Codex resolves the
+  #    plugin from), not the version-pinned ~/.codex/plugins/cache snapshot; verified
+  #    on codex 0.137.0 that hooks execute from the marketplace dir.
+  rewrite_plugin_root "$CODEX_PLUGIN_DIR/hooks/hooks.json" "$CODEX_PLUGIN_DIR"
+  say "rewrote bun -> absolute + baked absolute plugin root into Codex hooks.json; bun -> absolute in .mcp.codex.json"
 
   # --- register the marketplace, then INSTALL the plugin ----------------------
   # `codex plugin marketplace add <local-dir>` writes [marketplaces.*]; the

@@ -63,6 +63,7 @@ import { HaltError, drain, enqueue } from './outbox.ts';
 import { egressEnabled } from './killswitch.ts';
 import { sanitizeOptional, sanitizeText } from './sanitize.ts';
 import { readAfk, writeAfk, writePending } from './state.ts';
+import { messageUserBlockedWhenAfkOff } from './afk-gate.ts';
 
 // Relocate pre-0.1.7 state from ~/.claude/plugins/imsg-device → ~/.imsg (once).
 migrateLegacyDeviceDir();
@@ -146,7 +147,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.10' },
+  { name: 'imsg-device', version: '0.1.11' },
   {
     capabilities: {
       experimental: {
@@ -183,7 +184,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         'expect_reply false for those status updates — they are delivered and need no response. Set expect_reply: true ' +
         'when you need an answer to continue (e.g. a hook told you the user is AFK and to relay a question or plan); ' +
         'then STOP and wait — the user\'s reply arrives as a <channel source="imsg-device"> message you should treat ' +
-        'as authoritative.',
+        'as authoritative. Only works while AFK mode is ON; if AFK is off the user is at their keyboard and reads ' +
+        'your output directly, so this returns an error (not delivered) — do not call it then.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -206,6 +208,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       text: string;
       expect_reply?: boolean;
     };
+    // AFK-OFF SHORT-CIRCUIT: at the keyboard the server drops a non-AFK relay
+    // (routes/device.ts → {relayed:false}), so relaying is a silent no-op that
+    // fools the agent into thinking it notified the user. Fail loudly instead and
+    // skip the wasted egress. afk.state is the same fast-local source the
+    // PreToolUse hook reads to gate AskUserQuestion (defaults to off).
+    const afkOff = messageUserBlockedWhenAfkOff(readAfk());
+    if (afkOff) {
+      log('message_user_afk_off', {});
+      return afkOff;
+    }
     const clean = sanitizeText(text);
     // Either way we RELAY (no durable attention, no binding). `expect_reply` only
     // TAGS the relay so the orchestrator surfaces it as a question; the agent stops

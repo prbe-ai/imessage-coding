@@ -277,8 +277,23 @@ export async function consumeOnboardingTokenAndLinkNumber(args: {
 
 /**
  * Atomically consume a single-use pairing token (by its peppered hash) and
- * create a device bound to the token's account. Returns the new device id, or
- * undefined if the token is unknown/expired/already used.
+ * bind a device to the token's account. Returns the device id, or undefined if
+ * the token is unknown/expired/already used.
+ *
+ * IDEMPOTENT BY HOSTNAME: re-pairing a machine that already has an active
+ * (non-revoked) device REUSES that device row — it rotates its token_hash to the
+ * freshly-minted one and re-enables it — instead of spawning a duplicate. This is
+ * what keeps one physical Mac from showing as two "Devices" cards: pairing used
+ * to INSERT unconditionally, so each re-pair (installer re-run, pairing the Codex
+ * side, …) minted a new row and the machine's sessions split across both. Because
+ * the device token lives in ONE per-machine store (keychain/file) read fresh per
+ * request, rotating the reused row's token converges every live session onto it —
+ * the abandoned duplicate then ages out of the live list on its own.
+ *
+ * Only dedups when the hostname is known (non-empty): it's the sole stable
+ * machine identity we have, so without it we can't tell machines apart and fall
+ * back to INSERT. Revoked devices are never reused (a revoke is intentional; a
+ * re-pair after one is a deliberately fresh device).
  */
 export async function consumePairingTokenAndCreateDevice(args: {
   pairingTokenHash: string;
@@ -305,11 +320,42 @@ export async function consumePairingTokenAndCreateDevice(args: {
       [args.pairingTokenHash],
     );
 
+    // Reuse an existing active device for this account+hostname if one exists
+    // (most-recent wins). Lock it so a concurrent pair of the same machine can't
+    // also fall through to INSERT. paired_at is refreshed and disabled_at cleared
+    // so a re-pair re-arms a killswitched device.
+    const hostname = args.hostname?.trim() || null;
+    if (hostname) {
+      const existingRes = await client.query<DeviceRow>(
+        `SELECT id, account_id
+           FROM devices
+          WHERE account_id = $1 AND hostname = $2 AND revoked_at IS NULL
+          ORDER BY paired_at DESC
+          LIMIT 1
+          FOR UPDATE`,
+        [token.account_id, hostname],
+      );
+      const existing = existingRes.rows[0];
+      if (existing) {
+        await client.query(
+          `UPDATE devices
+              SET device_token_hash = $2,
+                  os = COALESCE($3, os),
+                  paired_at = now(),
+                  disabled_at = NULL
+            WHERE id = $1`,
+          [existing.id, args.deviceTokenHash, args.os ?? null],
+        );
+        return { deviceId: existing.id, accountId: existing.account_id };
+      }
+    }
+
+    // First pair for this machine (or hostname unknown): create a new device.
     const devRes = await client.query<DeviceRow>(
       `INSERT INTO devices (account_id, device_token_hash, os, hostname)
        VALUES ($1, $2, $3, $4)
        RETURNING id, account_id`,
-      [token.account_id, args.deviceTokenHash, args.os ?? null, args.hostname ?? null],
+      [token.account_id, args.deviceTokenHash, args.os ?? null, hostname],
     );
     const device = devRes.rows[0];
     if (!device) return undefined;

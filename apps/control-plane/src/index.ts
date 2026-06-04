@@ -11,8 +11,8 @@
 import { createApp } from './app.ts';
 import { loadEnv } from './env.ts';
 import { ensureListener } from './db/listener.ts';
-import { reapStaleSessions } from './db/repo.ts';
-import { notifyEndedSessions } from './orchestrator/index.ts';
+import { claimDevicesToNotifyLost, reapStaleSessions } from './db/repo.ts';
+import { notifyLostDevices } from './orchestrator/index.ts';
 import { getTransport } from './transport.ts';
 
 const env = loadEnv();
@@ -31,16 +31,25 @@ ensureListener().catch((err) => {
 // stays tight. Idempotent, so running on every instance is fine; errors
 // are logged, never thrown out of the timer.
 const REAP_INTERVAL_MS = 10_000;
-// `notify`: text the user (AFK-gated) that their session stopped. OFF for the
-// boot sweep — a deploy restart leaves healthy devices unable to heartbeat for
-// the downtime window, so the first post-restart reap would false-positive on
-// sessions that reconnect seconds later. Boot stays cleanup-only; live detection
-// (interval sweeps) is where a genuine stop gets surfaced.
+// `notify`: announce lost DEVICES to the phone (AFK-gated). OFF for the boot
+// sweep — a deploy restart leaves healthy devices unable to heartbeat for the
+// downtime window, so the first post-restart reap would false-positive on devices
+// that reconnect seconds later. Boot stays cleanup-only; live detection (interval
+// sweeps) is where a genuine drop gets surfaced.
+//
+// Cleanup and announcement are decoupled: reapStaleSessions just hides dead
+// sessions from the dashboard/orchestrator; claimDevicesToNotifyLost is the
+// debounced + deduped, DEVICE-keyed announcer (a whole machine dropping out,
+// surfaced at most once past a grace, re-armed on revival). So a session that
+// flaps ended->active->ended on a deploy bounce or sleep — or a machine's
+// sessions dying across staggered sweeps — never re-fires the device notice.
 function sweepStaleSessions(notify: boolean): void {
   reapStaleSessions()
     .then(async (reaped) => {
       if (reaped.length > 0) console.log(`[reaper] ended ${reaped.length} stale session(s)`);
-      if (notify && reaped.length > 0) await notifyEndedSessions(getTransport(), reaped);
+      if (!notify) return;
+      const lost = await claimDevicesToNotifyLost();
+      if (lost.length > 0) await notifyLostDevices(getTransport(), lost);
     })
     .catch((err) => console.error('[reaper] sweep failed (will retry)', err));
 }

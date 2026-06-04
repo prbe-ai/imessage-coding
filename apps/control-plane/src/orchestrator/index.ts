@@ -43,7 +43,6 @@ import {
 import type { Transport } from '@imsg/transport';
 import {
   consumeOnboardingTokenAndLinkNumber,
-  devicesWithNoLiveSessions,
   enqueueReply,
   findAccountByPhone,
   findVerifiedPhoneForAccount,
@@ -59,8 +58,8 @@ import {
   resolveAttention,
   setAttentionNotifyMessageId,
   setDevicesAfkForSessions,
+  type LostDevice,
   type OnboardingLinkFailure,
-  type ReapedSession,
   type SessionActivityLine,
 } from '../db/repo.ts';
 import { waitForDelivered } from '../db/listener.ts';
@@ -1119,25 +1118,14 @@ function shortId(id: string): string {
 // "Lost connection" notification (reaper-driven).
 // -----------------------------------------------------------------------------
 
-/**
- * One "lost connection" entry. A `device` entry means EVERY session on that
- * device dropped out (a laptop closed / slept / lost network) — we name the
- * device, not its now-gone sessions. A `session` entry is a single session that
- * stopped while its device still has other live sessions, so naming the session
- * is what tells the user which work halted.
- */
-export type EndedEntry =
-  | { kind: 'device'; id: string; hostname: string | null; os: string | null }
-  | { kind: 'session'; id: string; title: string | null };
+// The human label for a lost device: its hostname, falling back through os then
+// a short id. Kept minimal so composeLostConnectionMessage stays a pure function
+// of the device identity (LostDevice from the repo satisfies it structurally).
+export type LostDeviceLabel = { id: string; hostname: string | null; os: string | null };
 
-// The human label for an entry: a session by its title, a device by its
-// hostname — each falling back through os/short-id.
-function entryLabel(e: EndedEntry): string {
-  const raw =
-    e.kind === 'device'
-      ? e.hostname?.trim() || e.os?.trim() || shortId(e.id)
-      : e.title?.trim() || shortId(e.id);
-  // Both title and hostname/os are device-supplied (hostname is stored verbatim
+function deviceLabel(d: LostDeviceLabel): string {
+  const raw = d.hostname?.trim() || d.os?.trim() || shortId(d.id);
+  // hostname/os are device-supplied (hostname is stored verbatim
   // at pairing). They land inside the quoted "<label>" we post to the user's
   // phone, so strip the `"` delimiter plus control/bidi chars — otherwise a
   // crafted name could forge extra message structure. clip() then collapses
@@ -1145,95 +1133,54 @@ function entryLabel(e: EndedEntry): string {
   return clip(raw.replace(/["\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, ''), 80);
 }
 
-/** Build the coalesced "lost connection" iMessage. Pure + deterministic (no LLM).
- *  Per product decision this names the device/session(s) only — NO activity
- *  summary, so a dropped laptop never leaks its last transcript line to the
- *  phone. When all of a device's sessions drop together it collapses to one
- *  device line rather than a list of orphaned session titles. Exported for unit
+/** Build the coalesced "lost connection" iMessage for one or more whole devices
+ *  that dropped out. Pure + deterministic (no LLM). Per product decision this
+ *  names the DEVICE only — never a session and never an activity summary — so a
+ *  dropped laptop leaks neither its session titles nor its last transcript line to
+ *  the phone. (Per-session "lost connection" notices were removed: a single dead
+ *  session on an otherwise-live machine isn't worth a text.) Exported for unit
  *  tests. */
-export function composeLostConnectionMessage(entries: ReadonlyArray<EndedEntry>): string {
-  const [first] = entries;
-  if (entries.length === 1 && first) {
-    // `with session "X"` / `with device "Y"` — the kind word names what dropped.
-    return `Lost connection with ${first.kind} "${entryLabel(first)}".`;
+export function composeLostConnectionMessage(devices: ReadonlyArray<LostDeviceLabel>): string {
+  const [first] = devices;
+  if (devices.length === 1 && first) {
+    return `Lost connection with device "${deviceLabel(first)}".`;
   }
-  // A uniform batch keeps the natural "N sessions"/"N devices" header; a mixed
-  // batch (rare — two machines' sessions reaped in one sweep) prefixes each
-  // bullet with its kind so the list stays unambiguous.
-  if (entries.every((e) => e.kind === 'session')) {
-    const lines = entries.map((e) => `• ${entryLabel(e)}`);
-    return `Lost connection with ${entries.length} sessions:\n${lines.join('\n')}`;
-  }
-  if (entries.every((e) => e.kind === 'device')) {
-    const lines = entries.map((e) => `• ${entryLabel(e)}`);
-    return `Lost connection with ${entries.length} devices:\n${lines.join('\n')}`;
-  }
-  const lines = entries.map((e) => `• ${e.kind} "${entryLabel(e)}"`);
-  return `Lost connection:\n${lines.join('\n')}`;
+  const lines = devices.map((d) => `• ${deviceLabel(d)}`);
+  return `Lost connection with ${devices.length} devices:\n${lines.join('\n')}`;
 }
 
 /**
- * Notify the user that one or more of their sessions ENDED while AFK. Driven by
- * the liveness reaper — the authoritative server-side death detector, because the
- * device can't announce a SIGKILL / crash / sleep. AFK-gated: a session is
- * surfaced only if its device is afk='on' (at the keyboard the dashboard already
- * shows live state). Coalesced into ONE iMessage per account, so closing a laptop
- * running N worktree-sessions is a single text, not N. Code-generated +
+ * Notify the user that one or more whole DEVICES dropped out while AFK (every
+ * session on the machine ended — a laptop closed / slept / crashed / lost
+ * network). Driven by the liveness reaper via claimDevicesToNotifyLost, which is
+ * already AFK-gated and deduped (each lost device is claimed exactly once, past a
+ * debounce grace, re-armed on revival), so this just groups by account, composes,
+ * and sends. Coalesced into ONE iMessage per account. Code-generated +
  * deterministic (no LLM turn, no attention row). Best-effort — never throws into
  * the reaper timer.
  */
-export async function notifyEndedSessions(
+export async function notifyLostDevices(
   transport: Transport,
-  reaped: ReadonlyArray<ReapedSession>,
+  lost: ReadonlyArray<LostDevice>,
 ): Promise<void> {
-  const afkEnded = reaped.filter((s) => s.afk === AfkState.ON);
-  if (afkEnded.length === 0) return;
+  if (lost.length === 0) return;
 
-  // afk is machine-wide, but the user (and their phone number) is per-account.
-  const byAccount = new Map<string, ReapedSession[]>();
-  for (const s of afkEnded) {
-    const list = byAccount.get(s.accountId);
-    if (list) list.push(s);
-    else byAccount.set(s.accountId, [s]);
+  // A device is machine-wide, but the user (and their phone number) is per-account.
+  const byAccount = new Map<string, LostDevice[]>();
+  for (const d of lost) {
+    const list = byAccount.get(d.accountId);
+    if (list) list.push(d);
+    else byAccount.set(d.accountId, [d]);
   }
 
-  for (const [accountId, sessions] of byAccount) {
+  for (const [accountId, devices] of byAccount) {
     try {
-      const entries = await buildEndedEntries(sessions);
       // sendToUser is itself best-effort (logs + swallows transport errors).
-      await sendToUser(transport, accountId, composeLostConnectionMessage(entries));
+      await sendToUser(transport, accountId, composeLostConnectionMessage(devices));
     } catch (err) {
-      console.error('[reaper] notify ended sessions failed', err);
+      console.error('[reaper] notify lost devices failed', err);
     }
   }
-}
-
-/**
- * Turn one account's just-reaped sessions into notification entries, collapsing
- * any device whose sessions ALL dropped into a single `device` entry. "All
- * dropped" is decided by a post-reap live-session count (devicesWithNoLiveSessions)
- * rather than by what's in this batch, so it's correct whether a laptop's
- * sessions die in one sweep or trickle out across a few — the line flips to the
- * device once nothing live remains on it. Sessions on devices that still have
- * live work stay named individually.
- */
-async function buildEndedEntries(
-  sessions: ReadonlyArray<ReapedSession>,
-): Promise<EndedEntry[]> {
-  const fullyDropped = await devicesWithNoLiveSessions(sessions.map((s) => s.deviceId));
-  const entries: EndedEntry[] = [];
-  const seenDevice = new Set<string>();
-  for (const s of sessions) {
-    if (fullyDropped.has(s.deviceId)) {
-      // One entry per dead device, however many of its sessions were reaped.
-      if (seenDevice.has(s.deviceId)) continue;
-      seenDevice.add(s.deviceId);
-      entries.push({ kind: 'device', id: s.deviceId, hostname: s.hostname, os: s.os });
-    } else {
-      entries.push({ kind: 'session', id: s.id, title: s.title });
-    }
-  }
-  return entries;
 }
 
 /**

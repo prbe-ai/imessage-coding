@@ -15,7 +15,7 @@ import {
   extractOnboardingToken,
   shouldInterrupt,
   takeBatch,
-  type EndedEntry,
+  type LostDeviceLabel,
 } from './index.ts';
 
 function inbound(overrides: Partial<InboundMessage> = {}): InboundMessage {
@@ -172,49 +172,21 @@ describe('composeDeliveryRetraction — late-ACK correction, silent when nothing
 });
 
 describe('composeLostConnectionMessage', () => {
-  const session = (o: Partial<{ id: string; title: string | null }> = {}): EndedEntry => ({
-    kind: 'session',
-    id: '0123456789abcdef',
-    title: 'fix the reaper',
-    ...o,
-  });
+  // The notice is DEVICE-only — per-session "lost connection" notices were
+  // removed, so there's no session/mixed case to cover anymore.
   const device = (
     o: Partial<{ id: string; hostname: string | null; os: string | null }> = {},
-  ): EndedEntry => ({
-    kind: 'device',
+  ): LostDeviceLabel => ({
     id: 'dddddddd9999',
     hostname: "Richard's MacBook",
     os: 'darwin',
     ...o,
   });
 
-  test('single session: names the session only, no summary', () => {
-    const msg = composeLostConnectionMessage([session()]);
-    expect(msg).toBe('Lost connection with session "fix the reaper".');
+  test('whole device dropped: names the device by hostname, no summary', () => {
+    const msg = composeLostConnectionMessage([device()]);
+    expect(msg).toBe('Lost connection with device "Richard\'s MacBook".');
     expect(msg.includes('Last:')).toBe(false);
-  });
-
-  test('null/blank title falls back to the short id', () => {
-    expect(composeLostConnectionMessage([session({ title: null })])).toBe(
-      'Lost connection with session "01234567".',
-    );
-    expect(composeLostConnectionMessage([session({ title: '   ' })])).toBe(
-      'Lost connection with session "01234567".',
-    );
-  });
-
-  test('multiple sessions coalesce into one bulleted message, no summaries', () => {
-    const msg = composeLostConnectionMessage([
-      session({ id: 'aaaaaaaa1111', title: 'A' }),
-      session({ id: 'bbbbbbbb2222', title: 'B' }),
-    ]);
-    expect(msg).toBe('Lost connection with 2 sessions:\n• A\n• B');
-  });
-
-  test('whole device dropped: names the device by hostname, not its sessions', () => {
-    expect(composeLostConnectionMessage([device()])).toBe(
-      'Lost connection with device "Richard\'s MacBook".',
-    );
   });
 
   test('device label falls back hostname -> os -> short id', () => {
@@ -232,14 +204,6 @@ describe('composeLostConnectionMessage', () => {
       device({ id: 'bbbb', hostname: 'iMac' }),
     ]);
     expect(msg).toBe('Lost connection with 2 devices:\n• Air\n• iMac');
-  });
-
-  test('mixed device + session: each bullet labels its kind', () => {
-    const msg = composeLostConnectionMessage([
-      device({ hostname: 'iMac' }),
-      session({ title: 'fix the reaper' }),
-    ]);
-    expect(msg).toBe('Lost connection:\n• device "iMac"\n• session "fix the reaper"');
   });
 
   test('device-supplied name cannot forge message structure (strips the quote delimiter)', () => {

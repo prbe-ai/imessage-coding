@@ -14,7 +14,6 @@ import {
   AttentionKind,
   DecisionBehavior,
   SessionState,
-  isAfkState,
   isAgentKind,
   type ActivityEvent,
   type ActivityKind,
@@ -406,7 +405,8 @@ export async function upsertSession(args: {
 }): Promise<SessionInfo> {
   const agent = isAgentKind(args.agent) ? args.agent : AgentKind.CLAUDE_CODE;
   const row = await queryOne<SessionRow>(
-    `INSERT INTO sessions (id, device_id, account_id, cwd, title, agent, state, last_event_at)
+    `WITH up AS (
+     INSERT INTO sessions (id, device_id, account_id, cwd, title, agent, state, last_event_at)
      VALUES ($1, $2, $3, $4, $7, $5, COALESCE($6, 'active'), now())
      ON CONFLICT (id) DO UPDATE
         SET -- Reassign to the current device, and scope the claim by ACCOUNT (not
@@ -431,7 +431,22 @@ export async function upsertSession(args: {
                                               THEN 'active' ELSE sessions.state END),
             last_event_at = now()
       WHERE sessions.account_id = $3
-     RETURNING *`,
+     RETURNING *
+     ),
+     -- Re-arm the device's "lost connection" dedup. This session is alive again
+     -- (a brand-new session, or the reaper had ended it and a heartbeat revived
+     -- it), so clear the device's announced-lost stamp — a genuine LATER death
+     -- then re-announces. Guarded on lost_notified_at IS NOT NULL so the common
+     -- heartbeat (stamp already null) writes no row. As a data-modifying CTE this
+     -- always runs even though the final SELECT only reads \`up\`.
+     rearm AS (
+       UPDATE devices d SET lost_notified_at = NULL
+         FROM up
+        WHERE d.id = up.device_id
+          AND up.state <> 'ended'
+          AND d.lost_notified_at IS NOT NULL
+     )
+     SELECT * FROM up`,
     [
       args.sessionId,
       args.deviceId,
@@ -492,20 +507,14 @@ export async function isSessionLive(sessionId: string): Promise<boolean> {
   return rows[0]?.live ?? false;
 }
 
-/** A session the reaper just transitioned to `ended`, carrying enough to notify
- *  the user it stopped: its account, human title, its device's machine-wide afk
- *  (joined from `devices` — afk gates whether we surface it to the phone), and
- *  the device identity (id + hostname/os) so the notifier can coalesce a whole
- *  device dropping out into one "lost connection with <device>" line instead of
- *  naming each of its sessions. */
+/** A session the reaper just transitioned to `ended`. Returned for logging only —
+ *  the user-facing "lost connection" notice is DEVICE-keyed and built separately
+ *  (claimDevicesToNotifyLost), not from this set, so no device/afk fields are
+ *  needed here. */
 export interface ReapedSession {
   id: string;
   accountId: string;
   title: string | null;
-  afk: AfkState;
-  deviceId: string;
-  hostname: string | null;
-  os: string | null;
 }
 
 /**
@@ -518,10 +527,12 @@ export interface ReapedSession {
  * dashboard + orchestrator. Idempotent — safe to run on every control-plane
  * instance.
  *
- * Returns the sessions THIS call transitioned (joined to their device's afk +
- * title). The `state <> 'ended'` guard + `RETURNING` make that set exactly-once
- * across instances — only the instance whose UPDATE wins the row sees it — so a
- * multi-machine deploy notifies the user about a stopped session exactly once.
+ * Returns the sessions THIS call transitioned, for logging only. The user-facing
+ * "lost connection" notice is NOT driven from here — a session reaped on a brief
+ * blip is revived by the next heartbeat, so announcing on the raw transition
+ * spams. Announcement is the separate, debounced + deduped, DEVICE-keyed
+ * claimDevicesToNotifyLost (the phone notice names the whole device, not its
+ * now-gone sessions).
  */
 export async function reapStaleSessions(
   staleSeconds: number = SESSION_STALE_SECONDS,
@@ -530,57 +541,102 @@ export async function reapStaleSessions(
     id: string;
     account_id: string;
     title: string | null;
-    afk: string;
-    device_id: string;
-    hostname: string | null;
-    os: string | null;
   }>(
     `UPDATE sessions s
         SET state = 'ended'
-       FROM devices d
-      WHERE s.device_id = d.id
-        AND s.state <> 'ended'
+      WHERE s.state <> 'ended'
         AND s.last_event_at < now() - ($1::int * interval '1 second')
-      RETURNING s.id, s.account_id, s.title, d.afk, d.id AS device_id,
-                d.hostname, d.os`,
+      RETURNING s.id, s.account_id, s.title`,
     [staleSeconds],
   );
   return rows.map((r) => ({
     id: r.id,
     accountId: r.account_id,
     title: r.title,
-    // Fail closed: an unexpected afk value reads as OFF (no notification) rather
-    // than a lying cast that could slip a junk string into the afk='on' filter.
-    afk: isAfkState(r.afk) ? r.afk : AfkState.OFF,
-    deviceId: r.device_id,
-    hostname: r.hostname,
-    os: r.os,
   }));
 }
 
 /**
- * Of the given device ids, return the ones that now have ZERO live (non-ended)
- * sessions — i.e. the whole device dropped out, not just one of its sessions.
- * Used by the reaper's notifier to collapse a laptop-close (N sessions ending at
- * once) into a single "lost connection with <device>" line. Run AFTER the reap
- * has committed the `ended` transitions, so the count reflects the post-reap
- * world. A concurrent re-pair reviving a session only ever moves a device OUT of
- * this set (→ we fall back to naming the surviving session), the safe direction.
+ * Extra grace beyond the stale window before a fully-dropped device is ANNOUNCED
+ * to the phone. The reaper marks sessions `ended` at SESSION_STALE_SECONDS so the
+ * dashboard/orchestrator hide them promptly — but a control-plane deploy bounce, a
+ * laptop-sleep blip, or an SSE reconnect makes live sessions miss a few beats, and
+ * the very next heartbeat revives them (upsertSession). Announcing the moment a
+ * device's last session ends would therefore fire a "lost connection" text on
+ * every such flap. We only announce a device whose sessions have ALL stayed dead
+ * this much longer, so a transient flap is swallowed silently.
  */
-export async function devicesWithNoLiveSessions(
-  deviceIds: ReadonlyArray<string>,
-): Promise<Set<string>> {
-  if (deviceIds.length === 0) return new Set();
-  const rows = await query<{ id: string }>(
-    `SELECT d.id
-       FROM unnest($1::uuid[]) AS d(id)
-      WHERE NOT EXISTS (
-        SELECT 1 FROM sessions s
-         WHERE s.device_id = d.id AND s.state <> 'ended'
-      )`,
-    [[...new Set(deviceIds)]],
+export const DEVICE_LOST_NOTIFY_GRACE_SECONDS = 45;
+
+/** A device the reaper is announcing as "lost connection" — all its sessions
+ *  dropped. Carries its account (the phone number is per-account) and identity
+ *  (hostname/os) for the human label. */
+export interface LostDevice {
+  id: string;
+  accountId: string;
+  hostname: string | null;
+  os: string | null;
+}
+
+/**
+ * Claim the devices whose whole machine dropped out, stamping each exactly-once,
+ * and return the subset to ANNOUNCE to the phone. The notice is DEVICE-level, so
+ * dedup is keyed on the device, not its sessions — that's the fix for the
+ * duplicate "Lost connection with device X" texts: sessions dying in staggered
+ * reaper sweeps, or one session flapping ended->active->ended, used to re-fire the
+ * device line every sweep.
+ *
+ * A device is CLAIMED when it is live (not revoked/disabled), it HAS sessions (it
+ * was in use), NONE of those sessions is still alive or only recently quiet (every
+ * session is `ended` AND last beat older than the stale window + grace, so a flap a
+ * heartbeat will revive isn't announced), and it has NOT already been claimed
+ * (`lost_notified_at IS NULL`). The `UPDATE ... RETURNING` stamps `lost_notified_at`
+ * as it claims, so across multiple control-plane instances each lost device is
+ * surfaced exactly once; `upsertSession` clears the stamp when a session comes
+ * back, re-arming for a genuine later death.
+ *
+ * The AFK gate is applied to ANNOUNCEMENT, not to claiming: we stamp every
+ * fully-dropped device but only RETURN (notify) the ones that are afk='on' right
+ * now. Stamping the afk='off' ones too is what records their death as handled —
+ * otherwise a machine that dropped while the user was AT THE KEYBOARD (afk off,
+ * dashboard already showed it) would stay armed and retroactively text the moment
+ * AFK is later toggled on. (At the keyboard the dashboard shows live state, so no
+ * text is wanted; toggling AFK on must not resurrect an old, already-seen death.)
+ */
+export async function claimDevicesToNotifyLost(
+  graceSeconds: number = DEVICE_LOST_NOTIFY_GRACE_SECONDS,
+  staleSeconds: number = SESSION_STALE_SECONDS,
+): Promise<LostDevice[]> {
+  const rows = await query<{
+    id: string;
+    account_id: string;
+    hostname: string | null;
+    os: string | null;
+    notify: boolean;
+  }>(
+    `UPDATE devices d
+        SET lost_notified_at = now()
+      WHERE d.lost_notified_at IS NULL
+        AND d.revoked_at IS NULL
+        AND d.disabled_at IS NULL
+        AND EXISTS (SELECT 1 FROM sessions s WHERE s.device_id = d.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM sessions s
+           WHERE s.device_id = d.id
+             AND (s.state <> 'ended'
+                  OR s.last_event_at >= now() - (($1 + $2)::int * interval '1 second'))
+        )
+      RETURNING d.id, d.account_id, d.hostname, d.os, (d.afk = 'on') AS notify`,
+    [graceSeconds, staleSeconds],
   );
-  return new Set(rows.map((r) => r.id));
+  return rows
+    .filter((r) => r.notify)
+    .map((r) => ({
+      id: r.id,
+      accountId: r.account_id,
+      hostname: r.hostname,
+      os: r.os,
+    }));
 }
 
 // afk is MACHINE-WIDE and lives on `devices`. These RETURNING columns +

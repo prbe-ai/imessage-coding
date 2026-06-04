@@ -63,6 +63,7 @@ import {
   type SessionActivityLine,
 } from '../db/repo.ts';
 import { waitForDelivered } from '../db/listener.ts';
+import { isSessionConnected } from '../device-connections.ts';
 import { hashToken } from '../auth/device.ts';
 import { runAssistantTurn, type ToolExecutor } from './llm.ts';
 import { assistantTools, buildTurnMessages, type TurnMode } from './prompt.ts';
@@ -74,15 +75,32 @@ import {
 
 const HISTORY_LIMIT = 20;
 
-/** How long the per-turn delivery watcher waits for the device to ACK that it
- *  injected a row before warning the user. 30s — generous enough that a healthy
- *  device (sub-second) never trips it, so a fired warning means a real problem.
- *  Detached from the turn, so it never blocks the per-account lock. */
+// Delivery-watch timing. A healthy device ACKs sub-second; everything below is
+// about NOT crying wolf when the gap is transient (a control-plane redeploy, a
+// brief network blip, a laptop waking) — those resolve in seconds-to-minutes and
+// the message DOES land, so a hard 30s warning was a false alarm. The watcher
+// parks on the ACK's NOTIFY (waitForDelivered), so waiting longer is event-driven
+// and essentially free — a late ACK wakes it immediately.
+
+/** First, quick check: a connected, healthy device ACKs well within this. */
 const DELIVERY_CONFIRM_TIMEOUT_MS = 30_000;
+/** Total window to wait out for a session that still LOOKS connected (slow turn,
+ *  mid-reconnect after a deploy). Covers a redeploy + reconnect + backlog flush
+ *  with margin — the incident that motivated this had the ACK land ~2 min late. */
+const DELIVERY_DEBOUNCE_MS = 180_000;
+/** Once past the quick check with NO live SSE stream, give this much grace for a
+ *  (re)connect before warning — long enough to ride a deploy/sleep blip, short
+ *  enough that a genuinely-dead session is reported promptly (~75s total). */
+const DELIVERY_DISCONNECTED_GRACE_MS = 45_000;
+/** After a warning fires, keep watching this long; if the ACK arrives late we
+ *  send a "reached the session after all" retraction so the transcript stays honest. */
+const DELIVERY_RETRACT_WINDOW_MS = 120_000;
 
 /** One session_inbox row the turn enqueued, watched for the device's ACK. */
 interface DeliveryWatch {
   id: string;
+  /** The target session — read for live-connection state (warn-timing). */
+  sessionId: string;
   /** Short human phrase for the warning (e.g. "your answer"). */
   label: string;
 }
@@ -716,7 +734,7 @@ async function execMessageAgent(ctx: DispatchCtx, args: Record<string, unknown>)
   if (!res) return 'error: no such live session for this account';
   const label = sessionDisplay(ctx, sessionId);
   ctx.actions.push(`messaged session ${label}`);
-  ctx.deliveries.push({ id: res.id, label: `your message to ${label}` });
+  ctx.deliveries.push({ id: res.id, sessionId, label: `your message to ${label}` });
   return queuedForSession('message sent');
 }
 
@@ -754,7 +772,7 @@ async function resolveSessionAction(
     });
     if (!dec) return 'error: that request is already resolved';
     ctx.actions.push(`denied ${target.kind} ${shortId(target.id)}`);
-    ctx.deliveries.push({ id: dec.inboxId, label: 'the denial' });
+    ctx.deliveries.push({ id: dec.inboxId, sessionId, label: 'the denial' });
     return queuedForSession('denial recorded');
   }
 
@@ -771,7 +789,7 @@ async function resolveSessionAction(
     });
     if (!dec) return 'error: that plan is already resolved';
     ctx.actions.push(`approved plan ${shortId(target.id)}`);
-    ctx.deliveries.push({ id: dec.inboxId, label: 'the plan approval' });
+    ctx.deliveries.push({ id: dec.inboxId, sessionId, label: 'the plan approval' });
     return queuedForSession('plan approved');
   }
 
@@ -793,7 +811,7 @@ async function allowPermission(ctx: DispatchCtx, target: AttentionEvent): Promis
   });
   if (!dec) return 'error: that permission is already resolved';
   ctx.actions.push(`allowed ${target.toolName ?? 'permission'} ${shortId(target.id)}`);
-  ctx.deliveries.push({ id: dec.inboxId, label: 'the permission' });
+  ctx.deliveries.push({ id: dec.inboxId, sessionId: target.sessionId, label: 'the permission' });
   return queuedForSession('permission allowed');
 }
 
@@ -1233,12 +1251,24 @@ function queuedForSession(recorded: string): string {
 }
 
 /**
- * DETACHED per-turn delivery watcher. Waits up to DELIVERY_CONFIRM_TIMEOUT_MS for
- * the device to ACK that it injected each session_inbox row this turn enqueued
- * (session_inbox.delivered_at, set on the ACK). Texts the user a single ⚠️ ONLY
- * for rows still unconfirmed at the deadline — SILENT on success (a healthy device
- * ACKs sub-second, so a fired warning means a real problem). Runs off the
- * per-account lock (spawned with `void`); best-effort, never throws out.
+ * DETACHED per-turn delivery watcher. Waits for the device to ACK that it
+ * injected each session_inbox row this turn enqueued (session_inbox.delivered_at,
+ * set on the ACK), and texts the user a single ⚠️ for any that never landed.
+ *
+ * The wait is DEBOUNCED + connection-aware so a transient gap (a control-plane
+ * redeploy, a brief blip, a laptop waking) doesn't cry wolf: those resolve in
+ * seconds-to-minutes and the message DOES land. Per row (see watchOneDelivery):
+ *   1. quick check (DELIVERY_CONFIRM_TIMEOUT_MS) — a healthy device passes here;
+ *   2. if still unacked, branch on whether the session holds a live SSE stream:
+ *      connected/slow → wait out DELIVERY_DEBOUNCE_MS; no stream → a shorter
+ *      grace to ride a reconnect, then warn if still gone.
+ * If we do warn, we keep watching the warned rows for DELIVERY_RETRACT_WINDOW_MS
+ * and send a "reached the session after all" note if a late ACK arrives.
+ *
+ * Runs off the per-account lock (spawned with `void`); best-effort, never throws
+ * out. NOTE: in-process + detached, so a control-plane restart kills an in-flight
+ * watcher (no warning AND no retraction fire for it) — acceptable: the unACKed
+ * rows re-serve and land on reconnect, they just go unremarked.
  */
 async function watchDeliveries(
   accountId: string,
@@ -1247,30 +1277,80 @@ async function watchDeliveries(
 ): Promise<void> {
   try {
     const results = await Promise.all(
-      deliveries.map(async (d) => ({
-        label: d.label,
-        ok: await waitForDelivered(d.id, DELIVERY_CONFIRM_TIMEOUT_MS, () =>
-          isInboxDelivered({ id: d.id, accountId }),
-        ),
-      })),
+      deliveries.map(async (d) => ({ d, ok: await watchOneDelivery(accountId, d) })),
     );
-    const followup = composeDeliveryFollowup(results.filter((r) => !r.ok).map((r) => r.label));
-    if (followup) await sendToUser(transport, accountId, followup);
+    const warned = results.filter((r) => !r.ok).map((r) => r.d);
+    const followup = composeDeliveryFollowup(warned.map((d) => d.label));
+    if (!followup) return;
+    await sendToUser(transport, accountId, followup);
+    // Late-ACK retraction: a redeploy/blip may land the row shortly after we
+    // warned. Keep watching the warned rows; tell the user about any that arrive.
+    const landed = (
+      await Promise.all(
+        warned.map(async (d) => ({
+          label: d.label,
+          ok: await waitForDelivered(d.id, DELIVERY_RETRACT_WINDOW_MS, () =>
+            isInboxDelivered({ id: d.id, accountId }),
+          ),
+        })),
+      )
+    )
+      .filter((r) => r.ok)
+      .map((r) => r.label);
+    const retraction = composeDeliveryRetraction(landed);
+    if (retraction) await sendToUser(transport, accountId, retraction);
   } catch (err) {
     console.error('[assistant] delivery watch error', err);
   }
 }
 
 /**
+ * Watch one enqueued row for its ACK. Returns true if it was confirmed delivered
+ * within the (connection-aware, debounced) window, false if it should be warned
+ * about. See watchDeliveries for the rationale behind the phases.
+ */
+async function watchOneDelivery(accountId: string, d: DeliveryWatch): Promise<boolean> {
+  const done = (): Promise<boolean> => isInboxDelivered({ id: d.id, accountId });
+  // Phase 1 — quick check. A connected, healthy device ACKs sub-second.
+  if (await waitForDelivered(d.id, DELIVERY_CONFIRM_TIMEOUT_MS, done)) return true;
+  // The whole debounce is measured from now-ish; track the hard deadline so the
+  // disconnected grace below counts against (not on top of) the total window.
+  const deadline = Date.now() + (DELIVERY_DEBOUNCE_MS - DELIVERY_CONFIRM_TIMEOUT_MS);
+  // Phase 2 — no live SSE stream: give a short grace for a (re)connect (deploy /
+  // sleep blip), then if STILL no stream, warn — nothing is there to receive it.
+  if (!isSessionConnected(d.sessionId)) {
+    if (await waitForDelivered(d.id, DELIVERY_DISCONNECTED_GRACE_MS, done)) return true;
+    if (!isSessionConnected(d.sessionId)) return false;
+  }
+  // Phase 3 — connected (or reconnected during the grace): probably mid-flush, so
+  // wait out the remainder of the debounce before deciding it's truly lost.
+  const remaining = deadline - Date.now();
+  if (remaining > 0 && (await waitForDelivered(d.id, remaining, done))) return true;
+  return false;
+}
+
+/**
  * Compose the unconfirmed-delivery warning (CODE-generated — never LLM prose, so
  * it's always truthful). Returns undefined when everything was confirmed (SILENT
- * on success). `unconfirmed` are the rows the device didn't ACK within the window.
- * Exported for tests.
+ * on success). `unconfirmed` are the rows the device didn't ACK within the
+ * (debounced, connection-aware) window — so by here it's a real, persistent gap,
+ * not a transient blip. We promise a follow-up because the watcher keeps watching
+ * and retracts via composeDeliveryRetraction if a late ACK lands. Exported for tests.
  */
 export function composeDeliveryFollowup(unconfirmed: ReadonlyArray<string>): string | undefined {
   if (unconfirmed.length === 0) return undefined;
-  const secs = Math.round(DELIVERY_CONFIRM_TIMEOUT_MS / 1000);
-  return `⚠️ Heads up — I couldn't confirm ${joinLabels(unconfirmed)} reached the session (no ack after ${secs}s). It may still have landed; I just can't confirm it.`;
+  return `⚠️ Heads up — I couldn't confirm ${joinLabels(unconfirmed)} reached the session yet. It may still land; I'll let you know if it does.`;
+}
+
+/**
+ * Compose the late-ACK retraction (CODE-generated). Sent only after a warning,
+ * when a row the device hadn't confirmed finally lands — keeps the transcript
+ * honest ("it did get through after all"). Returns undefined when nothing landed.
+ * Exported for tests.
+ */
+export function composeDeliveryRetraction(landed: ReadonlyArray<string>): string | undefined {
+  if (landed.length === 0) return undefined;
+  return `✓ Update — ${joinLabels(landed)} reached the session after all.`;
 }
 
 /** Join labels into a natural list ("a", "a and b", "a, b and c"). */

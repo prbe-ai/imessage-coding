@@ -10,6 +10,7 @@ import { MessageChannel, TurnOutcome, type InboundMessage } from '@imsg/shared';
 import {
   classifyTurnOutcome,
   composeDeliveryFollowup,
+  composeDeliveryRetraction,
   composeLostConnectionMessage,
   extractOnboardingToken,
   shouldInterrupt,
@@ -135,17 +136,37 @@ describe('composeDeliveryFollowup — warn-only, silent on success', () => {
     expect(composeDeliveryFollowup([])).toBeUndefined();
   });
 
-  test('unconfirmed → a ⚠️ heads-up that names the 30s window, never a ✓', () => {
+  test('unconfirmed → a ⚠️ heads-up that promises a follow-up, never a ✓', () => {
     const msg = composeDeliveryFollowup(['your answer']) ?? '';
     expect(msg.includes('⚠️')).toBe(true);
     expect(msg.includes("couldn't confirm")).toBe(true);
     expect(msg.includes('your answer')).toBe(true);
-    expect(msg.includes('30s')).toBe(true);
+    // No fixed-window claim anymore (the wait is debounced + connection-aware);
+    // instead it promises the retraction follow-up and never pre-emptively ✓s.
+    expect(msg.includes("I'll let you know")).toBe(true);
     expect(msg.includes('✓')).toBe(false);
   });
 
   test('joins multiple labels naturally with "and"', () => {
     const msg = composeDeliveryFollowup(['a', 'b', 'c']) ?? '';
+    expect(msg.includes('a, b and c')).toBe(true);
+  });
+});
+
+describe('composeDeliveryRetraction — late-ACK correction, silent when nothing landed', () => {
+  test('nothing landed → no message (undefined)', () => {
+    expect(composeDeliveryRetraction([])).toBeUndefined();
+  });
+
+  test('landed → a ✓ note that names what reached the session', () => {
+    const msg = composeDeliveryRetraction(['your message to "fix the reaper"']) ?? '';
+    expect(msg.includes('✓')).toBe(true);
+    expect(msg.includes('after all')).toBe(true);
+    expect(msg.includes('your message to "fix the reaper"')).toBe(true);
+  });
+
+  test('joins multiple landed labels naturally with "and"', () => {
+    const msg = composeDeliveryRetraction(['a', 'b', 'c']) ?? '';
     expect(msg.includes('a, b and c')).toBe(true);
   });
 });

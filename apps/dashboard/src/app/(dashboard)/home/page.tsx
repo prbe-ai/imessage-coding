@@ -284,7 +284,7 @@ export default function HomePage() {
           )}
           <div className="flex items-center justify-between rounded-lg border border-outline-variant/40 bg-surface-container-low px-4 py-3">
             <div>
-              <div className="font-mono text-[10px] uppercase tracking-widest text-outline">
+              <div className="text-xs tracking-tight text-outline">
                 Linked number
               </div>
               <div className="mt-0.5 font-mono text-sm text-on-surface">
@@ -309,7 +309,7 @@ export default function HomePage() {
         <section className="space-y-4">
           <div className="flex items-center justify-between border-b border-outline-variant/40 pb-2">
             <h2 className="text-lg font-bold tracking-tight">Devices</h2>
-            <span className="font-mono text-[10px] uppercase tracking-widest text-outline">
+            <span className="text-xs tracking-tight text-outline">
               {liveDevices.length} paired · {liveSessions.length} live
             </span>
           </div>

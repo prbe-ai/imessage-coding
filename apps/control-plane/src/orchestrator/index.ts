@@ -713,8 +713,9 @@ async function execMessageAgent(ctx: DispatchCtx, args: Record<string, unknown>)
   // Tenant-scoped enqueue: only succeeds for a live session in this account.
   const res = await enqueueReply({ sessionId, accountId: ctx.accountId, text });
   if (!res) return 'error: no such live session for this account';
-  ctx.actions.push(`messaged session ${shortId(sessionId)}`);
-  ctx.deliveries.push({ id: res.id, label: `your message to ${shortId(sessionId)}` });
+  const label = sessionDisplay(ctx, sessionId);
+  ctx.actions.push(`messaged session ${label}`);
+  ctx.deliveries.push({ id: res.id, label: `your message to ${label}` });
   return queuedForSession('message sent');
 }
 
@@ -889,6 +890,16 @@ function collectSessionIds(args: Record<string, unknown>): string[] {
 /** A session title for tool output: the quoted title, or `(untitled)`. */
 function sessionTitle(title: string | undefined): string {
   return title ? JSON.stringify(clip(title, 80)) : '(untitled)';
+}
+
+/** A USER-FACING label for a session: name it by what it is working on (its
+ *  title), never a raw id. For the code-generated prose the user actually reads
+ *  (delivery follow-ups, action notes) — the same rule the system prompt gives
+ *  the model. `clip` collapses whitespace so an untrusted title can't forge a
+ *  newline; falls back to a short id only when a session has no title yet. */
+function sessionDisplay(ctx: DispatchCtx, sessionId: string): string {
+  const title = ctx.sessions.find((s) => s.id === sessionId)?.title;
+  return title?.trim() ? `"${clip(title, 80)}"` : shortId(sessionId);
 }
 
 /** update_session_state: change a session setting (afk only, for now). AFK is

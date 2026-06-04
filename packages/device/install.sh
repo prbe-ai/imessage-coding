@@ -189,6 +189,27 @@ rewrite_bun() {
 }
 
 # =============================================================================
+# Shared: bake the control-plane URL into a staged plugin dir (build-config.json)
+# for LOCAL/checkout installs. The SERVED tarball already carries this file
+# (apps/dashboard/scripts/copy-install-script.mjs writes it at build time); a raw
+# checkout does NOT, so without it the plugin's config.ts controlPlaneUrl() falls
+# back to localhost:8080 — Claude Code AND Codex spawn the hooks + MCP server with
+# no env, so the baked file is the only runtime URL source. Writes ONLY when a URL
+# is provided AND the file is absent (never clobber a tarball-baked value). The
+# `if [ ] && [ ]` form is deliberate: a bare `test && cmd` statement would abort
+# the script under `set -e` when the test is false.
+# =============================================================================
+bake_build_config() {
+  _bbc_dir="$1"
+  _bbc_url="${IMSG_CONTROL_PLANE_URL:-${CONTROL_PLANE_URL:-}}"
+  if [ -n "$_bbc_url" ] && [ ! -f "$_bbc_dir/build-config.json" ]; then
+    _bbc_url="${_bbc_url%/}"
+    printf '{\n  "controlPlaneUrl": "%s"\n}\n' "$_bbc_url" > "$_bbc_dir/build-config.json"
+    say "baked control-plane URL into build-config.json ($_bbc_url)"
+  fi
+}
+
+# =============================================================================
 # Shared: pair the device with the control plane (idempotent across targets —
 # both agents share ONE ~/.imsg device dir + token, so we pair exactly once).
 # =============================================================================
@@ -257,6 +278,7 @@ install_for_claude_code() {
          "$PLUGIN_DIR/.mcp.codex.json"
 
   vendor_shared "$PLUGIN_DIR"
+  bake_build_config "$PLUGIN_DIR"
   say "installing dependencies with bun"
   ( cd "$PLUGIN_DIR" && "$BUN" install --production ) || die "bun install failed"
 
@@ -442,6 +464,7 @@ install_for_codex() {
   rm -f "$CODEX_PLUGIN_DIR/.claude-plugin/marketplace.json"
 
   vendor_shared "$CODEX_PLUGIN_DIR"
+  bake_build_config "$CODEX_PLUGIN_DIR"
   say "installing Codex plugin dependencies with bun"
   ( cd "$CODEX_PLUGIN_DIR" && "$BUN" install --production ) || die "bun install failed (codex)"
 

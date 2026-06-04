@@ -63,10 +63,10 @@ export function SessionCard({ session }: { session: SessionInfo }) {
               {label}
             </span>
           </div>
-          <div className="mt-1 flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-widest text-outline">
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs tracking-tight text-outline">
             {session.title && folder ? (
               <>
-                <span className="normal-case">{folder}</span>
+                <span>{folder}</span>
                 <span aria-hidden="true">·</span>
               </>
             ) : null}

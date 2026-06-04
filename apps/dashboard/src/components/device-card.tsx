@@ -36,12 +36,12 @@ export function DeviceCard({
           >
             {device.label}
           </span>
-          <span className="font-mono text-[10px] uppercase tracking-widest text-outline">
+          <span className="text-xs tracking-tight text-outline">
             {device.os ? `${device.os} · ` : ""}
             {device.sessionCount} live
           </span>
           {!device.enabled && (
-            <span className="rounded bg-outline-variant/30 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-widest text-outline">
+            <span className="rounded bg-outline-variant/30 px-1.5 py-0.5 text-xs tracking-tight text-outline">
               Disabled
             </span>
           )}

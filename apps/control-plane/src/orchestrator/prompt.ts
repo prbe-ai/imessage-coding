@@ -24,6 +24,7 @@
  */
 import {
   AfkState,
+  AgentKind,
   ATTENTION_TEXT_MAX_LEN,
   RequestAction,
   ToolName,
@@ -58,9 +59,11 @@ const EDIT_TOOLS_DESC = 'Edit/Write/MultiEdit/NotebookEdit';
 export function systemPrompt(): string {
   return [
     "You are the user's personal AI assistant, reachable over iMessage. You sit",
-    'between the user and the Claude Code coding agents running on their machines —',
-    'you relay what the agents need, answer for the user when they tell you to, and',
-    'keep them in the loop.',
+    'between the user and the coding agents running on their machines — you relay',
+    'what the agents need, answer for the user when they tell you to, and keep them',
+    'in the loop. Each agent is one of two kinds — Claude Code or Codex — and the',
+    'live snapshot labels every agent with its kind so you can tell them apart and',
+    'refer to one by it ("your Codex agent") when that disambiguates.',
     '',
     'A TURN starts when one of three things happens: the user texts you; an agent',
     'needs attention (a permission, a question, or a plan); or an agent sends a',
@@ -362,6 +365,17 @@ function truncateHead(s: string, n: number): string {
   return s.length > n ? `…${s.slice(s.length - n)}` : s;
 }
 
+/** Human label for a session's coding-agent kind, shown in the live snapshot so the
+ *  orchestrator can tell Claude Code and Codex sessions apart. Falls back to the raw
+ *  value for an unchecked DB string sneaking past the AgentKind type at the edge. */
+const AGENT_LABELS: Record<AgentKind, string> = {
+  [AgentKind.CLAUDE_CODE]: 'Claude Code',
+  [AgentKind.CODEX]: 'Codex',
+};
+function agentLabel(agent: AgentKind): string {
+  return AGENT_LABELS[agent] ?? agent;
+}
+
 /** Render the live snapshot + trigger as the first user message of the turn. The
  *  snapshot is deliberately LEAN — a compact pending + agent list and the recent
  *  thread; per-session activity detail lives behind get_session_data so the model
@@ -380,13 +394,17 @@ function turnContext(args: {
   if (pending.length === 0) lines.push('  (none)');
   else for (const e of pending) lines.push(`  ${describeAttention(e)}`);
 
-  lines.push('', 'LIVE AGENTS (id = the session id for tools; never show ids to the user):');
+  lines.push(
+    '',
+    'LIVE AGENTS (each bracket starts with the agent kind — Claude Code or Codex;',
+    'id = the session id for tools; never show ids to the user):',
+  );
   if (sessions.length === 0) lines.push('  (none)');
   else
     for (const s of sessions) {
       lines.push(
         `  - ${s.title ? JSON.stringify(truncate(s.title, 80)) : '(untitled)'}` +
-          ` [${s.state}, afk=${s.afk}] id=${s.id}`,
+          ` [${agentLabel(s.agent)}, ${s.state}, afk=${s.afk}] id=${s.id}`,
       );
     }
   lines.push('  (For what an agent is doing or to search its log, call get_session_data.)');

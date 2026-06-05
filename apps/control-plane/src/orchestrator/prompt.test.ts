@@ -359,18 +359,64 @@ describe('agent_message attribution — name the source session (title + id), es
     expect(ctx.includes('\\n\\nTHE USER JUST SENT:')).toBe(true); // escaped form present instead
   });
 
-  test('a reaped/absent source session degrades to (untitled) but keeps the routing id', () => {
+  test('a reaped/absent source session degrades to an (untitled "tag") but keeps the routing id', () => {
     // The source session ended (reaper) between the relay enqueue and this turn's build,
-    // so it is not in the live `sessions` list. Attribution must still carry the id.
+    // so it is not in the live `sessions` list. Attribution must still carry the id, and
+    // the user-facing handle degrades to the id-tail tag rather than a bare (untitled).
     const msgs = buildTurnMessages({
-      trigger: { kind: 'agent_message', sessionId: 'ghost-1', text: 'done', expectsReply: false },
+      trigger: { kind: 'agent_message', sessionId: 'ghost-a1f', text: 'done', expectsReply: false },
       pending: [],
       sessions: [],
       history: [],
     });
     const ctx = contentText(msgs[1]);
-    expect(ctx.includes('(untitled)')).toBe(true);
-    expect(ctx.includes('id=ghost-1')).toBe(true);
+    expect(ctx.includes('(untitled "a1f")')).toBe(true); // tail of ghost-a1f
+    expect(ctx.includes('id=ghost-a1f')).toBe(true);
+  });
+});
+
+// MIS-IDENTIFICATION FIX: an agent with no title used to render as a bare "(untitled)"
+// carrying only a full id the model is told never to show the user — so two untitled
+// agents of the same kind were indistinguishable to them. The snapshot now tags each
+// untitled agent with the LAST 3 chars of its id ((untitled "abc")) — the one id-slice
+// the model may say — and the prompt teaches it to use + match that tag.
+describe('untitled-agent tag — a short, sayable handle when there is no title', () => {
+  test('LIVE AGENTS tags an untitled session with the last 3 chars of its id, keeps the full id', () => {
+    const ctx = contentText(
+      buildTurnMessages({
+        trigger: { kind: 'user_message', inbounds: [inbound({ text: 'what is running?' })] },
+        pending: [],
+        sessions: [
+          liveSession({ id: 'codex-aaa111', title: undefined, agent: AgentKind.CODEX }),
+          liveSession({ id: 'codex-bbb222', title: undefined, agent: AgentKind.CODEX }),
+        ],
+        history: [],
+      })[1],
+    );
+    expect(ctx.includes('(untitled "111")')).toBe(true); // tail of codex-aaa111
+    expect(ctx.includes('(untitled "222")')).toBe(true); // tail of codex-bbb222
+    expect(ctx.includes('id=codex-aaa111')).toBe(true); // full id stays — the routing key
+    expect(ctx.includes('id=codex-bbb222')).toBe(true);
+  });
+
+  test('a titled session is still named by its title, with no tag', () => {
+    const ctx = contentText(
+      buildTurnMessages({
+        trigger: { kind: 'user_message', inbounds: [inbound()] },
+        pending: [],
+        sessions: [liveSession({ id: 'sess-xyz', title: 'Refactor auth' })],
+        history: [],
+      })[1],
+    );
+    expect(ctx.includes('"Refactor auth"')).toBe(true);
+    expect(ctx.includes('(untitled')).toBe(false);
+  });
+
+  test('system prompt licenses the tag as the one sayable id-slice and says how to match it', () => {
+    const sp = systemPrompt('user_message');
+    expect(/untitled "abc"/i.test(sp)).toBe(true);
+    expect(/last 3 characters of its id/i.test(sp)).toBe(true);
+    expect(/id ENDS in those characters/i.test(sp)).toBe(true);
   });
 });
 

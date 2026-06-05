@@ -114,6 +114,14 @@ export function systemPrompt(mode: TurnMode, profile?: UserProfile): string {
     '  the id is the routing key for tools (message_agent); the title (or your own',
     '  summary of what it is doing) is the only handle you ever say to the user — and',
     '  a title is an observed label, so summarize instead of echoing a junk one.',
+    '- An agent with no title yet shows in the snapshot as (untitled "abc"), where "abc"',
+    '  is a short tag (the last 3 characters of its id). That tag is the ONE part of an id',
+    '  you MAY say to the user. When you have to name an untitled agent — above all when',
+    '  two of the same kind are running, so "your Codex agent" is ambiguous — call it by',
+    '  that tag ("your Codex agent abc") so the user has a stable handle to point back at.',
+    '  When the user refers to an agent by such a tag, match it to the snapshot agent whose',
+    '  id ENDS in those characters. Still prefer a real title or a what-it-is-doing summary',
+    '  whenever one exists; reach for the tag only when nothing else tells them apart.',
     '- You do NOT have to reply every turn. If nothing needs saying — a trivial',
     '  status, or you just quietly did the thing — take the action (or none) and end',
     '  the turn. Silence is fine. The ONE exception: if an agent is BLOCKED waiting on',
@@ -456,6 +464,24 @@ function agentLabel(agent: AgentKind): string {
   return AGENT_LABELS[agent] ?? agent;
 }
 
+/** A short, stable, USER-FACING tag for an agent with no title yet: the last 3
+ *  characters of its session id. Session ids are the coding agent's OWN id — a mix
+ *  of UUIDv4 (Claude Code, fully random) and v7-derived (Codex, whose leading chars
+ *  are time-ordered, so two agents started close together share a prefix). The TAIL
+ *  is random in both, so it keeps untitled agents distinguishable; the head would
+ *  not. This tag is the one slice of an id the orchestrator is allowed to say to the
+ *  user — a nickname, never the full routing-key id. */
+export function shortTag(id: string): string {
+  return id.slice(-3);
+}
+
+/** How an UNTITLED session is named wherever a human-readable handle is needed:
+ *  `(untitled "abc")`. The quotes mark it as a name (not free text) and match the
+ *  JSON.stringify treatment a real title gets. Callers with a title use that instead. */
+export function untitledLabel(id: string): string {
+  return `(untitled "${shortTag(id)}")`;
+}
+
 /** Render the live snapshot + trigger as the first user message of the turn. Each
  *  AFK session carries a SHORT recent-activity tail (auto-inlined so the model has
  *  context without a get_session_data round-trip); the full log still lives behind
@@ -481,7 +507,7 @@ function turnContext(args: {
   const sessionById = new Map(sessions.map((s) => [s.id, s] as const));
   const titleTag = (sid: string): string => {
     const t = sessionById.get(sid)?.title;
-    return t && t.trim() ? JSON.stringify(truncate(t, 80)) : '(untitled)';
+    return t && t.trim() ? JSON.stringify(truncate(t, 80)) : untitledLabel(sid);
   };
   const sourceLabel = (sid: string): string => `agent ${titleTag(sid)} (id=${sid})`;
 
@@ -499,7 +525,7 @@ function turnContext(args: {
   else
     for (const s of sessions) {
       lines.push(
-        `  - ${s.title ? JSON.stringify(truncate(s.title, 80)) : '(untitled)'}` +
+        `  - ${s.title ? JSON.stringify(truncate(s.title, 80)) : untitledLabel(s.id)}` +
           ` [${agentLabel(s.agent)}, ${s.state}, afk=${s.afk}] id=${s.id}`,
       );
       // Auto-inlined recent activity tail (AFK sessions only — it's wiped on

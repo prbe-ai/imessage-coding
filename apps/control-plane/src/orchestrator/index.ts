@@ -70,7 +70,7 @@ import { hashToken } from '../auth/device.ts';
 import { loadEnv, LLM_MODEL_GEMINI } from '../env.ts';
 import { runAssistantTurn, type ContentPart, type ToolExecutor } from './llm.ts';
 import { fetchInboundImages } from './media.ts';
-import { assistantTools, buildTurnMessages, type TurnMode } from './prompt.ts';
+import { assistantTools, buildTurnMessages, shortTag, type TurnMode } from './prompt.ts';
 import {
   deterministicTarget,
   isDestructiveTool,
@@ -1028,10 +1028,11 @@ function sessionTitle(title: string | undefined): string {
  *  title), never a raw id. For the code-generated prose the user actually reads
  *  (delivery follow-ups, action notes) — the same rule the system prompt gives
  *  the model. `clip` collapses whitespace so an untrusted title can't forge a
- *  newline; falls back to a short id only when a session has no title yet. */
+ *  newline; falls back to the short id-tail tag (the same handle the snapshot shows
+ *  the model, and the only id slice we say to the user) when a session has no title yet. */
 function sessionDisplay(ctx: DispatchCtx, sessionId: string): string {
   const title = ctx.sessions.find((s) => s.id === sessionId)?.title;
-  return title?.trim() ? `"${clip(title, 80)}"` : shortId(sessionId);
+  return title?.trim() ? `"${clip(title, 80)}"` : `agent ${shortTag(sessionId)}`;
 }
 
 /** update_session_state: change a session setting (afk only, for now). AFK is

@@ -75,23 +75,14 @@ CREATE TABLE IF NOT EXISTS devices (
   -- device syncs it down via the SSE `state` event. afk ∈ on|off (string-checked).
   afk                TEXT        NOT NULL DEFAULT 'off'
                        CHECK (afk IN ('on', 'off')),
-  -- Connection hysteresis state machine for the DEVICE-keyed "lost connection"
-  -- notice (names the whole machine, not a session). The reaper is the single
-  -- writer of both columns.
-  --   online_since: start of the device's current uptime streak. markDevicesOnline
-  --     stamps it when a fully-offline device starts beating again; it is NOT bumped
-  --     on later beats, so it measures TRUE continuous uptime, and a sub-threshold
-  --     offline blip is folded into one streak (claim only clears it on a SUSTAINED
-  --     drop). NULL = device is offline / has no open streak.
-  --   lost_notified_at: LAST time we actually announced a lost connection. Kept for
-  --     observability only — gating is now hysteresis (online_since), not a cooldown.
-  -- A device alerts when an open streak that was SUSTAINED-ONLINE
-  -- (DEVICE_ONLINE_SUSTAIN_SECONDS) goes SUSTAINED-OFFLINE
-  -- (DEVICE_OFFLINE_SUSTAIN_SECONDS); the drop consumes the streak (online_since →
-  -- NULL). Net: a flapping laptop texts at most once, a stays-dropped machine
-  -- exactly once, a real reconnect→work→die cycle re-announces. See
-  -- markDevicesOnline / claimDevicesToNotifyLost.
-  online_since       TIMESTAMPTZ,
+  -- LOCK for the DEVICE-keyed "lost connection" notice (names the whole machine, not
+  -- a session). The reaper owns it (claimDevicesToNotifyLost): it stamps the last time
+  -- we texted the user the machine dropped (or silently "handled" an afk-off drop), and
+  -- the dedup is CONVERSATION-RELOCK — a dropped device is announced once, then NOT
+  -- again until the user RE-ENGAGES (an inbound message newer than this stamp), at which
+  -- point a later/continued drop re-announces. So a laptop that just flaps with no
+  -- texting from the user is announced exactly once, regardless of flap cadence; NULL =
+  -- never announced. Never written by the heartbeat path. See claimDevicesToNotifyLost.
   lost_notified_at   TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_devices_account ON devices(account_id);
@@ -108,36 +99,28 @@ UPDATE devices d SET afk = s.afk
   ) s
  WHERE s.device_id = d.id AND d.afk = 'off';
 -- Idempotent add for already-provisioned DBs. Apply to the live DB BEFORE the
--- code deploy: the reaper's claimDevicesToNotifyLost reads/writes this column for
--- its per-device notify cooldown.
+-- code deploy: the reaper's claimDevicesToNotifyLost reads/writes this column as the
+-- "lost connection" lock.
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS lost_notified_at TIMESTAMPTZ;
--- Backfill: claimDevicesToNotifyLost announces by STATE (all sessions ended past
--- grace + stamp NULL), not by a fresh transition — so without this, the first
--- post-deploy sweep would text a spurious "lost connection" for every AFK machine
--- that already died long ago (their NULL stamp + ended sessions would match). Stamp
--- every device that is ALREADY fully dropped (has sessions, none live) as
--- already-announced. A currently-LIVE device (≥1 non-ended session) stays NULL, so
--- it announces correctly when it later drops. A device stamped here that never
--- reconnects re-announces zero more times (claimDevicesToNotifyLost requires a
--- session beat newer than the stamp); the stamp is no longer cleared on revival.
--- Idempotent — only ever stamps still-NULL rows.
+-- Backfill: claimDevicesToNotifyLost arms on STATE (offline past the debounce + stamp
+-- NULL), not on a fresh transition — so without this, the first post-deploy sweep would
+-- text a spurious "lost connection" for every AFK machine that already died long ago
+-- (their NULL stamp + ended sessions would match). Stamp every device that is ALREADY
+-- fully dropped (has sessions, none live) as already-announced. A currently-LIVE device
+-- (≥1 non-ended session) stays NULL, so it announces correctly when it later drops. A
+-- device stamped here re-announces only if the user RE-ENGAGES (an inbound newer than
+-- the stamp) — so a stays-dropped machine texts zero more times. Idempotent — only ever
+-- stamps still-NULL rows.
 UPDATE devices d SET lost_notified_at = now()
  WHERE d.lost_notified_at IS NULL
    AND EXISTS (SELECT 1 FROM sessions s WHERE s.device_id = d.id)
    AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.device_id = d.id AND s.state <> 'ended');
--- Idempotent add for already-provisioned DBs. Apply to the live DB BEFORE the code
--- deploy: the reaper's markDevicesOnline / claimDevicesToNotifyLost read+write this
--- column, so a missing column would 500 every sweep. online_since is additive — the
--- old code ignores it — so applying this ahead of the deploy is safe.
-ALTER TABLE devices ADD COLUMN IF NOT EXISTS online_since TIMESTAMPTZ;
--- Deliberately NO data backfill: the post-deploy boot reaper sweep runs
--- markDevicesOnline() (notify=false) and stamps online_since for every currently-ONLINE
--- device using the canonical SESSION_STALE_SECONDS — so we don't duplicate that window
--- as a magic literal here, and the constant stays single-sourced. The result is the
--- same storm-proof state: a device left NULL (offline at deploy) can't alert until it
--- genuinely reconnects and then drops sustained, and a freshly-stamped online device
--- needs a full sustained-online→sustained-offline cycle first — so the first post-deploy
--- sweeps neither storm nor mis-fire.
+-- Drop the short-lived `online_since` column from the superseded heartbeat-hysteresis
+-- approach (PR #11). The conversation-relock model (above) re-arms on user engagement,
+-- not on an uptime streak, so the column is dead. Idempotent + safe: apply AFTER the
+-- relock code is deployed (the new reaper never references online_since; only the
+-- superseded code did).
+ALTER TABLE devices DROP COLUMN IF EXISTS online_since;
 
 -- -----------------------------------------------------------------------------
 -- pairing_tokens — single-use, short-TTL tokens embedded in install.sh and
@@ -312,6 +295,12 @@ CREATE TABLE IF NOT EXISTS message_log (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_message_log_account_created ON message_log(account_id, created_at DESC);
+-- The "lost connection" reaper runs two inbound-only EXISTS subqueries per offline
+-- device every ~10s (claimDevicesToNotifyLost: re-arm = an inbound newer than the lock;
+-- suppress = an inbound within the active-conversation window). This partial index keeps
+-- them index-only range scans as message_log grows (it skips the outbound half entirely).
+CREATE INDEX IF NOT EXISTS idx_message_log_account_inbound_created
+  ON message_log(account_id, created_at DESC) WHERE direction = 'inbound';
 
 -- -----------------------------------------------------------------------------
 -- processed_webhooks — idempotency ledger for inbound AgentPhone deliveries.

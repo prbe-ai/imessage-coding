@@ -37,6 +37,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import {
+  AgentKind,
   AttentionKind,
   ChannelMethod,
   DeviceApiRoute,
@@ -57,6 +58,7 @@ import {
   pickEagerSessionId,
   sessionTitleFile,
 } from './config.ts';
+import { deriveCodexSessionId } from './codex-session.ts';
 import { loadToken } from './creds.ts';
 import { readHandshakeForProject } from './handshake.ts';
 import { Classification, postJson } from './httpclient.ts';
@@ -109,32 +111,63 @@ const sessionReady: Promise<void> = resolveSessionId().then((id) => {
 });
 
 /**
- * Resolve the real CC session id. Precedence:
+ * Resolve the real session id. Precedence:
  *   1. IMSG_SESSION_ID    — explicit override (tests / manual runs).
- *   2. CLAUDE_CODE_SESSION_ID — CC-native (≥2.1.160), authoritative + synchronous.
- *      This is the fix for same-cwd collisions: each MCP server gets its OWN id.
- *   3. SessionStart handshake (project-dir-keyed) — fallback for older CC, polled
- *      briefly in case the MCP server booted before the hook wrote it. SessionEnd
- *      deletes the handshake, so a present one belongs to the live session here.
- *   4. random id — last resort (degrades to the old behavior; the session just
- *      won't correlate with the tap).
+ *   2. CLAUDE_CODE_SESSION_ID — Claude Code native (≥2.1.160), authoritative +
+ *      synchronous. Fixes same-cwd collisions: each MCP server gets its OWN id.
+ *   3. (Codex only) the parent codex process's open ROLLOUT file — Codex hands
+ *      the MCP server no session id, so we read the real v7 id off our parent's
+ *      rollout path (see codex-session.ts). Preferred over the handshake because
+ *      it's keyed by OUR process, not the directory, so it never adopts another
+ *      agent's id in a shared dir. Polled for the whole window (the rollout may
+ *      not be open yet at boot).
+ *   4. SessionStart handshake (project-dir-keyed) — fallback for older Claude Code
+ *      (and a last resort for Codex if the rollout never appears). Can't tell apart
+ *      concurrent same-dir sessions (last writer wins).
+ *   5. random id — last resort (the session just won't correlate with the tap).
  *
- * NOTE: the handshake fallback (3) still can't disambiguate concurrent same-cwd
- * sessions (last writer wins) — but on CC ≥2.1.160 (2) wins first, so it does.
+ * Housekeeping (plugin install / marketplace validation) sessions never run the
+ * background loops (see the boot gate), so their id is unused — short-circuit to a
+ * random id rather than probe for one.
  */
 async function resolveSessionId(): Promise<string> {
   const eager = pickEagerSessionId();
   if (eager) return eager;
+  if (isPluginHousekeepingDir(PROJECT_CWD)) return randomUUID();
+  const isCodex = agentKind() === AgentKind.CODEX;
   const deadline = Date.now() + HANDSHAKE_WAIT_MS;
   for (;;) {
-    const h = readHandshakeForProject(PROJECT_CWD);
-    if (h?.sessionId) return h.sessionId;
-    if (Date.now() >= deadline) {
-      log('session_id_fallback', { reason: 'no_handshake', project: PROJECT_CWD });
-      return randomUUID();
+    if (isCodex) {
+      // Authoritative for Codex: our own parent codex process's rollout id (the
+      // same id the tap tails). Preferred over the dir-keyed handshake, which can
+      // hold a DIFFERENT agent's id when several sessions share a directory.
+      const id = deriveCodexSessionId();
+      if (id) {
+        log('codex_session_from_rollout', { session: id });
+        return id;
+      }
+    } else {
+      // Older Claude Code (no CLAUDE_CODE_SESSION_ID): the project-dir handshake.
+      const h = readHandshakeForProject(PROJECT_CWD);
+      if (h?.sessionId) return h.sessionId;
     }
+    if (Date.now() >= deadline) break;
     await sleep(HANDSHAKE_POLL_MS);
   }
+  // Window elapsed. For Codex, fall back to the handshake before a random id (a
+  // same-dir collision still correlates better than a fully-orphaned random id).
+  if (isCodex) {
+    const h = readHandshakeForProject(PROJECT_CWD);
+    if (h?.sessionId) {
+      log('codex_session_from_handshake', { session: h.sessionId });
+      return h.sessionId;
+    }
+  }
+  log('session_id_fallback', {
+    reason: isCodex ? 'no_rollout_no_handshake' : 'no_handshake',
+    project: PROJECT_CWD,
+  });
+  return randomUUID();
 }
 
 function readDeviceId(): string {

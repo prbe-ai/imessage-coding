@@ -508,6 +508,9 @@ deviceRoutes.post(DeviceApiRoute.ACTIVITY, async (c) => {
       deviceId: auth.deviceId,
       accountId: auth.accountId,
       cwd: body.cwd,
+      // Label the row from the tap too (it knows its IMSG_AGENT_KIND), so a codex
+      // session is correctly agented from its first activity, before any heartbeat.
+      agent: body.agent,
       reviveIfEnded: false,
     });
     const accepted = await insertSessionActivity({

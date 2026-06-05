@@ -181,12 +181,15 @@ export interface ActivityEvent {
 
 /**
  * A batch of ActivityEvents for one session, POSTed to /api/device/activity.
- * `sessionId` is CC's real transcript session id; `cwd` lets the route register
- * the session (project dir) if the heartbeat hasn't yet.
+ * `sessionId` is the real transcript session id; `cwd` lets the route register
+ * the session (project dir) if the heartbeat hasn't yet. `agent` lets the tap
+ * label the session correctly when IT registers the row before the channel's
+ * first heartbeat — otherwise a codex session would be born `claude-code`.
  */
 export interface ActivityBatchBody {
   sessionId: string;
   cwd?: string;
+  agent?: AgentKind;
   events: ActivityEvent[];
 }
 

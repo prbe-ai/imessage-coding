@@ -467,6 +467,24 @@ describe('routing guardrail — do not funnel unrelated messages; LLM has final 
   });
 });
 
+// CAPABILITY BOUNDARY: the orchestrator has no create-agent tool, so it can only
+// orchestrate agents already in the snapshot. The prompt must say so explicitly, so a
+// "spin up a Claude Code on X" request gets an honest "can't do that yet" instead of a
+// pretend launch. Lock the carve-out so a copy edit can't silently drop it.
+describe('capability boundary — orchestrate existing agents, cannot create new ones', () => {
+  const sp = systemPrompt('user_message');
+
+  test('states it cannot start/spawn/create a new agent', () => {
+    expect(/CANNOT start, spawn, or create a new/i.test(sp)).toBe(true);
+    expect(/not supported yet/i.test(sp)).toBe(true);
+  });
+
+  test('tells the model to be honest (start it themselves) and not fake a launch', () => {
+    expect(/start it themselves/i.test(sp)).toBe(true);
+    expect(/never claim you launched one/i.test(sp)).toBe(true);
+  });
+});
+
 // The texting-style contract from the screenshot fixes: iMessage shows raw
 // Markdown, so the model must write plain text; it must not leak internal ids; and
 // it is explicitly allowed to stay silent when nothing needs saying.

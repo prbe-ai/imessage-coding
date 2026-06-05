@@ -383,6 +383,29 @@ describe('texting style — plain text, no ids, may stay silent', () => {
   });
 });
 
+// REGRESSION GUARD for the screenshot wall-of-text: long relays arrived as one dense
+// block. The prompt must tell the model to break a necessarily-long message into
+// blank-line-separated paragraphs WITHIN a single message — readability without
+// splitting into several texts (the "ONE message, just line breaks" contract).
+describe('readability — break a long message into paragraphs, keep it one message', () => {
+  const sp = systemPrompt('user_message');
+
+  test('the system prompt asks for blank-line-separated paragraphs on longer messages', () => {
+    expect(/BLANK\s+LINE/i.test(sp)).toBe(true);
+    expect(/paragraphs?/i.test(sp)).toBe(true);
+  });
+
+  test('it stays a SINGLE message — line breaks within, never split into several texts', () => {
+    expect(/still ONE message/i.test(sp)).toBe(true);
+  });
+
+  test('the status relay also nudges paragraph breaks for multi-point updates', () => {
+    const ctx = renderAgentMessage('shipped a, then b, then a caveat about c', false);
+    expect(/blank lines/i.test(ctx)).toBe(true);
+    expect(ctx.includes('JUST SENT THIS UPDATE')).toBe(true); // framing preserved
+  });
+});
+
 // The system prompt is mode-aware: the two agent-driven turns are notify-only (only
 // message_user is in their tool surface), so they get a NOTIFY-ONLY clarifier APPENDED.
 // The clarifier is a strict SUFFIX — the invariant body is byte-identical across modes —

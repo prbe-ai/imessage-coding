@@ -5,14 +5,18 @@
  *
  * State machine (linear, with a poll loop):
  *   boot      → resolve session; bounce to /sign-in if none, /home if already
- *               verified. Otherwise mint a token and show the deep link.
+ *               onboarded (number verified). Otherwise mint a token → link.
  *   link      → "Welcome <name>" + prefilled iMessage deep-link button
  *               (`sms:&body=hey! this is <token>`). After the user taps it we
- *               poll /api/onboarding/status for the orchestrator to match the
- *               texted-in token and derive their number.
+ *               poll /api/onboarding/status. The orchestrator binds AND verifies
+ *               the number the instant it matches the token, so the poll sees
+ *               `verified` and advances straight to the in-flow pair step.
  *   confirm   → derived number shown; one-tap "That's me" → POST confirm.
- *   install   → number verified; pair the first device (shared install UI) →
- *               "Next" → /home.
+ *               Fallback only — unreachable while the orchestrator auto-verifies
+ *               on match (a matched conversation is always already verified).
+ *   install   → pair the first device (shared install UI) → "Next" → /home.
+ *               The in-flow last step of onboarding; reached from link/confirm,
+ *               never from a returning visitor (boot/root send those to /home).
  *   done      → leaving for /home.
  *
  * The single-use token is minted server-side (POST /api/onboarding/start),
@@ -117,8 +121,16 @@ export default function OnboardingPage() {
       getOnboardingStatus(ac.signal)
         .then((status) => {
           if (ac.signal.aborted) return;
+          // The orchestrator binds AND verifies the number the moment it
+          // matches the texted-in token (conversations.verified_at = now()), so
+          // the conversation is already `verified` here — there's no
+          // matched-but-unverified window. Since this poll only runs while the
+          // user is actively on the `link` step, advance them to the in-flow
+          // pair step rather than bouncing to /home (which `boot` reserves for
+          // already-onboarded visitors). `confirm` stays as a fallback for the
+          // (currently unreachable) matched-without-verified case.
           if (status.verified) {
-            router.replace("/home");
+            setStep("install");
             return;
           }
           if (status.matched && status.phoneNumber) {

@@ -28,6 +28,10 @@ export interface OnboardingStatusResponse {
   phoneNumber: string | null;
   /** Whether the number is fully verified (conversation.verified_at set). */
   verified: boolean;
+  /** Whether the account has paired at least one (non-revoked) device. The
+   *  number can be verified before any device is paired, so onboarding isn't
+   *  complete — and the pair step still applies — until this is true too. */
+  hasDevice: boolean;
 }
 
 // ── Home ────────────────────────────────────────────────────────────────
@@ -36,6 +40,10 @@ export interface OnboardingStatusResponse {
 export interface LinkedNumberResponse {
   phoneNumber: string | null;
   verified: boolean;
+  /** Whether the account has paired at least one (non-revoked) device. The
+   *  root router treats an account as fully onboarded only when it is both
+   *  `verified` and `hasDevice`; otherwise it routes back to /onboarding. */
+  hasDevice: boolean;
 }
 
 /** Response of GET /api/account/agent-number — the AgentPhone number assigned

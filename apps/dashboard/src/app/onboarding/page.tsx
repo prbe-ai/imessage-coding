@@ -4,8 +4,10 @@
  * Onboarding wizard.
  *
  * State machine (linear, with a poll loop):
- *   boot      → resolve session; bounce to /sign-in if none, /home if already
- *               verified. Otherwise mint a token and show the deep link.
+ *   boot      → resolve session; bounce to /sign-in if none, /home if fully
+ *               onboarded (verified AND a device paired). A verified-but-
+ *               unpaired account resumes at the `install` (pair) step; a matched
+ *               number jumps to `confirm`. Otherwise mint a token → `link`.
  *   link      → "Welcome <name>" + prefilled iMessage deep-link button
  *               (`sms:&body=hey! this is <token>`). After the user taps it we
  *               poll /api/onboarding/status for the orchestrator to match the
@@ -82,7 +84,13 @@ export default function OnboardingPage() {
         const status = await getOnboardingStatus(ac.signal);
         if (ac.signal.aborted) return;
         if (status.verified) {
-          router.replace("/home");
+          // Number's verified — but onboarding isn't done until a device is
+          // paired. Resume at the pair step instead of dropping them on Home.
+          if (status.hasDevice) {
+            router.replace("/home");
+          } else {
+            setStep("install");
+          }
           return;
         }
         if (status.matched && status.phoneNumber) {
@@ -118,7 +126,10 @@ export default function OnboardingPage() {
         .then((status) => {
           if (ac.signal.aborted) return;
           if (status.verified) {
-            router.replace("/home");
+            // Already verified mid-poll — go Home only if a device is paired;
+            // otherwise fall through to the pair step.
+            if (status.hasDevice) router.replace("/home");
+            else setStep("install");
             return;
           }
           if (status.matched && status.phoneNumber) {
@@ -144,8 +155,14 @@ export default function OnboardingPage() {
       const res = await confirmNumber();
       if (res.verified) {
         // Number linked — nudge the user to pair their first device before
-        // dropping them on Home (they can still skip via "Next").
-        setStep("install");
+        // dropping them on Home (they can still skip via "Next"). If they
+        // already paired one (rare: confirmed from a second tab), skip straight
+        // to Home.
+        if (res.hasDevice) {
+          window.location.replace("/home");
+        } else {
+          setStep("install");
+        }
         return;
       }
       setErrorMsg("Confirmation didn't take — please try again.");

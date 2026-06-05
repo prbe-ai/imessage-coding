@@ -169,12 +169,17 @@ printf '\n'
 if ! $OFFLINE && [ -n "$FLY" ]; then
   remote="$("$FLY" secrets list -a "$APP" 2>/dev/null | awk 'NR>1{print $1}' || true)"
   if [ -n "$remote" ]; then
-    declare -A managed=()
-    for k in "${REQUIRED_SECRETS[@]}" "${OPTIONAL_SECRETS[@]}"; do managed["$k"]=1; done
+    # Bash 3.2 (the macOS system bash) has no associative arrays, so test
+    # membership against a space-delimited list of the managed keys. Secret names
+    # are bare identifiers (no spaces), so the space-padded substring match is exact.
+    managed=" ${REQUIRED_SECRETS[*]} ${OPTIONAL_SECRETS[*]} "
     orphans=()
     while IFS= read -r r; do
       [ -n "$r" ] || continue
-      [ -n "${managed[$r]:-}" ] || orphans+=("$r")
+      case "$managed" in
+        *" $r "*) ;;            # managed by this script → leave untouched
+        *) orphans+=("$r") ;;   # not in our contract → report as an orphan
+      esac
     done <<< "$remote"
     if [ "${#orphans[@]}" -gt 0 ]; then
       say "note: Fly has secrets not managed by this script (left untouched): ${orphans[*]}"

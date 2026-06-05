@@ -117,6 +117,20 @@ const deliveredWaiters = makeWaiterRegistry();
 let client: Client | undefined;
 let starting: Promise<void> | undefined;
 
+/**
+ * The dedicated LISTEN client must NOT use a transaction-pooled connection.
+ * Neon's pooled host (`<endpoint>-pooler.<rest>`) fronts PgBouncer in transaction
+ * mode, where a `LISTEN` lands on one backend and the matching `NOTIFY` fires on
+ * another — so notifications are silently dropped and every SSE stream degrades to
+ * its heartbeat re-query (seconds of staleness instead of a sub-second push). We
+ * therefore point the listener at the DIRECT endpoint (the same DSN minus
+ * `-pooler`); the app's query Pool keeps the pooled URL for serverless connection
+ * limits. A non-pooled / non-Neon URL has no `-pooler.` segment and is unchanged.
+ */
+function toDirectConnectionString(url: string): string {
+  return url.replace('-pooler.', '.');
+}
+
 function handleNotification(channel: string, payloadText: string | undefined): void {
   if (!(CHANNELS as readonly string[]).includes(channel) || !payloadText) return;
   let payload: { session_id?: string; account_id?: string; device_id?: string; id?: string };
@@ -164,7 +178,8 @@ export async function ensureListener(): Promise<void> {
 
   starting = (async () => {
     const env = loadEnv();
-    const c = new Client({ connectionString: env.databaseUrl });
+    // Direct (non-pooled) endpoint — LISTEN/NOTIFY is dropped over the pooler.
+    const c = new Client({ connectionString: toDirectConnectionString(env.databaseUrl) });
     c.on('notification', (msg: { channel: string; payload?: string }) => {
       handleNotification(msg.channel, msg.payload);
     });

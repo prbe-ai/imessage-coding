@@ -900,7 +900,13 @@ export async function insertSessionActivity(args: {
          AS t(line_no, block_idx, kind, tool_name, summary, body, is_error)
       WHERE EXISTS (
         SELECT 1 FROM sessions s
+          JOIN devices d ON d.id = s.device_id
          WHERE s.id = $1 AND s.device_id = $3 AND s.account_id = $2
+           -- The DB mirror is ephemeral + AFK-only: accept activity ONLY while the
+           -- device is AFK. Atomic with afk state, so a batch racing an afk-off
+           -- (which wipes the table via trg_wipe_session_activity_afk_off) inserts
+           -- zero rows instead of re-populating what was just deleted.
+           AND d.afk = 'on'
       )
      ON CONFLICT (session_id, line_no, block_idx) DO NOTHING
      RETURNING id`,

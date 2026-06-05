@@ -512,3 +512,29 @@ CREATE TABLE IF NOT EXISTS session_activity (
 CREATE INDEX IF NOT EXISTS idx_session_activity_recent
   ON session_activity(session_id, line_no DESC, block_idx DESC);
 CREATE INDEX IF NOT EXISTS idx_session_activity_account ON session_activity(account_id);
+
+-- -----------------------------------------------------------------------------
+-- Ephemeral cleanup: session_activity exists ONLY while a device is AFK. When AFK
+-- flips OFF, wipe every row for that device's sessions immediately — the user is
+-- back at the keyboard, the orchestrator no longer needs the history, and the
+-- durable record is the local transcript on the machine (never uploaded raw).
+--
+-- Server-side (a trigger) so it fires no matter WHO flips afk to 'off': the device's
+-- POST /api/device/state, OR a dashboard toggle (which UPDATEs devices directly).
+-- The device is never trusted to delete. The narrow window where an in-flight
+-- activity POST lands just after the wipe is closed by insertSessionActivity's
+-- `AND d.afk = 'on'` guard (an insert racing afk-off matches zero rows).
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION wipe_session_activity_on_afk_off() RETURNS trigger AS $$
+BEGIN
+  DELETE FROM session_activity WHERE device_id = NEW.id;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_wipe_session_activity_afk_off ON devices;
+CREATE TRIGGER trg_wipe_session_activity_afk_off
+  AFTER UPDATE ON devices
+  FOR EACH ROW
+  WHEN (OLD.afk = 'on' AND NEW.afk = 'off')
+  EXECUTE FUNCTION wipe_session_activity_on_afk_off();

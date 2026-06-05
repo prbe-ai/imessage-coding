@@ -68,8 +68,8 @@ export default function OnboardingPage() {
   const [phoneNumber, setPhoneNumber] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
-  // Which value was just copied to the clipboard (for the ✓ affordance), if any.
-  const [copied, setCopied] = useState<"message" | "number" | null>(null);
+  // Whether the agent number was just copied (drives the ✓ affordance).
+  const [copied, setCopied] = useState(false);
   // "Not on a Mac?" disclosure — collapsed until the user opens it.
   const [notOnMacOpen, setNotOnMacOpen] = useState(false);
 
@@ -183,23 +183,19 @@ export default function OnboardingPage() {
     }
   }, [confirming]);
 
-  // Copy the prefilled message (or the agent number) for people who can't open
-  // Messages on this device — e.g. they're on a non-Mac and will text from a
-  // phone instead. `key` drives which control flips to a ✓.
-  const copy = useCallback(
-    async (text: string, key: "message" | "number", label: string) => {
-      try {
-        await navigator.clipboard.writeText(text);
-        setCopied(key);
-        toast.success(label);
-        if (copyResetRef.current) window.clearTimeout(copyResetRef.current);
-        copyResetRef.current = window.setTimeout(() => setCopied(null), 2000);
-      } catch {
-        toast.error("Couldn't copy — select and copy manually.");
-      }
-    },
-    [],
-  );
+  // Copy the agent number for people who can't open Messages on this device —
+  // e.g. they're on a non-Mac and will text from a phone instead.
+  const copyNumber = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      toast.success("Copied number");
+      if (copyResetRef.current) window.clearTimeout(copyResetRef.current);
+      copyResetRef.current = window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error("Couldn't copy — select and copy manually.");
+    }
+  }, []);
 
   // Clear any pending copy-reset timer on unmount.
   useEffect(
@@ -285,35 +281,21 @@ export default function OnboardingPage() {
             {notOnMacOpen && (
               <div className="onb-disclosure-panel" id="onb-not-on-mac">
                 <p className="onb-disclosure-text">
-                  Text the message to this number from any phone:
-                </p>
-                <div className="onb-disclosure-row">
+                  Text the message to this number from any phone:{" "}
                   <button
                     type="button"
-                    className={`onb-inline-copy${copied === "number" ? " onb-inline-copy--done" : ""}`}
-                    onClick={() => void copy(agentNumber, "number", "Copied number")}
+                    className={`onb-inline-copy${copied ? " onb-inline-copy--done" : ""}`}
+                    onClick={() => void copyNumber(agentNumber)}
                     aria-label={`Copy number ${agentNumber}`}
                   >
                     {agentNumber}
-                    {copied === "number" ? (
+                    {copied ? (
                       <Check aria-hidden="true" />
                     ) : (
                       <Copy aria-hidden="true" />
                     )}
                   </button>
-                  <button
-                    type="button"
-                    className={`onb-copy-btn${copied === "message" ? " onb-copy-btn--done" : ""}`}
-                    onClick={() => void copy(messageBody, "message", "Copied message")}
-                  >
-                    {copied === "message" ? (
-                      <Check aria-hidden="true" />
-                    ) : (
-                      <Copy aria-hidden="true" />
-                    )}
-                    {copied === "message" ? "Copied" : "Copy message"}
-                  </button>
-                </div>
+                </p>
               </div>
             )}
           </div>

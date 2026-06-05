@@ -75,13 +75,17 @@ CREATE TABLE IF NOT EXISTS devices (
   -- device syncs it down via the SSE `state` event. afk ∈ on|off (string-checked).
   afk                TEXT        NOT NULL DEFAULT 'off'
                        CHECK (afk IN ('on', 'off')),
-  -- Set when the reaper has ANNOUNCED this device as "lost connection" to the
-  -- phone (all its sessions dropped). Dedups the notice: a device whose sessions
-  -- die in staggered reaper sweeps, or that flaps ended->active->ended on a deploy
-  -- bounce / laptop sleep, is announced AT MOST ONCE. Cleared on a genuine revival
-  -- (upsertSession brings a session back) so a real later death re-announces.
-  -- NULL = not yet announced. Device-keyed (not session-keyed): the user-facing
-  -- notice names the whole device, so dedup belongs on the device.
+  -- LAST time the reaper ANNOUNCED this device as "lost connection" to the phone
+  -- (all its sessions dropped). Dedups the notice with a per-device COOLDOWN: a
+  -- device whose sessions die in staggered reaper sweeps, or that flaps
+  -- ended->active->ended on a deploy bounce / laptop sleep / unstable network, is
+  -- announced AT MOST ONCE per DEVICE_LOST_NOTIFY_COOLDOWN_SECONDS. NOT cleared on
+  -- reconnect (the old re-arm-on-revival re-fired one text per flap). Re-announcing
+  -- requires BOTH a reconnect since this time (a session beat newer than it) AND the
+  -- cooldown elapsed — so a machine that just stays dropped texts exactly once,
+  -- while a flapping one is rate-limited to one text per window. See
+  -- claimDevicesToNotifyLost. NULL = never announced. Device-keyed (not
+  -- session-keyed): the user-facing notice names the whole device.
   lost_notified_at   TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_devices_account ON devices(account_id);
@@ -98,8 +102,8 @@ UPDATE devices d SET afk = s.afk
   ) s
  WHERE s.device_id = d.id AND d.afk = 'off';
 -- Idempotent add for already-provisioned DBs. Apply to the live DB BEFORE the
--- code deploy: upsertSession's re-arm and the reaper's claimDevicesToNotifyLost
--- both reference this column.
+-- code deploy: the reaper's claimDevicesToNotifyLost reads/writes this column for
+-- its per-device notify cooldown.
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS lost_notified_at TIMESTAMPTZ;
 -- Backfill: claimDevicesToNotifyLost announces by STATE (all sessions ended past
 -- grace + stamp NULL), not by a fresh transition — so without this, the first
@@ -107,8 +111,10 @@ ALTER TABLE devices ADD COLUMN IF NOT EXISTS lost_notified_at TIMESTAMPTZ;
 -- that already died long ago (their NULL stamp + ended sessions would match). Stamp
 -- every device that is ALREADY fully dropped (has sessions, none live) as
 -- already-announced. A currently-LIVE device (≥1 non-ended session) stays NULL, so
--- it announces correctly when it later drops; a revived device's stamp is cleared
--- by upsertSession. Idempotent — only ever stamps still-NULL rows.
+-- it announces correctly when it later drops. A device stamped here that never
+-- reconnects re-announces zero more times (claimDevicesToNotifyLost requires a
+-- session beat newer than the stamp); the stamp is no longer cleared on revival.
+-- Idempotent — only ever stamps still-NULL rows.
 UPDATE devices d SET lost_notified_at = now()
  WHERE d.lost_notified_at IS NULL
    AND EXISTS (SELECT 1 FROM sessions s WHERE s.device_id = d.id)

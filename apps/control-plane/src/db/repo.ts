@@ -498,20 +498,11 @@ export async function upsertSession(args: {
             last_event_at = now()
       WHERE sessions.account_id = $3
      RETURNING *
-     ),
-     -- Re-arm the device's "lost connection" dedup. This session is alive again
-     -- (a brand-new session, or the reaper had ended it and a heartbeat revived
-     -- it), so clear the device's announced-lost stamp — a genuine LATER death
-     -- then re-announces. Guarded on lost_notified_at IS NOT NULL so the common
-     -- heartbeat (stamp already null) writes no row. As a data-modifying CTE this
-     -- always runs even though the final SELECT only reads \`up\`.
-     rearm AS (
-       UPDATE devices d SET lost_notified_at = NULL
-         FROM up
-        WHERE d.id = up.device_id
-          AND up.state <> 'ended'
-          AND d.lost_notified_at IS NOT NULL
      )
+     -- NOTE: a reconnect no longer clears the device's "lost connection" stamp.
+     -- Re-arming is now time-based (DEVICE_LOST_NOTIFY_COOLDOWN_SECONDS in
+     -- claimDevicesToNotifyLost), so a machine that flaps ended->active->ended
+     -- can't reset the dedup and re-fire a text on its next drop.
      SELECT * FROM up`,
     [
       args.sessionId,
@@ -635,6 +626,22 @@ export async function reapStaleSessions(
  */
 export const DEVICE_LOST_NOTIFY_GRACE_SECONDS = 45;
 
+/**
+ * Per-device cooldown between "lost connection" notices. The stale window + grace
+ * (above) silently swallows a sub-minute blip; this longer window swallows a
+ * MACHINE THAT KEEPS FLAPPING — repeatedly dropping and reconnecting over minutes
+ * (unstable network, intermittent sleep, an SSE reconnect-loop). Without it, every
+ * reconnect re-arms the dedup and every subsequent drop re-fires the text, so a
+ * flaky laptop sends one "lost connection" per flap (the 6-in-33-min case that
+ * motivated this). `lost_notified_at` is now the LAST-NOTIFIED time (never cleared
+ * on reconnect); a device re-announces only after it has both RECONNECTED since the
+ * last notice and stayed quiet again past this window (see claimDevicesToNotifyLost).
+ * Net effect: a flapping machine texts at most once per cooldown, a machine that
+ * just stays dropped texts exactly once, and a genuine later death (reconnect, work,
+ * then quiet hours later) still re-announces. 30 minutes.
+ */
+export const DEVICE_LOST_NOTIFY_COOLDOWN_SECONDS = 1800;
+
 /** A device the reaper is announcing as "lost connection" — all its sessions
  *  dropped. Carries its account (the phone number is per-account) and identity
  *  (hostname/os) for the human label. */
@@ -644,6 +651,23 @@ export interface LostDevice {
   hostname: string | null;
   os: string | null;
 }
+
+/** Row shape the lost-device claim SELECTs. */
+interface LostDeviceClaimRow {
+  id: string;
+  account_id: string;
+  hostname: string | null;
+  os: string | null;
+  notify: boolean;
+}
+
+/** The DB executor the claim runs through. Injectable so the afk-filter + mapping
+ *  (the JS half of the claim) is unit-testable without a live Postgres; defaults to
+ *  the real pool `query`. Mirrors the `run` seam in account-lock.ts. */
+export type ClaimRun = (
+  text: string,
+  params: ReadonlyArray<unknown>,
+) => Promise<ReadonlyArray<LostDeviceClaimRow>>;
 
 /**
  * Claim the devices whose whole machine dropped out, stamping each exactly-once,
@@ -656,34 +680,48 @@ export interface LostDevice {
  * A device is CLAIMED when it is live (not revoked/disabled), it HAS sessions (it
  * was in use), NONE of those sessions is still alive or only recently quiet (every
  * session is `ended` AND last beat older than the stale window + grace, so a flap a
- * heartbeat will revive isn't announced), and it has NOT already been claimed
- * (`lost_notified_at IS NULL`). The `UPDATE ... RETURNING` stamps `lost_notified_at`
- * as it claims, so across multiple control-plane instances each lost device is
- * surfaced exactly once; `upsertSession` clears the stamp when a session comes
- * back, re-arming for a genuine later death.
+ * heartbeat will revive isn't announced), and it is eligible to (re)announce:
+ *   - NEVER announced before (`lost_notified_at IS NULL`), OR
+ *   - it RECONNECTED since the last notice (some session beat after lost_notified_at
+ *     — any device contact, heartbeat or tap, means the machine came back) AND the
+ *     COOLDOWN has elapsed (lost_notified_at older than
+ *     DEVICE_LOST_NOTIFY_COOLDOWN_SECONDS).
+ * The `UPDATE ... RETURNING` re-stamps `lost_notified_at = now()` as it claims, so
+ * across multiple control-plane instances each lost device is surfaced at most once
+ * per cooldown window.
+ *
+ * Both halves matter. The reconnect check is what keeps a machine that just STAYS
+ * dropped (laptop closed overnight) from re-firing every cooldown — with no beat
+ * after the notice it never re-arms, so it texts exactly once. The cooldown is what
+ * rate-limits a machine that keeps FLAPPING (drop->reconnect->drop): each cycle
+ * does reconnect, but the window collapses them to at most one text per cooldown
+ * instead of one per flap. A genuine later death — reconnect, real work, then quiet
+ * again well after the window — satisfies both and re-announces. The stamp is never
+ * cleared on reconnect (that old re-arm-on-revival is what re-fired one text per
+ * flap); re-arming is derived from last_event_at + the cooldown timer instead.
  *
  * The AFK gate is applied to ANNOUNCEMENT, not to claiming: we stamp every
  * fully-dropped device but only RETURN (notify) the ones that are afk='on' right
  * now. Stamping the afk='off' ones too is what records their death as handled —
  * otherwise a machine that dropped while the user was AT THE KEYBOARD (afk off,
- * dashboard already showed it) would stay armed and retroactively text the moment
- * AFK is later toggled on. (At the keyboard the dashboard shows live state, so no
- * text is wanted; toggling AFK on must not resurrect an old, already-seen death.)
+ * dashboard already showed it) would be eligible to retroactively text the moment
+ * AFK is later toggled on. Stamping puts it into cooldown instead, so toggling AFK
+ * on does not resurrect an old, already-seen death within the window.
  */
 export async function claimDevicesToNotifyLost(
   graceSeconds: number = DEVICE_LOST_NOTIFY_GRACE_SECONDS,
   staleSeconds: number = SESSION_STALE_SECONDS,
+  cooldownSeconds: number = DEVICE_LOST_NOTIFY_COOLDOWN_SECONDS,
+  run: ClaimRun = (text, params) => query<LostDeviceClaimRow>(text, params),
 ): Promise<LostDevice[]> {
-  const rows = await query<{
-    id: string;
-    account_id: string;
-    hostname: string | null;
-    os: string | null;
-    notify: boolean;
-  }>(
+  const rows = await run(
     `UPDATE devices d
         SET lost_notified_at = now()
-      WHERE d.lost_notified_at IS NULL
+      WHERE (d.lost_notified_at IS NULL
+             OR (d.lost_notified_at < now() - ($3::int * interval '1 second')
+                 AND EXISTS (SELECT 1 FROM sessions s
+                              WHERE s.device_id = d.id
+                                AND s.last_event_at > d.lost_notified_at)))
         AND d.revoked_at IS NULL
         AND d.disabled_at IS NULL
         AND EXISTS (SELECT 1 FROM sessions s WHERE s.device_id = d.id)
@@ -694,7 +732,7 @@ export async function claimDevicesToNotifyLost(
                   OR s.last_event_at >= now() - (($1::int + $2::int) * interval '1 second'))
         )
       RETURNING d.id, d.account_id, d.hostname, d.os, (d.afk = 'on') AS notify`,
-    [graceSeconds, staleSeconds],
+    [graceSeconds, staleSeconds, cooldownSeconds],
   );
   return rows
     .filter((r) => r.notify)

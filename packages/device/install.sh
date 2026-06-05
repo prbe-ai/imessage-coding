@@ -513,13 +513,26 @@ install_for_codex() {
   # prompt — a safety regression). Only the now-duplicate hooks/codex/hooks.json
   # (moved up) is removed.
   rm -f "$CODEX_PLUGIN_DIR/hooks/codex/hooks.json"
-  # Codex commands: install the prompt-style /afk under commands/ (CC's exec-style
-  # afk.md would be a no-op prompt under Codex), then drop the codex/ staging dir
-  # (its only file, afk.md, has been moved up — nothing else references it).
-  if [ -f "$CODEX_PLUGIN_DIR/commands/codex/afk.md" ]; then
-    mv -f "$CODEX_PLUGIN_DIR/commands/codex/afk.md" "$CODEX_PLUGIN_DIR/commands/afk.md"
+  # Codex slash command: a plugin's commands/*.md is NOT surfaced by Codex — only
+  # Claude Code auto-discovers plugin commands (confirmed against the Codex plugin
+  # manifest schema: skills/mcpServers/apps/hooks, no `commands` field). Codex's
+  # ONLY user-typed slash-command mechanism is a custom prompt under
+  # ~/.codex/prompts/<name>.md (filename -> /<name>). So install the prompt-style
+  # /afk THERE, with the absolute CLI path baked (Codex doesn't expand
+  # ${CLAUDE_PLUGIN_ROOT} in a prompt body either). The file carries an
+  # `imsg-device:managed` marker so uninstall deletes ONLY our copy, never a
+  # user's own ~/.codex/prompts/afk.md.
+  CODEX_PROMPT_SRC="$CODEX_PLUGIN_DIR/commands/codex/afk.md"
+  if [ -f "$CODEX_PROMPT_SRC" ]; then
+    mkdir -p "$CODEX_HOME/prompts"
+    cp -f "$CODEX_PROMPT_SRC" "$CODEX_HOME/prompts/afk.md"
+    rewrite_plugin_root_text "$CODEX_HOME/prompts/afk.md" "$CODEX_PLUGIN_DIR"
+    say "installed Codex /afk custom prompt -> $CODEX_HOME/prompts/afk.md"
+  else
+    say "note: $CODEX_PROMPT_SRC missing — /afk not installed for Codex"
   fi
-  rm -rf "$CODEX_PLUGIN_DIR/commands/codex"
+  # The plugin's own commands/ dir is dead weight under Codex (it ignores it); drop it.
+  rm -rf "$CODEX_PLUGIN_DIR/commands"
 
   # Build the root catalog from the Codex marketplace.json (source "." -> subdir),
   # then drop the inner per-plugin manifests CC-style (root catalog authoritative).
@@ -563,10 +576,7 @@ install_for_codex() {
   #    plugin from), not the version-pinned ~/.codex/plugins/cache snapshot; verified
   #    on codex 0.137.0 that hooks execute from the marketplace dir.
   rewrite_plugin_root "$CODEX_PLUGIN_DIR/hooks/hooks.json" "$CODEX_PLUGIN_DIR"
-  # Same placeholder problem in the /afk command body — bake it absolute so the
-  # agent can actually run the toggle CLI under Codex (text file, not JSON).
-  rewrite_plugin_root_text "$CODEX_PLUGIN_DIR/commands/afk.md" "$CODEX_PLUGIN_DIR"
-  say "rewrote bun -> absolute + baked absolute plugin root into Codex hooks.json + commands/afk.md; bun -> absolute in .mcp.codex.json"
+  say "rewrote bun -> absolute + baked absolute plugin root into Codex hooks.json; bun -> absolute in .mcp.codex.json"
 
   # --- register the marketplace, then INSTALL the plugin ----------------------
   # `codex plugin marketplace add <local-dir>` writes [marketplaces.*]; the

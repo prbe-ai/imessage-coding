@@ -30,3 +30,11 @@ keyboard.
   prompt that asks the agent to run the toggle CLI. Toggling at the keyboard
   (AFK currently off) runs locally; toggling while AFK is on may surface the
   shell approval to your phone first — approve it to complete the toggle.
+- This file is installed by the imsg-device installer as a Codex custom prompt at
+  `~/.codex/prompts/afk.md` (Codex doesn't surface a plugin's `commands/` dir, so
+  that is the only path to a user-typed `/afk`). Don't hand-edit the installed
+  copy — a reinstall overwrites it; the absolute CLI path above is baked at
+  install time.
+
+<!-- imsg-device:managed — installer-owned Codex custom prompt; the imsg-device uninstaller removes this file only when this marker is present, so a user's own ~/.codex/prompts/afk.md is never clobbered. -->
+

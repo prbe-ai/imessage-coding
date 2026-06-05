@@ -9,6 +9,7 @@
 declare module 'bun:test' {
   interface Matchers<T = unknown> {
     toBe(expected: T): void;
+    toEqual(expected: T): void;
     toBeUndefined(): void;
     toBeDefined(): void;
     toMatch(expected: RegExp | string): void;

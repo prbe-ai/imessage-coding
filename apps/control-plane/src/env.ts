@@ -81,7 +81,10 @@ const DEFAULT_PORT = 8080;
 // model id against OpenAI. Prod sets LLM_API_BASE to the flycast proxy (fly.toml).
 const DEFAULT_LLM_API_BASE = 'http://localhost:4000/v1';
 // Backend model ids — each MUST match a `model_name` in apps/litellm/config.yaml.
-const LLM_MODEL_GEMINI = 'gemini-3.5-flash';
+// LLM_MODEL_GEMINI is the only VISION-capable backend, so the orchestrator routes
+// image turns to it explicitly (see orchestrator/index.ts) even when the text
+// default is Cerebras. Exported for that per-turn override.
+export const LLM_MODEL_GEMINI = 'gemini-3.5-flash';
 const LLM_MODEL_CEREBRAS = 'gpt-oss-120b';
 const DEFAULT_LLM_MODEL = LLM_MODEL_GEMINI;
 // Local-dev default. Prod sets WEBHOOK_BASE_URL to the public control-plane

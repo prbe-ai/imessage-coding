@@ -26,10 +26,19 @@ export interface ToolCall {
   function: { name: string; arguments: string };
 }
 
-/** A chat message in the running turn transcript. */
+/** A single OpenAI content part. Text parts carry prose; image parts carry an
+ *  `image_url.url` that is either a remote URL or a `data:<mime>;base64,<…>` URI
+ *  (we always send the latter — see orchestrator/media.ts). Only multimodal
+ *  backends (gemini-3.5-flash) interpret image parts; text-only ones ignore them. */
+export type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+/** A chat message in the running turn transcript. `content` is a plain string for
+ *  text-only messages, or an array of content parts when the turn carries images. */
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
+  content: string | ContentPart[] | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
 }
@@ -137,6 +146,13 @@ export async function runAssistantTurn(args: {
    * this turn — only while still uncommitted. Defaults to a private latch.
    */
   commit?: { committed: boolean };
+  /**
+   * Per-turn model override — a `model_name` from the LiteLLM config. Defaults to
+   * env `LLM_MODEL`. The caller forces the vision-capable backend
+   * (gemini-3.5-flash) for image turns even when the text default is a text-only
+   * model (Cerebras gpt-oss-120b can't see images).
+   */
+  model?: string;
 }): Promise<TurnRunResult> {
   const { llm } = loadEnv();
   if (!llm.apiKey) {
@@ -144,6 +160,7 @@ export async function runAssistantTurn(args: {
   }
 
   const { messages, tools, user, execTool, signal } = args;
+  const model = args.model ?? llm.model;
   const commit = args.commit ?? { committed: false };
   let toolCalls = 0;
   let sawMessageUser = false;
@@ -154,7 +171,7 @@ export async function runAssistantTurn(args: {
 
     let msg: { content?: string | null; tool_calls?: ToolCall[] };
     try {
-      msg = await callModel(llm, messages, tools, user, signal, args.metadata);
+      msg = await callModel(llm, model, messages, tools, user, signal, args.metadata);
     } catch (err) {
       // A fetch rejection WHILE interrupted is a clean coalesce, not an error:
       // swallow it (don't let the caller fire its fail-closed clarify text).
@@ -212,6 +229,7 @@ export async function runAssistantTurn(args: {
  *  doesn't wait out a stale round. */
 async function callModel(
   llm: { apiBase: string; apiKey: string | undefined; model: string },
+  model: string,
   messages: ReadonlyArray<ChatMessage>,
   tools: ReadonlyArray<ToolDef>,
   user: string,
@@ -235,7 +253,7 @@ async function callModel(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: llm.model,
+        model,
         temperature: ASSISTANT_TEMPERATURE,
         tools,
         tool_choice: 'auto',

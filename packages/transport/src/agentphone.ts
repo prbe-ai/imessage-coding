@@ -29,7 +29,10 @@ import {
 } from '@imsg/shared';
 import type { ReplyTargetMessage, SendResult, Transport } from './transport.ts';
 
-const DEFAULT_API_BASE = 'https://api.agentphone.ai';
+/** AgentPhone API origin used when `AGENTPHONE_API_BASE` is unset. Exported so
+ *  the orchestrator can host-gate the API key when fetching inbound media (only
+ *  attach the bearer to AgentPhone's own host — see orchestrator/media.ts). */
+export const DEFAULT_API_BASE = 'https://api.agentphone.ai';
 
 /**
  * Default number of recent conversation messages to scan when listing inbound
@@ -103,7 +106,12 @@ interface AgentPhoneEventData {
   from?: string;
   to?: string;
   message?: string;
+  // The docs only document a single `mediaUrl` on the inbound webhook (often
+  // null). `mediaUrls` is accepted defensively: the conversations API exposes a
+  // plural array, so a future webhook revision may too. `unknown` because the
+  // element type is unverified — normalizeMediaUrls validates each entry.
   mediaUrl?: string | null;
+  mediaUrls?: unknown;
   direction?: string;
   receivedAt?: string;
   // agent.reaction (iMessage tapbacks)
@@ -471,9 +479,38 @@ export class AgentPhoneTransport implements Transport {
     if (isReaction && data.messageId !== undefined) {
       inbound.reactionTo = data.messageId;
     }
+    // Surface image attachments (MMS / iMessage photos) so the orchestrator can
+    // feed them to a vision model. Only messages carry media; a reaction never
+    // does. Both the documented singular `mediaUrl` and a defensive plural
+    // `mediaUrls` are normalized into one deduped list; absent → field omitted.
+    if (isMessage) {
+      const mediaUrls = normalizeMediaUrls(data.mediaUrl, data.mediaUrls);
+      if (mediaUrls.length > 0) inbound.mediaUrls = mediaUrls;
+    }
 
     return inbound;
   }
+}
+
+/**
+ * Normalize AgentPhone's media fields into a deduped list of attachment URLs.
+ * Accepts the documented singular `mediaUrl` (string | null) plus a defensive
+ * plural `mediaUrls` (unknown — each element validated). Non-string/blank entries
+ * are dropped; order is singular-first then plural, first occurrence wins.
+ */
+function normalizeMediaUrls(
+  single: string | null | undefined,
+  plural: unknown,
+): string[] {
+  const out: string[] = [];
+  const add = (v: unknown): void => {
+    if (typeof v !== 'string') return;
+    const url = v.trim();
+    if (url.length > 0 && !out.includes(url)) out.push(url);
+  };
+  add(single);
+  if (Array.isArray(plural)) for (const v of plural) add(v);
+  return out;
 }
 
 /**

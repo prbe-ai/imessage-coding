@@ -1,7 +1,7 @@
 {
   "name": "imsg-device",
   "description": "Drive Codex from iMessage: AFK-aware approve-and-resume + chat bridge. When you're away, destructive-tool approvals and questions go to your phone; approve, deny, or answer by text — you have the final say on every approval.",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "skills": "./skills/",
   "mcpServers": "./.mcp.codex.json"
 }

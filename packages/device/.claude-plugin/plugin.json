@@ -1,5 +1,5 @@
 {
   "name": "imsg-device",
   "description": "Drive Claude Code from iMessage: AFK-aware permission relay + chat bridge. When you're away, permission prompts and questions go to your phone; approve, deny, or answer by text — you have the final say on every approval.",
-  "version": "0.1.12"
+  "version": "0.1.13"
 }

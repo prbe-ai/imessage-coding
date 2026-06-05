@@ -29,6 +29,7 @@ DEVICE_DIR="${IMSG_DEVICE_DIR:-${HOME}/.imsg}"
 LEGACY_DEVICE_DIR="${CLAUDE_DIR}/plugins/${PLUGIN_NAME}"
 MARKETPLACE_DIR="${CLAUDE_DIR}/plugins/marketplaces/${MARKETPLACE_NAME}"
 RC_BLOCK_ID="imsg-device channels alias"
+CODEX_RC_BLOCK_ID="imsg-device codex alias"
 # Codex locations (mirror install.sh).
 CODEX_HOME="${CODEX_HOME:-${HOME}/.codex}"
 CODEX_CONFIG="${CODEX_HOME}/config.toml"
@@ -43,29 +44,33 @@ case "$IMSG_AGENT_TARGET" in
   *) say "note: unknown IMSG_AGENT_TARGET '$IMSG_AGENT_TARGET' — treating as claude-code"; IMSG_AGENT_TARGET="claude-code" ;;
 esac
 
+# Strip a marker-wrapped alias block ($2) from a shell rc file ($1). Shared by
+# both targets — the Claude Code channels alias and the Codex launcher alias —
+# so the removal logic lives in one place. Best-effort + idempotent.
+strip_rc_block() {
+  rc="$1"; block_id="$2"
+  [ -f "$rc" ] || return 0
+  if [ -z "$BUN" ]; then
+    say "note: bun not on PATH — remove the '$block_id' block from $rc by hand"
+    return 0
+  fi
+  RC_FILE="$rc" BLOCK_ID="$block_id" "$BUN" -e '
+    const fs = require("fs");
+    const f = process.env.RC_FILE, id = process.env.BLOCK_ID;
+    const begin = `# >>> ${id} >>>`, end = `# <<< ${id} <<<`;
+    let s = ""; try { s = fs.readFileSync(f, "utf8"); } catch { process.exit(0); }
+    const bi = s.indexOf(begin);
+    if (bi !== -1) {
+      const ei = s.indexOf(end, bi);
+      if (ei !== -1) { s = s.slice(0, bi) + s.slice(ei + end.length); fs.writeFileSync(f, s.replace(/\n{3,}/g, "\n\n")); }
+    }
+  '
+}
+
 # --- Claude Code uninstall --------------------------------------------------
 uninstall_claude_code() {
-  # 1. strip the claude alias block from shell rc files
-  strip_rc_block() {
-    rc="$1"
-    [ -f "$rc" ] || return 0
-    if [ -z "$BUN" ]; then
-      say "note: bun not on PATH — remove the '$RC_BLOCK_ID' block from $rc by hand"
-      return 0
-    fi
-    RC_FILE="$rc" BLOCK_ID="$RC_BLOCK_ID" "$BUN" -e '
-      const fs = require("fs");
-      const f = process.env.RC_FILE, id = process.env.BLOCK_ID;
-      const begin = `# >>> ${id} >>>`, end = `# <<< ${id} <<<`;
-      let s = ""; try { s = fs.readFileSync(f, "utf8"); } catch { process.exit(0); }
-      const bi = s.indexOf(begin);
-      if (bi !== -1) {
-        const ei = s.indexOf(end, bi);
-        if (ei !== -1) { s = s.slice(0, bi) + s.slice(ei + end.length); fs.writeFileSync(f, s.replace(/\n{3,}/g, "\n\n")); }
-      }
-    '
-  }
-  for RC in "$HOME/.zshrc" "$HOME/.bashrc"; do strip_rc_block "$RC"; done
+  # 1. strip the claude channels alias block from shell rc files
+  for RC in "$HOME/.zshrc" "$HOME/.bashrc"; do strip_rc_block "$RC" "$RC_BLOCK_ID"; done
   say "removed the 'claude' channels alias (open a new terminal for it to take effect)"
 
   # 2. unregister the plugin + marketplace (`marketplace remove` deletes the dir).
@@ -92,6 +97,11 @@ uninstall_claude_code() {
 
 # --- Codex uninstall --------------------------------------------------------
 uninstall_codex() {
+  # 0. strip the `codex` launcher alias block from shell rc files (revert the
+  #    install's alias codex -> `imsg codex`).
+  for RC in "$HOME/.zshrc" "$HOME/.bashrc"; do strip_rc_block "$RC" "$CODEX_RC_BLOCK_ID"; done
+  say "removed the 'codex' launcher alias (open a new terminal for it to take effect)"
+
   # 1. uninstall the plugin (clears the ~/.codex/plugins/cache snapshot + the
   #    config enable block), THEN remove the marketplace registration. `codex
   #    plugin remove` is the counterpart to the install's `codex plugin add`;

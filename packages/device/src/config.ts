@@ -290,6 +290,10 @@ export function isPluginHousekeepingDir(dir: string): boolean {
  */
 interface BuildConfig {
   controlPlaneUrl?: string;
+  /** app-server WebSocket URL for Codex inbound injection (see codexAppServerUrl).
+   *  Normally written at LAUNCH time by `imsg codex`, not baked — present here so a
+   *  fixed-port deployment could bake it. */
+  codexAppServerUrl?: string;
 }
 
 let _buildConfig: BuildConfig | null | undefined;
@@ -333,6 +337,50 @@ export function controlPlaneUrl(): string {
 /** Absolute URL for a device API route. */
 export function deviceApiUrl(route: DeviceApiRoute): string {
   return controlPlaneUrl() + route;
+}
+
+// --- Codex app-server URL (inbound injection target) -------------------------
+// Codex can't receive a `claude/channel` notification (it isn't a Channels
+// client), so for Codex the channel server injects inbound replies via the
+// app-server's `turn/start` over a WebSocket (see codex-appserver.ts). This URL
+// names that app-server. It's set ONLY when the user launches via `imsg codex`,
+// which hosts `codex app-server --listen ws://…` and points the TUI at it; the
+// launcher both exports IMSG_CODEX_APPSERVER_URL (inherited by the MCP servers the
+// app-server spawns) AND writes it to a file (codexAppServerUrlFile) so a child
+// that didn't inherit the env still finds it. Empty = feature OFF (plain `codex`),
+// so the dropped-notification path is unchanged for non-launcher sessions.
+
+/** Launcher-written file holding the live app-server WS URL (one per machine). */
+export function codexAppServerUrlFile(): string {
+  return join(deviceDir(), 'codex-appserver.url');
+}
+
+/**
+ * Pure resolution (no I/O — unit tested). Precedence: explicit env override >
+ * launcher-written file value > build-baked config. Empty / whitespace-only
+ * values are treated as unset (so an accidental empty env/file can't shadow a
+ * later candidate), and a trailing slash is stripped. Returns '' when none is
+ * configured — the OFF signal the channel server gates on.
+ */
+export function resolveCodexAppServerUrl(
+  env: Record<string, string | undefined>,
+  fileValue: string | undefined,
+  baked: BuildConfig | null,
+): string {
+  const candidates = [env.IMSG_CODEX_APPSERVER_URL, fileValue, baked?.codexAppServerUrl];
+  const found = candidates.find((v) => typeof v === 'string' && v.trim().length > 0);
+  return found ? found.trim().replace(/\/+$/, '') : '';
+}
+
+/** Resolve the Codex app-server WS URL, or '' if the feature is not configured. */
+export function codexAppServerUrl(): string {
+  let fileValue: string | undefined;
+  try {
+    fileValue = readFileSync(codexAppServerUrlFile(), 'utf8');
+  } catch {
+    fileValue = undefined; // no launcher file → fall through to env/baked
+  }
+  return resolveCodexAppServerUrl(process.env, fileValue, buildConfig());
 }
 
 /** Re-export so call sites use the enum, never raw path strings. */

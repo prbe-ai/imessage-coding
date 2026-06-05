@@ -11,7 +11,6 @@
 import "server-only";
 
 import { AfkState, isAfkState, type DeviceInfo } from "@imsg/shared";
-import { query } from "@/lib/db";
 
 /** Raw shape selected from `devices` (+ a live-session count). */
 export interface DeviceDbRow {
@@ -46,19 +45,3 @@ export const DEVICE_COLUMNS =
   "(d.revoked_at IS NULL AND d.disabled_at IS NULL) AS enabled, " +
   "(SELECT count(*) FROM sessions s WHERE s.device_id = d.id AND s.state <> 'ended') " +
   "AS session_count";
-
-/** Whether the account has paired at least one still-valid (non-revoked)
- *  device. A number is `verified` the moment the user confirms it — before any
- *  device exists — so "fully onboarded" requires both. This is a cheaper,
- *  broader probe than the home device list (which is gated on a live session):
- *  it counts any paired machine, online or not. */
-export async function accountHasDevice(accountId: string): Promise<boolean> {
-  const res = await query<{ exists: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1 FROM devices
-        WHERE account_id = $1 AND revoked_at IS NULL
-     ) AS exists`,
-    [accountId],
-  );
-  return Boolean(res.rows[0]?.exists);
-}

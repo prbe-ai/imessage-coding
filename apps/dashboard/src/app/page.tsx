@@ -2,10 +2,9 @@
 
 /**
  * Root router. Decides where a visitor lands:
- *   - no session                    → /sign-in
- *   - signed in, no number          → /onboarding (text-in the code to link)
- *   - signed in, verified, unpaired → /onboarding (finish at the pair step)
- *   - signed in, verified + paired  → /home
+ *   - no session            → /sign-in
+ *   - signed in, no number  → /onboarding (text-in the code to link a number)
+ *   - signed in, verified   → /home
  *
  * Kept as a thin client gate (no SSR redirect) so the Better Auth session is
  * read with the same client the rest of the app uses.
@@ -32,10 +31,7 @@ export default function RootPage() {
     getLinkedNumber(ac.signal)
       .then((res) => {
         if (ac.signal.aborted) return;
-        // Fully onboarded = number verified AND a device paired. A verified
-        // account with no device still has onboarding to finish (the pair
-        // step), so send it back to /onboarding rather than /home.
-        router.replace(res.verified && res.hasDevice ? "/home" : "/onboarding");
+        router.replace(res.verified ? "/home" : "/onboarding");
       })
       .catch(() => {
         if (ac.signal.aborted) return;

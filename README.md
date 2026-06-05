@@ -15,7 +15,7 @@ the waiting Claude Code session. Destructive approvals are
                  │                  Neon Postgres                 │
                  │  accounts · devices · pairing/onboarding_tokens│
                  │  conversations · sessions · attention_events   │
-                 │  decisions (LISTEN/NOTIFY) · message_log        │
+                 │  session_inbox (LISTEN/NOTIFY) · message_log    │
                  └──────────────────────────────────────────────┘
                         ▲                              ▲
             pg Pool /   │                              │  pg Pool
@@ -74,7 +74,7 @@ packages/
   transport/       # @imsg/transport — Transport PORT + AgentPhone impl
   device/          # @imsg/device — Claude Code plugin (channel MCP + hooks + CLI)
 db/
-  schema.sql       # Neon Postgres schema (incl. LISTEN/NOTIFY on decisions)
+  schema.sql       # Neon Postgres schema (incl. LISTEN/NOTIFY on session_inbox)
 ```
 
 | Package              | Name                  | Role                                              |
@@ -185,9 +185,10 @@ chains the status line, pre-allows the `reply` tool, and pairs the device.
   psql "$DATABASE_URL" -f db/schema.sql
   ```
 
-  This creates all product tables, the `decisions` LISTEN/NOTIFY trigger, and
-  indexes. Better Auth's own `better_auth_*` tables are created separately by
-  `bun run auth:migrate` from the dashboard.
+  This creates all product tables, the `session_inbox` / `session_state` /
+  `device_state` LISTEN/NOTIFY triggers, and indexes. Better Auth's own tables
+  (`user`, `session`, `account`, `verification` — its unprefixed defaults) are
+  created separately by `bun run auth:migrate` from the dashboard.
 
 **2. LLM proxy — Fly (private)**
 
@@ -230,7 +231,8 @@ Deploy this *before* the control plane — the control plane calls it over flyca
 - Set env vars in Vercel: `DATABASE_URL`, `GOOGLE_CLIENT_ID`,
   `GOOGLE_CLIENT_SECRET`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`,
   `CONTROL_PLANE_URL`, `DEVICE_TOKEN_PEPPER` (same value as the control plane),
-  `WEBHOOK_BASE_URL`, `NEXT_PUBLIC_APP_URL`.
+  `SSE_TICKET_SECRET` (same value as the control plane), `WEBHOOK_BASE_URL`,
+  `NEXT_PUBLIC_APP_URL`.
 - The Google OAuth redirect URI is `${BETTER_AUTH_URL}/api/idp/callback/google`.
 - Seed the agent-number pool before onboarding works — `/api/onboarding/start`
   fails closed (`no_agent_number_provisioned`) on an empty pool:

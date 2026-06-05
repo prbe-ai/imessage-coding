@@ -275,6 +275,53 @@
 }
 .onb-cmd-hint { margin: 14px 0 0; font-size: 12.5px; color: var(--onb-slate-soft); }
 
+/* Copy affordance overlaid on the snippet — reserve right gutter so wrapped
+   text never runs under the button. */
+.onb-cmd--copy { padding-right: 86px; }
+.onb-copy-btn {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--onb-slate);
+  background: var(--onb-bg);
+  border: 1px solid var(--onb-line-strong);
+  border-radius: 6px;
+  padding: 5px 9px;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.onb-copy-btn:hover { color: var(--onb-ink); border-color: var(--onb-ink); }
+.onb-copy-btn svg { width: 13px; height: 13px; }
+.onb-copy-btn--done,
+.onb-copy-btn--done:hover { color: var(--onb-ok); border-color: var(--onb-ok); }
+
+/* Inline copyable agent number inside the "not on a Mac?" fallback line. */
+.onb-inline-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-jetbrains-mono), ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--onb-ink);
+  background: var(--onb-bg-deep);
+  border: 1px solid var(--onb-line);
+  border-radius: 5px;
+  padding: 1px 6px;
+  cursor: pointer;
+  transition: border-color 120ms ease;
+}
+.onb-inline-copy:hover { border-color: var(--onb-ink); }
+.onb-inline-copy svg { width: 11px; height: 11px; opacity: 0.6; }
+.onb-inline-copy--done { border-color: var(--onb-ok); color: var(--onb-ok); }
+.onb-inline-copy--done svg { opacity: 1; }
+
 /* ── Info callout ── */
 .onb-callout {
   border: 1px solid var(--onb-line-strong);

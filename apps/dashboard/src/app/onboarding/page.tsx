@@ -25,7 +25,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { MessageSquare, PhoneCall, Terminal } from "lucide-react";
+import { Check, Copy, MessageSquare, PhoneCall, Terminal } from "lucide-react";
+import { toast } from "sonner";
 
 import { useSession } from "@/lib/idp/better-auth-client";
 import { AccountMenu } from "@/components/account-menu";
@@ -60,8 +61,11 @@ export default function OnboardingPage() {
   const [phoneNumber, setPhoneNumber] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // Which value was just copied to the clipboard (for the ✓ affordance), if any.
+  const [copied, setCopied] = useState<"message" | "number" | null>(null);
 
   const bootStartedRef = useRef(false);
+  const copyResetRef = useRef<number | null>(null);
 
   const firstName = (() => {
     const name = session?.user?.name?.trim();
@@ -170,6 +174,32 @@ export default function OnboardingPage() {
     }
   }, [confirming]);
 
+  // Copy the prefilled message (or the agent number) for people who can't open
+  // Messages on this device — e.g. they're on a non-Mac and will text from a
+  // phone instead. `key` drives which control flips to a ✓.
+  const copy = useCallback(
+    async (text: string, key: "message" | "number", label: string) => {
+      try {
+        await navigator.clipboard.writeText(text);
+        setCopied(key);
+        toast.success(label);
+        if (copyResetRef.current) window.clearTimeout(copyResetRef.current);
+        copyResetRef.current = window.setTimeout(() => setCopied(null), 2000);
+      } catch {
+        toast.error("Couldn't copy — select and copy manually.");
+      }
+    },
+    [],
+  );
+
+  // Clear any pending copy-reset timer on unmount.
+  useEffect(
+    () => () => {
+      if (copyResetRef.current) window.clearTimeout(copyResetRef.current);
+    },
+    [],
+  );
+
   const userEmail = session?.user?.email ?? null;
   const userBadge = <AccountMenu email={userEmail} />;
 
@@ -208,6 +238,7 @@ export default function OnboardingPage() {
   // ── Step: link your number (deep link). ───────────────────────────────
   if (step === "link" && token) {
     const href = smsDeepLink(token, agentNumber, firstName);
+    const messageBody = onboardingBody(token, firstName);
     return (
       <OnboardingShell
         stepKey="onb-link"
@@ -227,9 +258,40 @@ export default function OnboardingPage() {
           button below — it opens Messages with a one-time code prefilled. Just
           hit send, and we&apos;ll link your number automatically.
         </p>
-        <div className="onb-cmd" aria-label="Prefilled message">
-          <p className="onb-cmd-text">{onboardingBody(token, firstName)}</p>
+        <div className="onb-cmd onb-cmd--copy" aria-label="Prefilled message">
+          <p className="onb-cmd-text">{messageBody}</p>
+          <button
+            type="button"
+            className={`onb-copy-btn${copied === "message" ? " onb-copy-btn--done" : ""}`}
+            onClick={() => void copy(messageBody, "message", "Copied message")}
+          >
+            {copied === "message" ? (
+              <Check aria-hidden="true" />
+            ) : (
+              <Copy aria-hidden="true" />
+            )}
+            {copied === "message" ? "Copied" : "Copy"}
+          </button>
         </div>
+        {agentNumber && (
+          <p className="onb-fineprint">
+            Not on a Mac? Copy the message above and text it to{" "}
+            <button
+              type="button"
+              className={`onb-inline-copy${copied === "number" ? " onb-inline-copy--done" : ""}`}
+              onClick={() => void copy(agentNumber, "number", "Copied number")}
+              aria-label={`Copy number ${agentNumber}`}
+            >
+              {agentNumber}
+              {copied === "number" ? (
+                <Check aria-hidden="true" />
+              ) : (
+                <Copy aria-hidden="true" />
+              )}
+            </button>{" "}
+            from your phone.
+          </p>
+        )}
         <p className="onb-fineprint">
           Waiting for your message… this page updates on its own once it lands.
         </p>

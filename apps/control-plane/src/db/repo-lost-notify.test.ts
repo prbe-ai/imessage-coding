@@ -1,18 +1,16 @@
 import { describe, expect, test } from 'bun:test';
 import {
   claimDevicesToNotifyLost,
-  DEVICE_OFFLINE_SUSTAIN_SECONDS,
-  DEVICE_ONLINE_SUSTAIN_SECONDS,
-  markDevicesOnline,
-  SESSION_STALE_SECONDS,
+  DEVICE_CONVERSATION_ACTIVE_SECONDS,
+  DEVICE_OFFLINE_NOTIFY_SECONDS,
   type ClaimRun,
 } from './repo.ts';
 
 /** A fake DB executor that records the (sql, params) it was called with and
  *  returns canned rows — the account-lock.ts `run`-seam pattern, so the JS half
  *  of the claim (param wiring, afk gate, row mapping) is testable without a live
- *  Postgres. The SQL hysteresis semantics themselves are smoke-tested against a
- *  throwaway Neon branch, the same way the other repo.ts SQL is verified. */
+ *  Postgres. The SQL conversation-relock semantics themselves are smoke-tested
+ *  against a throwaway Neon branch, the same way the other repo.ts SQL is verified. */
 type ClaimRow = {
   id: string;
   account_id: string;
@@ -32,46 +30,47 @@ function recordingRun(rows: ReadonlyArray<ClaimRow>): {
   return { run, calls };
 }
 
-describe('claimDevicesToNotifyLost — hysteresis wiring + afk gate', () => {
-  test('threads offline-sustain + online-sustain as $1/$2 (defaults)', async () => {
+describe('claimDevicesToNotifyLost — conversation-relock wiring + afk gate', () => {
+  test('threads offline-debounce + conversation-active as $1/$2 (defaults)', async () => {
     const { run, calls } = recordingRun([]);
     await claimDevicesToNotifyLost(undefined, undefined, run);
     expect(calls.length).toBe(1);
     expect(calls[0]!.params).toEqual([
-      DEVICE_OFFLINE_SUSTAIN_SECONDS,
-      DEVICE_ONLINE_SUSTAIN_SECONDS,
+      DEVICE_OFFLINE_NOTIFY_SECONDS,
+      DEVICE_CONVERSATION_ACTIVE_SECONDS,
     ]);
   });
 
   test('a custom window pair threads through unchanged', async () => {
     const { run, calls } = recordingRun([]);
-    await claimDevicesToNotifyLost(120, 90, run);
-    expect(calls[0]!.params).toEqual([120, 90]);
+    await claimDevicesToNotifyLost(90, 45, run);
+    expect(calls[0]!.params).toEqual([90, 45]);
   });
 
-  test('SQL encodes the hysteresis state machine (not a cooldown)', async () => {
+  test('SQL encodes conversation-relock (lock + re-arm-on-inbound + active suppress)', async () => {
     const { run, calls } = recordingRun([]);
     await claimDevicesToNotifyLost(undefined, undefined, run);
     const sql = calls[0]!.text;
-    // Only devices with an OPEN streak are eligible — selected in the CTE...
-    expect(sql.includes('d.online_since IS NOT NULL')).toBe(true);
-    // ...and re-checked at row-lock time so only one instance consumes a streak.
-    expect((sql.match(/online_since IS NOT NULL/g) ?? []).length).toBe(2);
-    // Every claimed device CONSUMES its streak (reset the state machine)...
-    expect(sql.includes('online_since = NULL')).toBe(true);
-    // ...but lost_notified_at is only stamped on a genuine (sustained) alert.
-    expect(sql.includes('CASE WHEN o.sustained_online THEN now()')).toBe(true);
-    // SUSTAINED-ONLINE: a beat landed >= online_since + the online-sustain window ($2).
-    expect(sql.includes("d.online_since + ($2::int * interval '1 second')")).toBe(true);
-    // SUSTAINED-OFFLINE: no beat within the offline-sustain window ($1).
-    expect(sql.includes("now() - ($1::int * interval '1 second')")).toBe(true);
-    // The notice fires only for an afk=on device whose streak was sustained.
-    expect(sql.includes('(o.afk_on AND o.sustained_online) AS notify')).toBe(true);
-    // The old cooldown gating is gone.
-    expect(sql.includes('lost_notified_at IS NULL')).toBe(false);
+    // Claiming LOCKS the device (stamps the last-notified time).
+    expect(sql.includes('SET lost_notified_at = now()')).toBe(true);
+    // Only a device that was in use (has sessions) is eligible.
+    expect(sql.includes('EXISTS (SELECT 1 FROM sessions s WHERE s.device_id = d.id)')).toBe(true);
+    // OFFLINE past the debounce ($1): no session beat recently.
+    expect(sql.includes("s.last_event_at >= now() - ($1::int * interval '1 second')")).toBe(true);
+    // ARMED: never notified, OR the user re-engaged (an inbound newer than the lock).
+    expect(sql.includes('d.lost_notified_at IS NULL')).toBe(true);
+    expect(sql.includes('m.created_at > d.lost_notified_at')).toBe(true);
+    // SUPPRESS while mid-conversation ($2): an inbound within the active window.
+    expect(sql.includes("m.created_at >= now() - ($2::int * interval '1 second')")).toBe(true);
+    // Re-arm + suppression are keyed on USER messages (inbound), account-scoped.
+    expect(sql.includes("m.direction = 'inbound'")).toBe(true);
+    expect(sql.includes('message_log m')).toBe(true);
+    expect(sql.includes('m.account_id = d.account_id')).toBe(true);
+    // afk gate is on the RETURN, not the claim.
+    expect(sql.includes("(d.afk = 'on') AS notify")).toBe(true);
   });
 
-  test('only afk=on devices are RETURNED (afk=off are consumed-but-silent)', async () => {
+  test('only afk=on devices are RETURNED (afk=off are locked-but-silent)', async () => {
     const { run } = recordingRun([
       {
         id: 'd-afk-on',
@@ -107,34 +106,5 @@ describe('claimDevicesToNotifyLost — hysteresis wiring + afk gate', () => {
   test('no claimed devices → empty array', async () => {
     const { run } = recordingRun([]);
     expect(await claimDevicesToNotifyLost(undefined, undefined, run)).toEqual([]);
-  });
-});
-
-describe('markDevicesOnline — "came online" edge', () => {
-  test('threads the stale window as $1 (default)', async () => {
-    const { run, calls } = recordingRun([]);
-    await markDevicesOnline(undefined, run);
-    expect(calls.length).toBe(1);
-    expect(calls[0]!.params).toEqual([SESSION_STALE_SECONDS]);
-  });
-
-  test('a custom stale window threads through unchanged', async () => {
-    const { run, calls } = recordingRun([]);
-    await markDevicesOnline(15, run);
-    expect(calls[0]!.params).toEqual([15]);
-  });
-
-  test('SQL stamps only NULL streaks on a currently-beating device (idempotent)', async () => {
-    const { run, calls } = recordingRun([]);
-    await markDevicesOnline(undefined, run);
-    const sql = calls[0]!.text;
-    expect(sql.includes('SET online_since = now()')).toBe(true);
-    // Idempotent + stable: never bumps an existing streak start.
-    expect(sql.includes('d.online_since IS NULL')).toBe(true);
-    // Only a device beating within the stale window is "online".
-    expect(sql.includes("now() - ($1::int * interval '1 second')")).toBe(true);
-    // Never resurrects a revoked/disabled device.
-    expect(sql.includes('d.revoked_at IS NULL')).toBe(true);
-    expect(sql.includes('d.disabled_at IS NULL')).toBe(true);
   });
 });

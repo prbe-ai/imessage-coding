@@ -37,6 +37,10 @@ export function UsageSteps() {
           from your phone.
         </li>
       </ol>
+      <p className="mt-3 text-xs text-outline">
+        Just installed? If you don&apos;t see it yet, reload your plugins or
+        restart your coding session to pick up the change.
+      </p>
     </section>
   );
 }

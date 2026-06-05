@@ -18,6 +18,18 @@ export interface SendResult {
   replyParentUnresolved?: boolean;
 }
 
+/** One recent inbound (user) message, with its real provider id — a valid
+ *  `OutboundMessage.replyToMessageId` target. Returned by the conversation lookup
+ *  so a reply can thread under ANY recent message, not just the latest. */
+export interface ReplyTargetMessage {
+  /** Real provider Message.id (a valid reply target). */
+  id: string;
+  /** The message body — lets a caller present it for the model to choose. */
+  text: string;
+  /** Provider receivedAt (ISO-8601), when available; newest first by this. */
+  receivedAt?: string;
+}
+
 export interface Transport {
   /** Send an outbound message. Returns the provider message id. */
   send(msg: OutboundMessage): Promise<SendResult>;
@@ -58,17 +70,17 @@ export interface Transport {
   ): InboundMessage | null;
 
   /**
-   * Resolve the provider's real message id for an inbound user message so an
-   * outbound reply can thread under it (`OutboundMessage.replyToMessageId`).
-   * Inbound webhooks carry no body-level message id, so this looks the message
-   * up by conversation. Optional capability.
+   * List recent INBOUND (user) messages in a conversation, NEWEST FIRST, each
+   * with its real provider Message.id — so an outbound reply can thread under ANY
+   * of them (`OutboundMessage.replyToMessageId`), not just the latest. Inbound
+   * webhooks carry no body-level message id, so this reads them from the
+   * conversation. Optional capability.
    *
-   * Returns the id ONLY on an exact `matchBody` match — threading under the wrong
-   * message is worse than not threading, so an ambiguous/absent match (and ANY
-   * error) resolves to `undefined`. MUST be best-effort and never throw.
+   * MUST be best-effort and never throw: any non-200 / shape mismatch / network
+   * error resolves to `[]` (caller then sends un-threaded).
    */
-  resolveInboundMessageId?(
+  resolveRecentInboundMessages?(
     conversationId: string,
-    opts?: { matchBody?: string },
-  ): Promise<string | undefined>;
+    limit?: number,
+  ): Promise<ReplyTargetMessage[]>;
 }

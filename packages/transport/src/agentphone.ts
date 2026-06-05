@@ -27,15 +27,15 @@ import {
   type OutboundMessage,
   type RecentMessage,
 } from '@imsg/shared';
-import type { SendResult, Transport } from './transport.ts';
+import type { ReplyTargetMessage, SendResult, Transport } from './transport.ts';
 
 const DEFAULT_API_BASE = 'https://api.agentphone.ai';
 
 /**
- * How many recent conversation messages to scan when resolving an inbound
- * message's real id (`resolveInboundMessageId`). The webhook arrives for the
- * newest message, so the target is at the head of the list; a small window keeps
- * the lookup cheap while tolerating a few interleaved outbound/reaction rows.
+ * Default number of recent conversation messages to scan when listing inbound
+ * reply targets (`resolveRecentInboundMessages`). The newest messages are at the
+ * head; a small window keeps the lookup cheap while tolerating a few interleaved
+ * outbound/reaction rows.
  */
 const CONVERSATION_LOOKUP_LIMIT = 10;
 
@@ -116,7 +116,7 @@ interface AgentPhoneEventData {
 
 /**
  * One message object from `GET /v1/conversations/{id}/messages`. Only the fields
- * `resolveInboundMessageId` needs; all optional so a partial/renamed payload
+ * `resolveRecentInboundMessages` needs; all optional so a partial/renamed payload
  * degrades to "no match" instead of throwing.
  */
 interface AgentPhoneConversationMessage {
@@ -259,51 +259,50 @@ export class AgentPhoneTransport implements Transport {
   }
 
   /**
-   * Resolve the real AgentPhone Message.id of an inbound user message so an
-   * outbound reply can thread under it. Inbound webhooks carry no message id, so
-   * we read the conversation and match on body.
+   * List recent INBOUND messages of a conversation, NEWEST FIRST, each with its
+   * real AgentPhone Message.id — so a reply can thread under any one of them.
+   * Inbound webhooks carry no message id, so we read them from the conversation.
    *
-   * Returns the id ONLY on an EXACT inbound `matchBody` match (newest occurrence
-   * wins). No match → `undefined`. We deliberately do NOT fall back to "newest
-   * inbound": on duplicate texts ("yes"/"ok"), provider retries, or reaction rows
-   * that would thread the reply under the wrong message, and a wrong thread is
-   * worse than none. Best-effort and fail-open: any non-200, shape mismatch, or
-   * network error → `undefined` (caller sends un-threaded).
+   * Best-effort and fail-open: any non-200, shape mismatch, or network/timeout
+   * error → `[]` (caller sends un-threaded). Bounded by AbortSignal so a slow
+   * endpoint can't stall the turn it runs inside.
    */
-  async resolveInboundMessageId(
+  async resolveRecentInboundMessages(
     conversationId: string,
-    opts?: { matchBody?: string },
-  ): Promise<string | undefined> {
-    if (!this.apiKey || !conversationId) return undefined;
-    const matchBody = opts?.matchBody;
-    // With no body to anchor on we cannot safely pick a target.
-    if (matchBody === undefined) return undefined;
+    limit: number = CONVERSATION_LOOKUP_LIMIT,
+  ): Promise<ReplyTargetMessage[]> {
+    if (!this.apiKey || !conversationId) return [];
 
     try {
       const url =
         `${this.apiBase}/v1/conversations/${encodeURIComponent(conversationId)}` +
-        `/messages?limit=${CONVERSATION_LOOKUP_LIMIT}`;
+        `/messages?limit=${limit}`;
       const res = await fetch(url, {
         method: 'GET',
         headers: { Authorization: `Bearer ${this.apiKey}` },
         // Bound the lookup so a slow/black-holed endpoint can't stall the turn.
         signal: AbortSignal.timeout(CONVERSATION_LOOKUP_TIMEOUT_MS),
       });
-      if (!res.ok) return undefined;
+      if (!res.ok) return [];
       const json: unknown = await res.json().catch(() => undefined);
 
-      let best: { id: string; receivedAt: string } | undefined;
+      const inbound: ReplyTargetMessage[] = [];
       for (const m of extractConversationMessages(json)) {
         if (m.direction !== 'inbound') continue;
-        if (m.body !== matchBody) continue;
         if (typeof m.id !== 'string' || m.id.length === 0) continue;
-        const at = typeof m.receivedAt === 'string' ? m.receivedAt : '';
-        if (!best || at > best.receivedAt) best = { id: m.id, receivedAt: at };
+        inbound.push({
+          id: m.id,
+          text: typeof m.body === 'string' ? m.body : '',
+          receivedAt: typeof m.receivedAt === 'string' ? m.receivedAt : undefined,
+        });
       }
-      return best?.id;
+      // Newest first so the freshest message is the default reply target. ISO-8601
+      // sorts lexicographically; a missing receivedAt ('') sorts oldest.
+      inbound.sort((a, b) => (b.receivedAt ?? '').localeCompare(a.receivedAt ?? ''));
+      return inbound;
     } catch (err) {
-      console.error('[agentphone] resolveInboundMessageId failed', err);
-      return undefined;
+      console.error('[agentphone] resolveRecentInboundMessages failed', err);
+      return [];
     }
   }
 

@@ -150,6 +150,67 @@ describe('buildTurnMessages — coalesced user burst rendering', () => {
   });
 });
 
+describe('buildTurnMessages — RECENT THREAD reply-handle overlay', () => {
+  test('user lines carry their [uN] handle; assistant lines do not; hint shown', () => {
+    const msgs = buildTurnMessages({
+      trigger: { kind: 'user_message', inbounds: [inbound({ text: 'newest' })] },
+      pending: [],
+      sessions: [],
+      history: [
+        { direction: 'inbound', body: 'newest' },
+        { direction: 'outbound', body: 'on it' },
+        { direction: 'inbound', body: 'older question' },
+      ],
+      replyTargets: [
+        { handle: 'u1', text: 'newest' },
+        { handle: 'u2', text: 'older question' },
+      ],
+    });
+    const ctx = msgs[1]?.content ?? '';
+    expect(ctx.includes('user [u1]: newest')).toBe(true);
+    expect(ctx.includes('user [u2]: older question')).toBe(true);
+    // Assistant lines never get a handle (you reply to the user, not yourself).
+    expect(ctx.includes('assistant: on it')).toBe(true);
+    expect(ctx.includes('assistant [u')).toBe(false);
+    // One merged list now — the reply_to hint lives under RECENT THREAD, and the
+    // separate REPLY TARGETS block is gone.
+    expect(ctx.includes('reply_to on message_user')).toBe(true);
+    expect(ctx.includes('REPLY TARGETS')).toBe(false);
+  });
+
+  test('an unmatched user line renders WITHOUT a handle (best-effort overlay)', () => {
+    const msgs = buildTurnMessages({
+      trigger: { kind: 'user_message', inbounds: [inbound({ text: 'x' })] },
+      pending: [],
+      sessions: [],
+      history: [{ direction: 'inbound', body: 'no id for me' }],
+      replyTargets: [], // nothing to match against → no handle, line still shown
+    });
+    const ctx = msgs[1]?.content ?? '';
+    expect(ctx.includes('user: no id for me')).toBe(true);
+    expect(ctx.includes('[u1]')).toBe(false);
+  });
+
+  test('duplicate user text maps to DISTINCT handles (each target consumed once)', () => {
+    const msgs = buildTurnMessages({
+      trigger: { kind: 'user_message', inbounds: [inbound({ text: 'ok' })] },
+      pending: [],
+      sessions: [],
+      history: [
+        { direction: 'inbound', body: 'ok' },
+        { direction: 'inbound', body: 'ok' },
+      ],
+      replyTargets: [
+        { handle: 'u1', text: 'ok' },
+        { handle: 'u2', text: 'ok' },
+      ],
+    });
+    const ctx = msgs[1]?.content ?? '';
+    expect(ctx.includes('[u1]')).toBe(true);
+    expect(ctx.includes('[u2]')).toBe(true);
+  });
+});
+
 // REGRESSION GUARD: a relayed question must reach the orchestrator IN FULL. The
 // `description` of a QUESTION attention IS the message the user has to answer, so
 // clipping it to a 200-char preview made the orchestrator narrate "the question

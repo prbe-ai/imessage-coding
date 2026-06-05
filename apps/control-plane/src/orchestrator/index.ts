@@ -75,7 +75,7 @@ import {
   isPermissionAttention,
 } from './safety.ts';
 
-const HISTORY_LIMIT = 20;
+const HISTORY_LIMIT = 10;
 /** Per-session activity lines auto-inlined into the turn snapshot (Option A: hand
  *  the orchestrator the recent slice so it has context without a get_session_data
  *  round-trip). Kept small — deeper reads still go through the tool. */
@@ -287,26 +287,30 @@ async function runUserTurn(
   let rounds: number | undefined;
   let toolCalls: number | undefined;
   let errMsg: string | undefined;
-  // Real provider id of the user message we're replying to, for inline-reply
-  // threading. Resolved best-effort below; undefined → reply is sent un-threaded.
-  let replyTargetId: string | undefined;
+  // Recent user messages the model can thread a reply under (u1 = most recent);
+  // the default reply target is the most recent. Resolved best-effort below.
+  let replyTargets: ReplyTarget[] = [];
+  let defaultReplyId: string | undefined;
   try {
     // (Inbound messages are logged once on receipt in orchestrate, NOT here —
     //  re-running an interrupted batch must not double-log them.)
-    const [pending, sessions, history, profile, resolvedReplyId, activity] = await Promise.all([
+    const [pending, sessions, history, profile, targets, activity] = await Promise.all([
       listPendingAttentionForAccount(accountId),
       listLiveSessionsForAccount(accountId),
       recentMessages({ accountId, limit: HISTORY_LIMIT }),
       getUserProfile(accountId),
-      // Thread the agent's reply under the user's actual message (a true iMessage
-      // inline reply). The webhook never carries the user message's real provider
-      // id, so resolve it here. resolveReplyTarget catches its own errors and
-      // never rejects, so folding it into Promise.all can't fail the turn — a
-      // threading nicety must never take down a reply.
-      resolveReplyTarget(transport, last),
+      // The user messages this reply can thread under (a true iMessage inline
+      // reply). The webhook never carries their real provider ids, so list them
+      // here. buildReplyTargets catches its own errors and never rejects, so
+      // folding it into Promise.all can't fail the turn — a threading nicety must
+      // never take down a reply.
+      buildReplyTargets(transport, last),
       loadInlineActivity(accountId),
     ]);
-    replyTargetId = resolvedReplyId;
+    replyTargets = targets;
+    // Default reply threads under the message THIS turn is answering (the burst's
+    // last), matched by text — not merely the newest row in the conversation.
+    defaultReplyId = pickDefaultReplyTarget(targets, last);
     // Deterministic binding drives the destructive-allow gate (never the model).
     // A tap-back / inline reply in the burst (if any) binds; else the latest text.
     const bindingInbound = [...batch].reverse().find((m) => m.reactionTo) ?? last;
@@ -319,7 +323,8 @@ async function runUserTurn(
       accountId,
       transport,
       inbound: last,
-      replyToMessageId: replyTargetId,
+      replyToMessageId: defaultReplyId,
+      replyTargets,
       pending,
       sessions,
       boundTarget,
@@ -334,6 +339,7 @@ async function runUserTurn(
       history,
       profile,
       activity,
+      replyTargets,
     });
 
     const outcome = await runAssistantTurn({
@@ -346,7 +352,7 @@ async function runUserTurn(
       execTool: makeExecTool(ctx),
       onUnsentText: async (text) => {
         await sendToUser(transport, accountId, text, {
-          replyToMessageId: replyTargetId,
+          replyToMessageId: defaultReplyId,
           fallbackTo: last.from,
         });
         sent.count += 1;
@@ -388,7 +394,7 @@ async function runUserTurn(
       transport,
       accountId,
       "Sorry — I'm having trouble reaching my brain right now. Try again in a moment.",
-      { replyToMessageId: replyTargetId, fallbackTo: last.from },
+      { replyToMessageId: defaultReplyId, fallbackTo: last.from },
     ).catch(() => {});
     return { handled: true, accountId, reason: 'turn_error' };
   } finally {
@@ -661,9 +667,12 @@ interface DispatchCtx {
   transport: Transport;
   /** Present on user-message turns (for reply addressing). */
   inbound?: InboundMessage;
-  /** Real provider id of the user message to thread replies under (user-message
-   *  turns only; undefined when unresolved → replies send un-threaded). */
+  /** Real provider id of the DEFAULT reply target (most recent user message) —
+   *  used when message_user carries no `reply_to`. undefined → un-threaded. */
   replyToMessageId?: string;
+  /** Recent user messages addressable by handle via message_user's `reply_to`
+   *  (user-message turns only). u1 = most recent. */
+  replyTargets?: ReadonlyArray<ReplyTarget>;
   pending: ReadonlyArray<AttentionEvent>;
   /** Live sessions snapshot for this account (backs get_session_state). */
   sessions: ReadonlyArray<SessionInfo>;
@@ -739,8 +748,20 @@ async function execMessageUser(ctx: DispatchCtx, args: Record<string, unknown>):
   }
 
   if (text) {
+    // Thread under a specific earlier message if the model named one via reply_to
+    // (a handle from REPLY TARGETS); otherwise the most recent (ctx.replyToMessageId).
+    const replyToHandle =
+      typeof args.reply_to === 'string' && args.reply_to.trim() ? args.reply_to.trim() : undefined;
+    const replyToMessageId = replyToHandle
+      ? resolveReplyHandle(ctx.replyTargets ?? [], replyToHandle)
+      : ctx.replyToMessageId;
+    if (replyToHandle && replyToMessageId === undefined) {
+      // The model asked for a handle we don't have — send un-threaded rather than
+      // silently threading under the wrong message, and tell it so.
+      out.push(`reply_to: no message handle "${replyToHandle}" — sent without threading`);
+    }
     const id = await sendToUser(ctx.transport, ctx.accountId, text, {
-      replyToMessageId: ctx.replyToMessageId,
+      replyToMessageId,
       fallbackTo: ctx.inbound?.from,
     });
     // Count only ACTUAL deliveries: a failed send must not suppress the agent-event
@@ -1139,30 +1160,84 @@ async function sendToUser(
   }
 }
 
+/** Max recent user messages offered to the model as addressable reply targets.
+ *  Matches HISTORY_LIMIT so every user line in the RECENT THREAD can carry a handle. */
+const REPLY_TARGET_LIMIT = 10;
+
+/** A recent user message the model can thread a reply under, by stable handle. */
+export interface ReplyTarget {
+  /** Short stable handle shown to the model; `u1` is the most recent. */
+  handle: string;
+  /** Real provider Message.id to thread under. */
+  id: string;
+  /** The message text (so the model can recognize which message this is). */
+  text: string;
+}
+
 /**
- * Resolve the real provider id of the user message we're replying to, so the
- * reply threads under it as an iMessage inline reply. Skips when:
- *   - the transport can't resolve ids (the capability is optional),
+ * Build the set of recent user messages the model can thread a reply under, each
+ * with a stable handle (`u1` = most recent). The webhook carries no message id,
+ * so we read them from the conversation. Skips when:
+ *   - the transport can't list messages (the capability is optional),
  *   - there's no conversation to search, or
- *   - the inbound is a TAP-BACK (its `text` is the reaction type, not a message
- *     body — body-matching would thread under an unrelated message).
+ *   - the inbound is a TAP-BACK (a reaction, not a normal message).
  * Best-effort and SILENT: it never throws (safe to fold into Promise.all) and any
- * miss returns undefined → the reply is sent un-threaded (today's behavior).
+ * miss returns [] → replies fall back to un-threaded.
  */
-export async function resolveReplyTarget(
+export async function buildReplyTargets(
   transport: Transport,
   last: InboundMessage,
-): Promise<string | undefined> {
-  if (!transport.resolveInboundMessageId) return undefined;
-  if (!last.conversationId || last.reactionTo) return undefined;
+): Promise<ReplyTarget[]> {
+  if (!transport.resolveRecentInboundMessages) return [];
+  if (!last.conversationId || last.reactionTo) return [];
   try {
-    return await transport.resolveInboundMessageId(last.conversationId, {
-      matchBody: last.text,
-    });
+    const msgs = await transport.resolveRecentInboundMessages(
+      last.conversationId,
+      REPLY_TARGET_LIMIT,
+    );
+    return msgs
+      // Skip empty-text rows: they make useless handles, and defend against any
+      // non-message row (e.g. a reaction) ever surfacing on the conversation
+      // endpoint as a bare inbound row.
+      .filter((m) => m.text.trim().length > 0)
+      .slice(0, REPLY_TARGET_LIMIT)
+      .map((m, i) => ({ handle: `u${i + 1}`, id: m.id, text: m.text }));
   } catch (err) {
-    console.error('[assistant] resolveReplyTarget failed', err);
-    return undefined;
+    console.error('[assistant] buildReplyTargets failed', err);
+    return [];
   }
+}
+
+/**
+ * The DEFAULT reply target when message_user carries no `reply_to`: the message
+ * THIS turn is answering — the burst's `last` — matched by text among the fetched
+ * targets (newest match wins). Anchoring to `last`, not merely the newest row in
+ * the conversation, keeps the default from threading under a newer message that
+ * arrived after this batch was snapshotted (it belongs to a separate, about-to-run
+ * turn). No match (e.g. a provider-normalized body) → undefined → un-threaded.
+ */
+export function pickDefaultReplyTarget(
+  targets: ReadonlyArray<ReplyTarget>,
+  last: InboundMessage,
+): string | undefined {
+  return targets.find((t) => t.text === last.text)?.id;
+}
+
+/**
+ * Map the model's `reply_to` handle to a real message id.
+ *   - no handle           → the most recent message (`u1`) — the default "reply
+ *                           to latest" behavior (undefined when no targets).
+ *   - a known handle      → that message's id.
+ *   - an unknown handle   → undefined: we will NOT silently thread under the
+ *                           latest when the model explicitly asked for a specific
+ *                           message (a wrong thread is worse than none).
+ */
+export function resolveReplyHandle(
+  targets: ReadonlyArray<ReplyTarget>,
+  handle: string | undefined,
+): string | undefined {
+  if (!handle) return targets[0]?.id;
+  return targets.find((t) => t.handle === handle)?.id;
 }
 
 /** Fold the turn's actions into history so the next turn knows what was done. */

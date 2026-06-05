@@ -381,86 +381,84 @@ async function withResolve(
   }
 }
 
-describe('AgentPhoneTransport.resolveInboundMessageId', () => {
-  test('returns the id of the EXACT inbound body match (ignores same-body outbound)', async () => {
+describe('AgentPhoneTransport.resolveRecentInboundMessages', () => {
+  test('returns inbound messages newest-first with their ids (ignores outbound)', async () => {
     await withResolve(
       async () =>
         jsonResponse(200, {
           items: [
-            { id: 'out_1', body: 'ship it', direction: 'outbound', receivedAt: 't3' },
-            { id: 'in_1', body: 'ship it', direction: 'inbound', receivedAt: 't2' },
-            { id: 'in_0', body: 'hello', direction: 'inbound', receivedAt: 't1' },
+            { id: 'in_1', body: 'ship it', direction: 'inbound', receivedAt: '2026-01-02T00:00:00Z' },
+            { id: 'out_1', body: 'on it', direction: 'outbound', receivedAt: '2026-01-02T00:01:00Z' },
+            { id: 'in_0', body: 'hello', direction: 'inbound', receivedAt: '2026-01-01T00:00:00Z' },
           ],
         }),
       async () => {
-        expect(
-          await wired().resolveInboundMessageId('conv_1', { matchBody: 'ship it' }),
-        ).toBe('in_1');
+        const r = await wired().resolveRecentInboundMessages('conv_1');
+        expect(r.map((m) => m.id).join(',')).toBe('in_1,in_0'); // newest first, inbound only
+        expect(r[0]?.id).toBe('in_1');
+        expect(r[0]?.text).toBe('ship it');
+        expect(r[0]?.receivedAt).toBe('2026-01-02T00:00:00Z');
       },
     );
   });
 
-  test('picks the NEWEST inbound when the body repeats', async () => {
+  test('sorts newest-first by receivedAt regardless of input order', async () => {
     await withResolve(
       async () =>
         jsonResponse(200, {
           items: [
-            { id: 'in_old', body: 'yes', direction: 'inbound', receivedAt: '2026-01-01T00:00:00Z' },
-            { id: 'in_new', body: 'yes', direction: 'inbound', receivedAt: '2026-01-02T00:00:00Z' },
+            { id: 'b', body: 'two', direction: 'inbound', receivedAt: '2026-01-01T00:00:02Z' },
+            { id: 'a', body: 'one', direction: 'inbound', receivedAt: '2026-01-01T00:00:01Z' },
+            { id: 'c', body: 'three', direction: 'inbound', receivedAt: '2026-01-01T00:00:03Z' },
           ],
         }),
       async () => {
-        expect(await wired().resolveInboundMessageId('c', { matchBody: 'yes' })).toBe('in_new');
+        const r = await wired().resolveRecentInboundMessages('c');
+        expect(r.map((m) => m.id).join(',')).toBe('c,b,a');
       },
     );
   });
 
-  test('no exact match → undefined (does NOT fall back to newest inbound)', async () => {
+  test('rows missing receivedAt sort last; missing body → ""', async () => {
     await withResolve(
       async () =>
         jsonResponse(200, {
-          items: [{ id: 'in_1', body: 'different', direction: 'inbound', receivedAt: 't1' }],
+          items: [
+            { id: 'no_at', direction: 'inbound' },
+            { id: 'has_at', body: 'hi', direction: 'inbound', receivedAt: '2026-01-01T00:00:00Z' },
+          ],
         }),
       async () => {
-        expect(
-          await wired().resolveInboundMessageId('c', { matchBody: 'ship it' }),
-        ).toBeUndefined();
+        const r = await wired().resolveRecentInboundMessages('c');
+        expect(r.map((m) => m.id).join(',')).toBe('has_at,no_at');
+        expect(r.find((m) => m.id === 'no_at')?.text).toBe('');
       },
     );
   });
 
-  test('empty list → undefined', async () => {
+  test('no inbound rows → []', async () => {
     await withResolve(
-      async () => jsonResponse(200, { items: [] }),
+      async () => jsonResponse(200, { items: [{ id: 'o', body: 'x', direction: 'outbound' }] }),
       async () => {
-        expect(await wired().resolveInboundMessageId('c', { matchBody: 'x' })).toBeUndefined();
+        expect((await wired().resolveRecentInboundMessages('c')).length).toBe(0);
       },
     );
   });
 
-  test('matchBody omitted → undefined (never guesses without an anchor)', async () => {
-    await withResolve(
-      async () => jsonResponse(200, { items: [] }),
-      async () => {
-        expect(await wired().resolveInboundMessageId('c')).toBeUndefined();
-      },
-    );
-  });
-
-  test('non-200 → undefined', async () => {
+  test('non-200 → []', async () => {
     await withResolve(
       async () => textResponse(500, 'boom'),
       async () => {
-        expect(await wired().resolveInboundMessageId('c', { matchBody: 'x' })).toBeUndefined();
+        expect((await wired().resolveRecentInboundMessages('c')).length).toBe(0);
       },
     );
   });
 
-  test('network error → undefined (best-effort, never throws)', async () => {
+  test('network error → [] (best-effort, never throws)', async () => {
     await withResolve(
       () => Promise.reject(new Error('ECONNRESET')),
       async () => {
-        expect(await wired().resolveInboundMessageId('c', { matchBody: 'x' })).toBeUndefined();
+        expect((await wired().resolveRecentInboundMessages('c')).length).toBe(0);
       },
     );
   });
@@ -469,18 +467,19 @@ describe('AgentPhoneTransport.resolveInboundMessageId', () => {
     await withResolve(
       async () => jsonResponse(200, [{ id: 'in_1', body: 'hi', direction: 'inbound', receivedAt: 't1' }]),
       async () => {
-        expect(await wired().resolveInboundMessageId('c', { matchBody: 'hi' })).toBe('in_1');
+        const r = await wired().resolveRecentInboundMessages('c');
+        expect(r.map((m) => m.id).join(',')).toBe('in_1');
       },
     );
   });
 
-  test('hits the conversation-messages endpoint with a limit (id url-encoded)', async () => {
+  test('hits the conversation-messages endpoint with the given limit (id url-encoded)', async () => {
     await withResolve(
       async () => jsonResponse(200, { items: [] }),
       async (lastUrl) => {
-        await wired().resolveInboundMessageId('conv ab/cd', { matchBody: 'x' });
+        await wired().resolveRecentInboundMessages('conv ab/cd', 6);
         expect(lastUrl().includes('/v1/conversations/conv%20ab%2Fcd/messages')).toBe(true);
-        expect(lastUrl().includes('limit=')).toBe(true);
+        expect(lastUrl().includes('limit=6')).toBe(true);
       },
     );
   });

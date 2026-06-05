@@ -222,11 +222,20 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
         'when a message concerns a specific pending request so a TAP-BACK on it points ' +
         'at that request. Optionally pass surface_request set to a request id to (re)post ' +
         'it as a fresh, tap-backable message whose text the system writes (you cannot) — ' +
-        'a clean way to get a tap-back, but not required to approve anything.',
+        'a clean way to get a tap-back, but not required to approve anything. Pass reply_to ' +
+        'with the [uN] handle shown next to a user line in RECENT THREAD to thread this reply ' +
+        'under that SPECIFIC earlier message instead of the most recent.',
       parameters: {
         type: 'object',
         properties: {
           text: { type: 'string', description: 'The message to send (plain text, no Markdown).' },
+          reply_to: {
+            type: 'string',
+            description:
+              'Optional [uN] handle (e.g. "u2") shown next to a user message in RECENT THREAD, ' +
+              'to thread THIS reply under that message as an iMessage inline reply. Omit to ' +
+              'reply under the most recent message (the default).',
+          },
           about_request: {
             type: 'string',
             description:
@@ -450,8 +459,9 @@ function turnContext(args: {
   sessions: ReadonlyArray<SessionInfo>;
   history: ReadonlyArray<{ direction: string; body: string }>;
   activity?: ReadonlyMap<string, ReadonlyArray<string>>;
+  replyTargets?: ReadonlyArray<{ handle: string; text: string }>;
 }): string {
-  const { trigger, pending, sessions, history, activity } = args;
+  const { trigger, pending, sessions, history, activity, replyTargets } = args;
   const lines: string[] = [];
 
   // Title+id together for every session we name. The id is the message_agent routing key
@@ -495,12 +505,40 @@ function turnContext(args: {
   lines.push('  (For the full/searchable log of any agent, call get_session_data.)');
 
   lines.push('', 'RECENT THREAD (most recent last):');
-  const ordered = [...history].reverse();
-  if (ordered.length === 0) lines.push('  (no prior messages)');
-  else
-    for (const m of ordered) {
-      lines.push(`  ${m.direction === 'outbound' ? 'assistant' : 'user'}: ${truncate(m.body, 240)}`);
+  if (history.length === 0) lines.push('  (no prior messages)');
+  else {
+    // Overlay the reply handles (u1 = most recent user message) onto the user
+    // lines by matching text against the id-bearing target list. Best-effort: an
+    // unmatched line just renders without a handle (still shown, just not
+    // individually targetable). Each target is consumed once so duplicate texts
+    // map to distinct messages. `history` and `replyTargets` are both newest-first.
+    const handleByIndex = new Map<number, string>();
+    if (replyTargets && replyTargets.length > 0) {
+      const used = new Set<string>();
+      history.forEach((m, i) => {
+        if (m.direction === 'outbound') return;
+        const t = replyTargets.find((rt) => rt.text === m.body && !used.has(rt.handle));
+        if (t) {
+          used.add(t.handle);
+          handleByIndex.set(i, t.handle);
+        }
+      });
     }
+    // Render most-recent-last; keep the original index so the overlay lines up.
+    for (let i = history.length - 1; i >= 0; i--) {
+      const m = history[i];
+      if (!m) continue;
+      const role = m.direction === 'outbound' ? 'assistant' : 'user';
+      const handle = handleByIndex.get(i);
+      lines.push(`  ${role}${handle ? ` [${handle}]` : ''}: ${truncate(m.body, 240)}`);
+    }
+    if (replyTargets && replyTargets.length > 0) {
+      lines.push(
+        '  (To thread your reply under a SPECIFIC user message above, pass its [uN] handle as',
+        '   reply_to on message_user; omit reply_to to reply under the most recent.)',
+      );
+    }
+  }
 
   lines.push('');
   if (trigger.kind === 'user_message') {
@@ -600,6 +638,8 @@ export function buildTurnMessages(args: {
   history: ReadonlyArray<{ direction: string; body: string }>;
   profile?: UserProfile;
   activity?: ReadonlyMap<string, ReadonlyArray<string>>;
+  /** Recent user messages the model can thread a reply under (u1 = most recent). */
+  replyTargets?: ReadonlyArray<{ handle: string; text: string }>;
 }): ChatMessage[] {
   return [
     { role: 'system', content: systemPrompt(args.trigger.kind, args.profile) },

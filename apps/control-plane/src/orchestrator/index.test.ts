@@ -14,8 +14,10 @@ import {
   composeDeliveryRetraction,
   composeLostConnectionMessage,
   extractOnboardingName,
+  buildReplyTargets,
   extractOnboardingToken,
-  resolveReplyTarget,
+  pickDefaultReplyTarget,
+  resolveReplyHandle,
   shouldInterrupt,
   takeBatch,
   type LostDeviceLabel,
@@ -31,65 +33,140 @@ function inbound(overrides: Partial<InboundMessage> = {}): InboundMessage {
   };
 }
 
-/** Minimal Transport whose only interesting method is resolveInboundMessageId.
- *  Pass `resolve` to wire the capability; omit it to model a transport without it. */
+/** Minimal Transport whose only interesting method is resolveRecentInboundMessages.
+ *  Pass `list` to wire the capability; omit it to model a transport without it. */
 function fakeTransport(
-  resolve?: (cid: string, opts?: { matchBody?: string }) => Promise<string | undefined>,
+  list?: (
+    cid: string,
+    limit?: number,
+  ) => Promise<Array<{ id: string; text: string; receivedAt?: string }>>,
 ): Transport {
   return {
     send: async () => ({ id: 'x' }),
     verifyWebhook: () => true,
     parseInbound: () => null,
-    ...(resolve ? { resolveInboundMessageId: resolve } : {}),
+    ...(list ? { resolveRecentInboundMessages: list } : {}),
   } as Transport;
 }
 
-describe('resolveReplyTarget', () => {
-  test('resolves via the transport using conversationId + the message body', async () => {
-    const calls: Array<{ cid: string; matchBody?: string }> = [];
-    const t = fakeTransport(async (cid, opts) => {
-      calls.push({ cid, matchBody: opts?.matchBody });
-      return 'msg_real';
+describe('buildReplyTargets', () => {
+  test('maps recent inbound messages to handles (u1 = most recent)', async () => {
+    const calls: Array<{ cid: string; limit?: number }> = [];
+    const t = fakeTransport(async (cid, limit) => {
+      calls.push({ cid, limit });
+      return [
+        { id: 'm_new', text: 'latest' },
+        { id: 'm_old', text: 'earlier' },
+      ];
     });
-    const id = await resolveReplyTarget(
-      t,
-      inbound({ conversationId: 'conv_1', text: 'ship it' }),
+    const targets = await buildReplyTargets(t, inbound({ conversationId: 'conv_1' }));
+    expect(targets).toEqual([
+      { handle: 'u1', id: 'm_new', text: 'latest' },
+      { handle: 'u2', id: 'm_old', text: 'earlier' },
+    ]);
+    expect(calls).toEqual([{ cid: 'conv_1', limit: 10 }]);
+  });
+
+  test('caps the offered targets at the limit', async () => {
+    const t = fakeTransport(async () =>
+      Array.from({ length: 13 }, (_, i) => ({ id: `m${i}`, text: `t${i}` })),
     );
-    expect(id).toBe('msg_real');
-    expect(calls).toEqual([{ cid: 'conv_1', matchBody: 'ship it' }]);
+    const targets = await buildReplyTargets(t, inbound({ conversationId: 'c' }));
+    expect(targets.length).toBe(10);
+    expect(targets[9]?.handle).toBe('u10');
   });
 
   test('skips (no transport call) when there is no conversationId', async () => {
     let called = false;
     const t = fakeTransport(async () => {
       called = true;
-      return 'x';
+      return [];
     });
-    expect(await resolveReplyTarget(t, inbound({ conversationId: undefined }))).toBeUndefined();
+    expect(await buildReplyTargets(t, inbound({ conversationId: undefined }))).toEqual([]);
     expect(called).toBe(false);
   });
 
-  test('skips a TAP-BACK — a reaction text is the reaction type, not a body', async () => {
+  test('skips a TAP-BACK — a reaction is not a normal message', async () => {
     let called = false;
     const t = fakeTransport(async () => {
       called = true;
-      return 'x';
+      return [];
     });
     const m = inbound({ conversationId: 'c', reactionTo: 'agent_msg', text: 'like' });
-    expect(await resolveReplyTarget(t, m)).toBeUndefined();
+    expect(await buildReplyTargets(t, m)).toEqual([]);
     expect(called).toBe(false);
   });
 
-  test('returns undefined when the transport lacks the capability', async () => {
-    const t = fakeTransport(); // no resolveInboundMessageId
-    expect(await resolveReplyTarget(t, inbound({ conversationId: 'c' }))).toBeUndefined();
+  test('returns [] when the transport lacks the capability', async () => {
+    const t = fakeTransport(); // no resolveRecentInboundMessages
+    expect(await buildReplyTargets(t, inbound({ conversationId: 'c' }))).toEqual([]);
   });
 
-  test('a resolver rejection NEVER throws (turn-safety regression guard)', async () => {
+  test('a transport rejection NEVER throws (turn-safety regression guard)', async () => {
     const t = fakeTransport(async () => {
       throw new Error('conversations API down');
     });
-    expect(await resolveReplyTarget(t, inbound({ conversationId: 'c' }))).toBeUndefined();
+    expect(await buildReplyTargets(t, inbound({ conversationId: 'c' }))).toEqual([]);
+  });
+
+  test('drops empty-text rows (useless handles / reaction-shaped rows)', async () => {
+    const t = fakeTransport(async () => [
+      { id: 'm_real', text: 'hello' },
+      { id: 'm_blank', text: '   ' },
+    ]);
+    const targets = await buildReplyTargets(t, inbound({ conversationId: 'c' }));
+    expect(targets).toEqual([{ handle: 'u1', id: 'm_real', text: 'hello' }]);
+  });
+});
+
+describe('pickDefaultReplyTarget', () => {
+  test('anchors the default to the message being answered (matches last.text)', () => {
+    const targets = [
+      { handle: 'u1', id: 'm_newer', text: 'a different newer message' },
+      { handle: 'u2', id: 'm_answered', text: 'the one we are answering' },
+    ];
+    // Even though u1 is the newest row, the default threads under the message
+    // THIS turn is answering (last), not merely the newest in the conversation.
+    expect(
+      pickDefaultReplyTarget(targets, inbound({ text: 'the one we are answering' })),
+    ).toBe('m_answered');
+  });
+
+  test('duplicate text → newest matching row (targets are newest-first)', () => {
+    const targets = [
+      { handle: 'u1', id: 'ok_new', text: 'ok' },
+      { handle: 'u2', id: 'ok_old', text: 'ok' },
+    ];
+    expect(pickDefaultReplyTarget(targets, inbound({ text: 'ok' }))).toBe('ok_new');
+  });
+
+  test('no text match → undefined (un-threaded, never the wrong message)', () => {
+    const targets = [{ handle: 'u1', id: 'm1', text: 'something' }];
+    expect(pickDefaultReplyTarget(targets, inbound({ text: 'unmatched' }))).toBeUndefined();
+    expect(pickDefaultReplyTarget([], inbound({ text: 'x' }))).toBeUndefined();
+  });
+});
+
+describe('resolveReplyHandle', () => {
+  const targets = [
+    { handle: 'u1', id: 'm_new', text: 'latest' },
+    { handle: 'u2', id: 'm_old', text: 'earlier' },
+  ];
+
+  test('no handle → the most recent message (default "reply to latest")', () => {
+    expect(resolveReplyHandle(targets, undefined)).toBe('m_new');
+  });
+
+  test('a known handle → that message id', () => {
+    expect(resolveReplyHandle(targets, 'u2')).toBe('m_old');
+  });
+
+  test('an unknown handle → undefined (never silently threads under the latest)', () => {
+    expect(resolveReplyHandle(targets, 'u9')).toBeUndefined();
+  });
+
+  test('no targets + no handle → undefined (un-threaded)', () => {
+    expect(resolveReplyHandle([], undefined)).toBeUndefined();
   });
 });
 

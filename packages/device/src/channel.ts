@@ -50,6 +50,7 @@ import {
 import {
   HEARTBEAT_INTERVAL_MS,
   agentKind,
+  codexAppServerUrl,
   deviceApiUrl,
   deviceIdFile,
   isPluginHousekeepingDir,
@@ -59,6 +60,7 @@ import {
   sessionTitleFile,
 } from './config.ts';
 import { deriveCodexSessionId } from './codex-session.ts';
+import { injectReply } from './codex-appserver.ts';
 import { loadToken } from './creds.ts';
 import { readHandshakeForProject } from './handshake.ts';
 import { Classification, postJson } from './httpclient.ts';
@@ -182,7 +184,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.11' },
+  { name: 'imsg-device', version: '0.1.13' },
   {
     capabilities: {
       experimental: {
@@ -389,17 +391,25 @@ async function drainOutbox(): Promise<void> {
 const appliedInbox = new Set<string>();
 const APPLIED_INBOX_CAP = 500;
 
-async function applyInbox(item: InboxItem): Promise<void> {
+// Returns whether the row was DELIVERED (or definitively un-deliverable) and so
+// should be ACKed. A transient delivery failure (Codex app-server injection that
+// didn't land) returns false → the caller skips the ACK and the control plane
+// re-serves the row on the next SSE flush. The claude/channel notification path is
+// fire-and-forget (no failure signal), so it always reports delivered — preserving
+// the prior always-ACK behavior for Claude Code.
+async function applyInbox(item: InboxItem): Promise<boolean> {
   if (appliedInbox.has(item.id)) {
     // Already applied; the re-send means a prior ACK didn't stick. Skip
-    // re-injection — the caller still re-ACKs so the server stops re-serving it.
+    // re-injection — but report delivered so the caller re-ACKs and the server
+    // stops re-serving it.
     log('inbox_dup_skipped', { id: item.id });
-    return;
+    return true;
   }
 
   if (item.kind === 'verdict') {
     // A permission verdict → relay on the permission channel. Fail-CLOSED: relay
-    // only a fully-specified verdict (never synthesize an allow).
+    // only a fully-specified verdict (never synthesize an allow). An unbound
+    // verdict can never be delivered, so ACK it (true) to stop re-serving forever.
     if (item.requestId && item.behavior) {
       await mcp.notification({
         method: ChannelMethod.PERMISSION,
@@ -410,15 +420,37 @@ async function applyInbox(item: InboxItem): Promise<void> {
       log('verdict_unbound', { id: item.id });
     }
   } else {
-    // A reply → push into the session as a <channel> message.
-    await mcp.notification({
-      method: ChannelMethod.CHANNEL,
-      params: {
-        content: item.text ?? '',
-        meta: { source_kind: 'imsg_phone', message_id: item.id, attention_id: item.attentionId },
-      },
-    });
-    log('reply_pushed', { id: item.id, len: (item.text ?? '').length });
+    // A reply → deliver into the session. Codex isn't a Claude Code Channels client,
+    // so the claude/channel notification below is silently dropped for it; when the
+    // user launched via `imsg codex` (codexAppServerUrl set) we instead inject the
+    // reply as a real user turn over the app-server (see codex-appserver.ts).
+    const appServer = agentKind() === AgentKind.CODEX ? codexAppServerUrl() : '';
+    if (appServer) {
+      const res = await injectReply({
+        url: appServer,
+        threadId: SESSION_ID, // thread.id === Codex session id
+        text: item.text ?? '',
+        log,
+      });
+      if (!res.ok) {
+        // Not delivered — leave un-ACked so the control plane re-serves it (e.g.
+        // a turn was active; it should land on a later flush). Do NOT mark applied.
+        log('codex_reply_undelivered', { id: item.id, reason: res.reason });
+        return false;
+      }
+      log('reply_injected_codex', { id: item.id, len: (item.text ?? '').length });
+    } else {
+      // Claude Code (or Codex without the app-server launcher): push as a <channel>
+      // message. Fire-and-forget — treated as delivered (no failure signal).
+      await mcp.notification({
+        method: ChannelMethod.CHANNEL,
+        params: {
+          content: item.text ?? '',
+          meta: { source_kind: 'imsg_phone', message_id: item.id, attention_id: item.attentionId },
+        },
+      });
+      log('reply_pushed', { id: item.id, len: (item.text ?? '').length });
+    }
   }
 
   // A row that resolves a pending attention clears one from the statusline count
@@ -433,6 +465,7 @@ async function applyInbox(item: InboxItem): Promise<void> {
     const oldest = appliedInbox.values().next().value; // Set keeps insertion order
     if (oldest !== undefined) appliedInbox.delete(oldest);
   }
+  return true;
 }
 
 /**
@@ -530,11 +563,15 @@ async function subscribeEvents(): Promise<void> {
             if (event === SseEvent.INBOX) {
               const body = JSON.parse(data) as { items?: InboxItem[] };
               const items = body.items ?? [];
-              for (const it of items) await applyInbox(it);
-              // ACK every row in the frame (injected or dup-skipped) so the server
-              // sets delivered_at and stops re-serving. Fire-and-forget so the read
-              // loop isn't held on the round-trip.
-              if (items.length > 0) void ackInbox(items.map((it) => it.id));
+              // ACK only rows that were actually DELIVERED (or are undeliverable):
+              // a Codex injection that didn't land returns false and stays un-ACked
+              // so the server re-serves it next flush. Fire-and-forget the ACK so
+              // the read loop isn't held on the round-trip.
+              const deliveredIds: string[] = [];
+              for (const it of items) {
+                if (await applyInbox(it)) deliveredIds.push(it.id);
+              }
+              if (deliveredIds.length > 0) void ackInbox(deliveredIds);
             } else if (event === SseEvent.STATE) {
               // Mirror the control plane's afk into the local afk.state file the
               // PreToolUse hook reads — a dashboard/CLI toggle reaching the hook.

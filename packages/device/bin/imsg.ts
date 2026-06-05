@@ -13,6 +13,7 @@
  */
 import { migrateLegacyDeviceDir } from '../src/config.ts';
 import { afk, pair, status, statusline } from '../src/cli.ts';
+import { launchCodex } from '../src/codex-launch.ts';
 
 const USAGE = `imsg — imessage-coding device CLI
 
@@ -20,6 +21,8 @@ const USAGE = `imsg — imessage-coding device CLI
   imsg afk on|off|toggle     set away-from-keyboard state (mirrored to cloud)
   imsg status                show pairing + local state
   imsg statusline            one-line status (for the Claude Code status bar)
+  imsg codex [args…]         launch Codex so it can RECEIVE messages (hosts an
+                             app-server + attaches the TUI); forwards your args
 `;
 
 async function main(): Promise<number> {
@@ -36,6 +39,9 @@ async function main(): Promise<number> {
       return status();
     case 'statusline':
       return statusline();
+    case 'codex':
+      // Everything after `codex` is forwarded verbatim to the Codex TUI.
+      return launchCodex(rest);
     case undefined:
     case '-h':
     case '--help':

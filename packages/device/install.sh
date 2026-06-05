@@ -247,6 +247,44 @@ rewrite_plugin_root_text() {
 }
 
 # =============================================================================
+# Shared: append a marker-wrapped alias block (BLOCK_ID) to a shell rc file,
+# replacing any prior copy of the same block. Used for BOTH the Claude Code
+# channels alias and the Codex launcher alias, so the wrap/replace logic lives in
+# one place. Pure string surgery via bun (no sed/awk portability traps).
+# =============================================================================
+write_rc_block() {
+  rc="$1"; block_id="$2"; alias_line="$3"
+  RC_FILE="$rc" BLOCK_ID="$block_id" ALIAS_LINE="$alias_line" "$BUN" -e '
+    const fs = require("fs");
+    const f = process.env.RC_FILE, id = process.env.BLOCK_ID, alias = process.env.ALIAS_LINE;
+    const begin = `# >>> ${id} >>>`, end = `# <<< ${id} <<<`;
+    let s = ""; try { s = fs.readFileSync(f, "utf8"); } catch {}
+    const bi = s.indexOf(begin);
+    if (bi !== -1) { const ei = s.indexOf(end, bi); if (ei !== -1) s = s.slice(0, bi) + s.slice(ei + end.length); }
+    s = s.replace(/\n{3,}/g, "\n\n");
+    if (s.length && !s.endsWith("\n")) s += "\n";
+    s += `${begin}\n${alias}\n${end}\n`;
+    fs.writeFileSync(f, s);
+  '
+}
+
+# Write the alias block into ~/.zshrc + ~/.bashrc (zshrc always; bashrc only if it
+# exists). Echoes the files touched so the caller can report them. Shared by both
+# the Claude Code and Codex install paths.
+add_shell_alias() {
+  block_id="$1"; alias_line="$2"
+  _aliased=""
+  for RC in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    if [ "$RC" = "$HOME/.zshrc" ] || [ -f "$RC" ]; then
+      [ -f "$RC" ] || : > "$RC"
+      write_rc_block "$RC" "$block_id" "$alias_line"
+      _aliased="$_aliased $RC"
+    fi
+  done
+  printf '%s' "$_aliased"
+}
+
+# =============================================================================
 # Shared: bake the control-plane URL into a staged plugin dir (build-config.json)
 # for LOCAL/checkout installs. The SERVED tarball already carries this file
 # (apps/dashboard/scripts/copy-install-script.mjs writes it at build time); a raw
@@ -410,30 +448,7 @@ install_for_claude_code() {
   CLAUDE_ALIAS="alias claude='claude --dangerously-load-development-channels ${CHANNEL_REF}'"
   RC_BLOCK_ID="imsg-device channels alias"
 
-  write_rc_block() {
-    rc="$1"
-    RC_FILE="$rc" BLOCK_ID="$RC_BLOCK_ID" ALIAS_LINE="$CLAUDE_ALIAS" "$BUN" -e '
-      const fs = require("fs");
-      const f = process.env.RC_FILE, id = process.env.BLOCK_ID, alias = process.env.ALIAS_LINE;
-      const begin = `# >>> ${id} >>>`, end = `# <<< ${id} <<<`;
-      let s = ""; try { s = fs.readFileSync(f, "utf8"); } catch {}
-      const bi = s.indexOf(begin);
-      if (bi !== -1) { const ei = s.indexOf(end, bi); if (ei !== -1) s = s.slice(0, bi) + s.slice(ei + end.length); }
-      s = s.replace(/\n{3,}/g, "\n\n");
-      if (s.length && !s.endsWith("\n")) s += "\n";
-      s += `${begin}\n${alias}\n${end}\n`;
-      fs.writeFileSync(f, s);
-    '
-  }
-
-  ALIASED=""
-  for RC in "$HOME/.zshrc" "$HOME/.bashrc"; do
-    if [ "$RC" = "$HOME/.zshrc" ] || [ -f "$RC" ]; then
-      [ -f "$RC" ] || : > "$RC"
-      write_rc_block "$RC"
-      ALIASED="$ALIASED $RC"
-    fi
-  done
+  ALIASED="$(add_shell_alias "$RC_BLOCK_ID" "$CLAUDE_ALIAS")"
   say "aliased 'claude' to load the channel (--dangerously-load-development-channels ${CHANNEL_REF}) in:${ALIASED}"
   say "  open a NEW terminal (or run: source ~/.zshrc) for it to take effect"
   say "done (Claude Code). Open a NEW terminal so the alias loads, then start Claude Code."
@@ -484,6 +499,8 @@ CODEX_HOME="${CODEX_HOME:-${HOME}/.codex}"
 CODEX_CONFIG="${CODEX_HOME}/config.toml"
 CODEX_MARKETPLACE_DIR="${CODEX_HOME}/marketplaces/${MARKETPLACE_NAME}-local"
 CODEX_PLUGIN_DIR="${CODEX_MARKETPLACE_DIR}/${PLUGIN_NAME}"
+# Marker id for the `codex` launcher alias (revertable; mirrors RC_BLOCK_ID).
+CODEX_RC_BLOCK_ID="imsg-device codex alias"
 
 install_for_codex() {
   # Self-skip when the Codex CLI is absent. With DEFAULT=both, a Claude-Code-only
@@ -678,6 +695,22 @@ install_for_codex() {
 
   # --- pair (shared) ----------------------------------------------------------
   pair_device "${CODEX_PLUGIN_DIR}/bin/imsg.ts"
+
+  # --- alias `codex` so it can RECEIVE messages (inbound) ----------------------
+  # Plain `codex` runs a standalone TUI the orchestrator can't reach, so inbound
+  # replies have nowhere to land (Codex isn't a Channels client — unlike CC, no
+  # notification can push into the session). `imsg codex` instead hosts the session
+  # on Codex's app-server and attaches the TUI (`codex --remote`), which is what
+  # lets the channel server inject each inbound reply as an app-server `turn/start`.
+  # So alias `codex` -> the launcher — the Codex counterpart of the CC channels
+  # alias. Marker-wrapped + revertable (uninstall strips it). The launcher falls
+  # back to a plain `codex` if the app-server can't start, so the user is never
+  # worse off. No recursion: the launcher execs the real `codex` binary via PATH
+  # (Bun.spawn), and shell aliases never apply to exec'd processes.
+  CODEX_ALIAS="alias codex='$BUN ${CODEX_PLUGIN_DIR}/bin/imsg.ts codex'"
+  CODEX_ALIASED="$(add_shell_alias "$CODEX_RC_BLOCK_ID" "$CODEX_ALIAS")"
+  say "aliased 'codex' to launch with inbound enabled (imsg codex) in:${CODEX_ALIASED}"
+  say "  open a NEW terminal (or run: source ~/.zshrc) for it to take effect"
 
   # --- hook hash-trust --------------------------------------------------------
   # Codex stores a per-hook sha256 in config.toml ([hooks.state."imsg-device@imsg:

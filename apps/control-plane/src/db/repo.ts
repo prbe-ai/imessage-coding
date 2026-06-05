@@ -679,7 +679,7 @@ export async function claimDevicesToNotifyLost(
           SELECT 1 FROM sessions s
            WHERE s.device_id = d.id
              AND (s.state <> 'ended'
-                  OR s.last_event_at >= now() - (($1 + $2)::int * interval '1 second'))
+                  OR s.last_event_at >= now() - (($1::int + $2::int) * interval '1 second'))
         )
       RETURNING d.id, d.account_id, d.hostname, d.os, (d.afk = 'on') AS notify`,
     [graceSeconds, staleSeconds],

@@ -13,6 +13,7 @@ import {
   composeDeliveryFollowup,
   composeDeliveryRetraction,
   composeLostConnectionMessage,
+  extractOnboardingName,
   extractOnboardingToken,
   resolveReplyTarget,
   shouldInterrupt,
@@ -106,8 +107,24 @@ describe('extractOnboardingToken', () => {
   // 32-char base64url run (24 bytes -> 32 chars), matches the dashboard deep link.
   const TOKEN = 'aB3dE6gH9jK2mN5pQ8rS1tU4vW7xZ0yC';
 
-  test('extracts the token from "hey! this is <token>"', () => {
+  test('extracts the token from "hey! this is <token>" (legacy)', () => {
     expect(extractOnboardingToken(`hey! this is ${TOKEN}`)).toBe(TOKEN);
+  });
+
+  test('extracts the parenthesized token from "hey! this is <name> (<token>)"', () => {
+    expect(extractOnboardingToken(`hey! this is Ada (${TOKEN})`)).toBe(TOKEN);
+    // Multi-word name, and a name that itself contains "this is".
+    expect(extractOnboardingToken(`hey! this is Ada Lovelace (${TOKEN})`)).toBe(
+      TOKEN,
+    );
+  });
+
+  test('a parenthesized run inside the name does not shadow the real token', () => {
+    // The greeting is anchored, so a decoy 24+ run in the name is ignored.
+    const DECOY = 'zZ9yY8xX7wW6vV5uU4tT3sS2rR1qQ0pP';
+    expect(extractOnboardingToken(`hey! this is Bot(${DECOY}) (${TOKEN})`)).toBe(
+      TOKEN,
+    );
   });
 
   test('phrase match is case-insensitive on the prefix', () => {
@@ -128,6 +145,50 @@ describe('extractOnboardingToken', () => {
 
   test('a bare run shorter than 28 chars is rejected', () => {
     expect(extractOnboardingToken('aB3dE6gH9jK2mN5pQ8rS1tU4')).toBeUndefined(); // 24 chars
+  });
+});
+
+describe('extractOnboardingName', () => {
+  const TOKEN = 'aB3dE6gH9jK2mN5pQ8rS1tU4vW7xZ0yC';
+
+  test('extracts the name from "hey! this is <name> (<token>)"', () => {
+    expect(extractOnboardingName(`hey! this is Ada (${TOKEN})`)).toBe('Ada');
+    expect(extractOnboardingName(`hey! this is Ada Lovelace (${TOKEN})`)).toBe(
+      'Ada Lovelace',
+    );
+  });
+
+  test('undefined for the legacy nameless form and plain text', () => {
+    expect(extractOnboardingName(`hey! this is ${TOKEN}`)).toBeUndefined();
+    expect(extractOnboardingName(TOKEN)).toBeUndefined();
+    expect(extractOnboardingName('hi there')).toBeUndefined();
+  });
+
+  test('strips control/bidi chars from the name (outbound safety)', () => {
+    // A right-to-left override + a quote must not survive into the greeting.
+    // Built via fromCharCode so the test source carries no literal bidi char.
+    const rlo = String.fromCharCode(0x202e);
+    expect(
+      extractOnboardingName(`hey! this is A${rlo}da" (${TOKEN})`),
+    ).toBe('Ada');
+  });
+
+  test('an over-long name is dropped rather than risk anything', () => {
+    const long = 'x'.repeat(80);
+    expect(
+      extractOnboardingName(`hey! this is ${long} (${TOKEN})`),
+    ).toBeUndefined();
+  });
+
+  test('does not catastrophically backtrack on a crafted whitespace run', () => {
+    // Regression for ReDoS: a long space run before a non-token paren must
+    // return quickly (no exponential backtracking). Bun fails the test if this
+    // hangs past the suite timeout.
+    const start = Date.now();
+    expect(
+      extractOnboardingName(`this is ${' '.repeat(5000)}(short)`),
+    ).toBeUndefined();
+    expect(Date.now() - start).toBeLessThanOrEqual(200);
   });
 });
 

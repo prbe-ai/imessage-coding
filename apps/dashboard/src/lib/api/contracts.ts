@@ -92,3 +92,11 @@ export interface PairingTokenResponse {
   /** The full `curl … | TOKEN=… sh` install command. */
   installCommand: string;
 }
+
+// ── Account ───────────────────────────────────────────────────────────────
+
+/** Response of POST /api/account/delete — confirms the account and all of its
+ *  data (product rows + the Better Auth identity) were removed. */
+export interface DeleteAccountResponse {
+  deleted: boolean;
+}

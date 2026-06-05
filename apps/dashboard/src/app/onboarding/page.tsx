@@ -11,7 +11,9 @@
  *               poll /api/onboarding/status for the orchestrator to match the
  *               texted-in token and derive their number.
  *   confirm   → derived number shown; one-tap "That's me" → POST confirm.
- *   done      → number verified → /home.
+ *   install   → number verified; pair the first device (shared install UI) →
+ *               "Next" → /home.
+ *   done      → leaving for /home.
  *
  * The single-use token is minted server-side (POST /api/onboarding/start),
  * >=128-bit, short-TTL, and bound to the Better Auth session id.
@@ -19,10 +21,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { MessageSquare, PhoneCall } from "lucide-react";
+import { MessageSquare, PhoneCall, Terminal } from "lucide-react";
 
 import { useSession } from "@/lib/idp/better-auth-client";
 import { AccountMenu } from "@/components/account-menu";
+import { PairDeviceCard } from "@/components/pair-device-card";
 import {
   OnboardingShell,
   StepVisual,
@@ -33,13 +36,13 @@ import {
   getOnboardingStatus,
   confirmNumber,
 } from "@/lib/api/onboarding";
-import { smsDeepLink } from "@/lib/deep-link";
+import { onboardingBody, smsDeepLink } from "@/lib/deep-link";
 import { extractError } from "@/lib/utils";
 
 /** How often to poll for an inbound match once the deep link is shown. */
 const STATUS_POLL_INTERVAL_MS = 2500;
 
-type Step = "boot" | "link" | "confirm" | "done" | "error";
+type Step = "boot" | "link" | "confirm" | "install" | "done" | "error";
 
 export default function OnboardingPage() {
   const router = useRouter();
@@ -139,9 +142,9 @@ export default function OnboardingPage() {
     try {
       const res = await confirmNumber();
       if (res.verified) {
-        setStep("done");
-        // Hard navigation so the home page reads the fresh state cleanly.
-        window.location.replace("/home");
+        // Number linked — nudge the user to pair their first device before
+        // dropping them on Home (they can still skip via "Next").
+        setStep("install");
         return;
       }
       setErrorMsg("Confirmation didn't take — please try again.");
@@ -191,7 +194,7 @@ export default function OnboardingPage() {
 
   // ── Step: link your number (deep link). ───────────────────────────────
   if (step === "link" && token) {
-    const href = smsDeepLink(token, agentNumber);
+    const href = smsDeepLink(token, agentNumber, firstName);
     return (
       <OnboardingShell
         stepKey="onb-link"
@@ -212,7 +215,7 @@ export default function OnboardingPage() {
           hit send, and we&apos;ll link your number automatically.
         </p>
         <div className="onb-cmd" aria-label="Prefilled message">
-          <p className="onb-cmd-text">hey! this is {token}</p>
+          <p className="onb-cmd-text">{onboardingBody(token, firstName)}</p>
         </div>
         <p className="onb-fineprint">
           Waiting for your message… this page updates on its own once it lands.
@@ -251,6 +254,36 @@ export default function OnboardingPage() {
           </p>
         </div>
         {errorMsg && <p className="onb-signup-error">{errorMsg}</p>}
+      </OnboardingShell>
+    );
+  }
+
+  // ── Step: install the script on the first device. ─────────────────────
+  if (step === "install") {
+    return (
+      <OnboardingShell
+        stepKey="onb-install"
+        rightTop={userBadge}
+        rightWide
+        leftVisual={<StepVisual icon={<Terminal />} title="Pair your first device" />}
+        footer={
+          <button
+            type="button"
+            className="onb-btn onb-btn-primary"
+            // Hard navigation so Home reads the freshly verified state cleanly.
+            onClick={() => window.location.replace("/home")}
+          >
+            Next
+            <span style={{ marginLeft: 2 }}>→</span>
+          </button>
+        }
+      >
+        <p className="onb-confirm-body">
+          Last step — run this one-liner on the machine where you use Claude Code
+          or Codex. It installs the Probe plugin and links the device to your
+          account. You can always pair more devices later from Integrations.
+        </p>
+        <PairDeviceCard />
       </OnboardingShell>
     );
   }

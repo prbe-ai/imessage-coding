@@ -191,10 +191,15 @@ export async function orchestrate(
       });
       if (result.ok) {
         await logMessage({ accountId: result.accountId, direction: 'inbound', body: inbound.text });
+        // Greet by the name they introduced themselves with, when present.
+        const name = extractOnboardingName(inbound.text);
+        const linkedReply = name
+          ? `You're all set, ${name} — your number is linked. Let's get coding.`
+          : "You're all set — your number is linked. Let's get coding.";
         await sendToUser(
           transport,
           result.accountId,
-          "You're all set — your number is linked. Let's get coding.",
+          linkedReply,
           { fallbackTo: inbound.from },
         );
         return { handled: true, accountId: result.accountId, reason: 'onboarding_linked' };
@@ -993,19 +998,59 @@ function clip(s: string, n: number): string {
   return flat.length > n ? `${flat.slice(0, n)}…` : flat;
 }
 
+/** Sanitize untrusted text that lands in an outbound iMessage: strip the `"`
+ *  delimiter plus control/bidi chars (so a crafted value can't forge extra
+ *  message structure or smuggle a right-to-left override), then collapse
+ *  whitespace and bound the length via clip(). Shared by every place a
+ *  user/device-supplied string is echoed to the phone. */
+function sanitizeOutbound(raw: string, max: number): string {
+  return clip(
+    raw.replace(/["\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, ''),
+    max,
+  );
+}
+
 // --- helpers ------------------------------------------------------------------
 
 /**
- * Extract an onboarding token from an inbound message. The dashboard deep link
- * prefills "hey! this is <token>" where <token> is a base64url string (24 bytes
- * -> 32 chars). Match the phrase first, then a bare token. Undefined if none.
+ * Extract an onboarding token from an inbound message, where <token> is a
+ * base64url string (24 bytes -> 32 chars). The dashboard deep link prefills
+ * "hey! this is <name> (<token>)"; older links used "hey! this is <token>".
+ * Match the parenthesized token first (current format), then the bare-after-
+ * phrase form (legacy), then a lone token (autocorrect/quoting tolerant).
+ * Undefined if none.
  */
 export function extractOnboardingToken(text: string): string | undefined {
+  // Current format: "hey! this is <name> (<token>)" — the token is the LAST
+  // parenthesized run (the dashboard appends it at the very end), so a name that
+  // itself contains a parenthesized run can't shadow it. matchAll is linear.
+  let lastParen: string | undefined;
+  for (const m of text.matchAll(/\(\s*([A-Za-z0-9_-]{24,})\s*\)/g)) {
+    lastParen = m[1];
+  }
+  if (lastParen) return lastParen;
+  // Legacy format: bare token right after the phrase.
   const phrase = /this is\s+([A-Za-z0-9_-]{24,})/i.exec(text);
   if (phrase?.[1]) return phrase[1];
   const bare = text.trim();
   if (/^[A-Za-z0-9_-]{28,}$/.test(bare)) return bare;
   return undefined;
+}
+
+/**
+ * Extract the self-introduced name from "hey! this is <name> (<token>)" so the
+ * link-success reply can greet the user by name. Returns undefined for the
+ * legacy nameless form or any text without a name before the parenthesized
+ * token. The name class excludes `(` and is length-capped (and the input is
+ * sliced) so a crafted whitespace run can't trigger catastrophic backtracking;
+ * the result is run through sanitizeOutbound since it lands in an outbound text.
+ */
+export function extractOnboardingName(text: string): string | undefined {
+  const scoped = text.length > 512 ? text.slice(0, 512) : text;
+  const m = /this is\s+([^()\n]{1,40}?)\s*\(\s*[A-Za-z0-9_-]{24,}\s*\)/i.exec(scoped);
+  if (!m?.[1]) return undefined;
+  const name = sanitizeOutbound(m[1], 40);
+  return name || undefined;
 }
 
 /**
@@ -1173,12 +1218,11 @@ export type LostDeviceLabel = { id: string; hostname: string | null; os: string 
 
 function deviceLabel(d: LostDeviceLabel): string {
   const raw = d.hostname?.trim() || d.os?.trim() || shortId(d.id);
-  // hostname/os are device-supplied (hostname is stored verbatim
-  // at pairing). They land inside the quoted "<label>" we post to the user's
-  // phone, so strip the `"` delimiter plus control/bidi chars — otherwise a
-  // crafted name could forge extra message structure. clip() then collapses
-  // whitespace (so a newline can't split a bullet) and bounds the length.
-  return clip(raw.replace(/["\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, ''), 80);
+  // hostname/os are device-supplied (hostname is stored verbatim at pairing).
+  // They land inside the quoted "<label>" we post to the user's phone, so
+  // sanitizeOutbound strips the `"` delimiter plus control/bidi chars (otherwise
+  // a crafted name could forge extra message structure) and collapses+bounds.
+  return sanitizeOutbound(raw, 80);
 }
 
 /** Build the coalesced "lost connection" iMessage for one or more whole devices

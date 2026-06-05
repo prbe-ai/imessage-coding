@@ -1,15 +1,11 @@
 /**
- * GET /api/home/number — the account's linked, verified phone number, plus
- * whether it has a paired device. The root router treats an account as fully
- * onboarded only when both are true (a number is verified before any device
- * exists), so it can route a confirmed-but-unpaired user to the pair step.
+ * GET /api/home/number — the account's linked, verified phone number.
  */
 
 import { NextResponse } from "next/server";
 
 import { requireAccount } from "@/lib/server-session";
 import { query } from "@/lib/db";
-import { accountHasDevice } from "@/lib/devices";
 import type { LinkedNumberResponse } from "@/lib/api/contracts";
 
 export const dynamic = "force-dynamic";
@@ -25,22 +21,18 @@ export async function GET(req: Request): Promise<Response> {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
-  const [res, hasDevice] = await Promise.all([
-    query<ConversationRow>(
-      `SELECT phone_number, verified_at
-         FROM conversations
-        WHERE account_id = $1
-        ORDER BY verified_at DESC NULLS LAST
-        LIMIT 1`,
-      [ctx.accountId],
-    ),
-    accountHasDevice(ctx.accountId),
-  ]);
+  const res = await query<ConversationRow>(
+    `SELECT phone_number, verified_at
+       FROM conversations
+      WHERE account_id = $1
+      ORDER BY verified_at DESC NULLS LAST
+      LIMIT 1`,
+    [ctx.accountId],
+  );
   const row = res.rows[0];
   const body: LinkedNumberResponse = {
     phoneNumber: row?.phone_number ?? null,
     verified: Boolean(row?.verified_at),
-    hasDevice,
   };
   return NextResponse.json(body, { status: 200 });
 }

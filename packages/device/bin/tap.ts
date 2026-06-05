@@ -286,6 +286,9 @@ function enqueueEvents(events: ActivityEvent[]): void {
     const chunk = events.slice(i, i + MAX_EVENTS_PER_BATCH);
     const body: ActivityBatchBody = { sessionId: SESSION_ID, events: chunk };
     if (CWD) body.cwd = CWD;
+    // Stamp the agent (IMSG_AGENT_KIND) so the route labels the row correctly even
+    // when the tap registers it before the channel server's first heartbeat.
+    body.agent = agentKind();
     enqueue(JSON.stringify(body));
   }
 }

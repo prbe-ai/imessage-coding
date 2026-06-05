@@ -116,6 +116,7 @@ export function isActivityBatchBody(v: unknown): v is ActivityBatchBody {
   if (!isRecord(v)) return false;
   if (!isString(v['sessionId'])) return false;
   if (!isOptString(v['cwd'])) return false;
+  if (v['agent'] !== undefined && !isEnumValue(AgentKind, v['agent'])) return false;
   const events = v['events'];
   return Array.isArray(events) && events.every(isActivityEvent);
 }

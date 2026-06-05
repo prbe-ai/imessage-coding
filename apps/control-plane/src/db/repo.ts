@@ -453,16 +453,22 @@ export async function upsertSession(args: {
   title?: string | undefined;
   state?: SessionState | undefined;
   reviveIfEnded?: boolean | undefined;
-  /** Which coding agent the device reports for this session. Old plugins don't
-   *  send it (and a forged value is untrusted), so an absent/invalid value
-   *  defaults to AgentKind.CLAUDE_CODE — the prior hardcoded behavior. */
+  /** Which coding agent the device reports for this session. A writer that does
+   *  NOT report one (old plugin; or an attention/permission "ensure" write, which
+   *  carries no agent) passes undefined → null, which the SQL treats as "no
+   *  opinion": a brand-new row defaults to AgentKind.CLAUDE_CODE, an existing row
+   *  keeps its value. A writer that DOES report its agent — the heartbeat (every
+   *  ≤10s) and the activity tap — updates it ON CONFLICT. So a Codex session first
+   *  registered by an agent-less writer is no longer FROZEN as claude-code: it
+   *  self-corrects on the next heartbeat (was: stuck forever, since agent used to
+   *  be INSERT-only). A forged/invalid value is dropped to null (untrusted). */
   agent?: AgentKind | undefined;
 }): Promise<SessionInfo> {
-  const agent = isAgentKind(args.agent) ? args.agent : AgentKind.CLAUDE_CODE;
+  const reportedAgent = isAgentKind(args.agent) ? args.agent : null;
   const row = await queryOne<SessionRow>(
     `WITH up AS (
      INSERT INTO sessions (id, device_id, account_id, cwd, title, agent, state, last_event_at)
-     VALUES ($1, $2, $3, $4, $7, $5, COALESCE($6, 'active'), now())
+     VALUES ($1, $2, $3, $4, $7, COALESCE($5, $9), COALESCE($6, 'active'), now())
      ON CONFLICT (id) DO UPDATE
         SET -- Reassign to the current device, and scope the claim by ACCOUNT (not
             -- device). A re-pair on the same machine mints a NEW device_id under
@@ -471,6 +477,11 @@ export async function upsertSession(args: {
             -- device"). The session id is a 128-bit random UUID and the caller is
             -- an authenticated device of the account, so cross-account stays safe.
             device_id     = $2,
+            -- Agent label: a writer that names its agent (a codex/claude heartbeat)
+            -- corrects a row another writer (e.g. the activity tap) created without
+            -- one; a writer that reports nothing ($5 NULL) keeps the stored value.
+            -- This is what stops Codex sessions being frozen as claude-code.
+            agent         = COALESCE($5, sessions.agent),
             cwd           = COALESCE(EXCLUDED.cwd, sessions.cwd),
             -- Title takes the newest non-null value (last-writer-wins): the device
             -- starts with a provisional first-message label and UPGRADES it to
@@ -507,10 +518,11 @@ export async function upsertSession(args: {
       args.deviceId,
       args.accountId,
       args.cwd ?? null,
-      agent,
+      reportedAgent,
       args.state ?? null,
       args.title ?? null,
       args.reviveIfEnded ?? true,
+      AgentKind.CLAUDE_CODE,
     ],
   );
   if (!row) {

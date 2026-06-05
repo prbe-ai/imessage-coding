@@ -15,15 +15,28 @@
 /** The phrase prefixing the onboarding token in the prefilled message body. */
 export const ONBOARDING_GREETING = "hey! this is" as const;
 
-/** Build the prefilled message body for the onboarding deep link. */
-export function onboardingBody(token: string): string {
-  return `${ONBOARDING_GREETING} ${token}`;
+/** Build the prefilled message body for the onboarding deep link.
+ *
+ *  With a name it reads as a self-introduction — "hey! this is Ada (<token>)" —
+ *  so a human glancing at their own outbox sees who it's from rather than a bare
+ *  opaque code. The token is parenthesized so the server can extract it
+ *  unambiguously regardless of the name (see extractOnboardingToken). Falls back
+ *  to the bare-token form when no name is known. */
+export function onboardingBody(token: string, name?: string): string {
+  const who = name?.trim();
+  return who
+    ? `${ONBOARDING_GREETING} ${who} (${token})`
+    : `${ONBOARDING_GREETING} ${token}`;
 }
 
 /** Build the `sms:` deep link. `to` is the agent's E.164 number, or null for a
- *  recipient-less compose. */
-export function smsDeepLink(token: string, to: string | null): string {
-  const body = encodeURIComponent(onboardingBody(token));
+ *  recipient-less compose. `name` personalizes the prefilled body. */
+export function smsDeepLink(
+  token: string,
+  to: string | null,
+  name?: string,
+): string {
+  const body = encodeURIComponent(onboardingBody(token, name));
   const recipient = to ? encodeURIComponent(to) : "";
   return `sms:${recipient}&body=${body}`;
 }

@@ -6,60 +6,27 @@
  * Surfaces the one-line install command with an embedded single-use pairing
  * token (`curl -fsSL …/install.sh | TOKEN=… sh`). The install script exchanges
  * the token at the control plane for a long-lived device_token, enables the
- * Claude Code plugin, and wires up the status line. The token is single-use and
- * short-TTL; "Generate a new command" re-issues and burns the prior one.
+ * Claude Code plugin, and wires up the status line. The install/uninstall UI is
+ * shared (PairDeviceCard / CommandBlock) with the onboarding install step and
+ * the delete-account modal.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Check, Copy, Loader2, RefreshCw, Terminal, Trash2 } from "lucide-react";
-import { toast } from "sonner";
+import { Trash2 } from "lucide-react";
 
 import { useSession } from "@/lib/idp/better-auth-client";
 import { DashboardChrome } from "@/components/dashboard-chrome";
-import { Button } from "@/components/ui/button";
-import { mintPairingToken } from "@/lib/api/integrations";
-import { extractError } from "@/lib/utils";
-
-/**
- * The uninstall one-liner. Unlike install, it carries no pairing token — it's
- * all-local (strip the relay alias, restore settings, unregister the plugin,
- * drop the device token), so it's a constant for this deployment and can render
- * immediately, independent of minting. The dashboard's own public origin serves
- * `/uninstall.sh` (see scripts/copy-install-script.mjs); the base mirrors the
- * server's installBaseUrl() fallback so install + uninstall always agree.
- * `IMSG_AGENT_TARGET=both` matches the install default (install.sh defaults to
- * `both`), so this reverts Claude Code and Codex together — Codex self-skips if
- * it isn't present.
- */
-const UNINSTALL_COMMAND = `curl -fsSL ${(
-  process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"
-).replace(/\/+$/, "")}/uninstall.sh | IMSG_AGENT_TARGET=both sh`;
+import { CommandBlock } from "@/components/command-block";
+import { PairDeviceCard } from "@/components/pair-device-card";
+import { UNINSTALL_COMMAND } from "@/lib/uninstall";
 
 export default function IntegrationsPage() {
   const router = useRouter();
   const { data: session, isPending } = useSession();
-
-  const [installCommand, setInstallCommand] = useState<string | null>(null);
-  const [minting, setMinting] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [copiedUninstall, setCopiedUninstall] = useState(false);
   const bootRef = useRef(false);
 
-  const mint = useCallback(async () => {
-    setMinting(true);
-    try {
-      const res = await mintPairingToken();
-      setInstallCommand(res.installCommand);
-      setCopied(false);
-    } catch (err) {
-      toast.error(extractError(err, "Couldn't generate an install command."));
-    } finally {
-      setMinting(false);
-    }
-  }, []);
-
-  // ── Boot: gate auth, mint the first token. ────────────────────────────
+  // ── Boot: gate auth. ──────────────────────────────────────────────────
   useEffect(() => {
     if (bootRef.current) return;
     if (isPending) return;
@@ -68,27 +35,7 @@ export default function IntegrationsPage() {
       return;
     }
     bootRef.current = true;
-    // Defer the mint kickoff to a microtask so its synchronous setMinting(true)
-    // runs after this effect commits rather than within the effect body (avoids
-    // a cascading-render lint error while still firing on boot).
-    queueMicrotask(() => void mint());
-  }, [session, isPending, router, mint]);
-
-  // Shared copy: write `text`, flash `mark` (the section's copied flag) for 2s,
-  // and toast `label`. Used by both the install and uninstall command boxes.
-  const copyCommand = useCallback(
-    async (text: string, label: string, mark: (v: boolean) => void) => {
-      try {
-        await navigator.clipboard.writeText(text);
-        mark(true);
-        toast.success(label);
-        window.setTimeout(() => mark(false), 2000);
-      } catch {
-        toast.error("Couldn't copy — select and copy manually.");
-      }
-    },
-    [],
-  );
+  }, [session, isPending, router]);
 
   const userEmail = session?.user?.email ?? null;
 
@@ -107,101 +54,15 @@ export default function IntegrationsPage() {
           </p>
         </div>
 
-        <section className="space-y-3">
-          <div className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-outline">
-            <Terminal className="size-3" aria-hidden="true" />
-            Install command
-          </div>
-
-          <div className="relative rounded-lg border border-outline-variant/40 bg-surface-container-low p-4 pr-28">
-            {installCommand ? (
-              <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs leading-relaxed text-on-surface">
-                {installCommand}
-              </pre>
-            ) : (
-              <div className="flex items-center gap-2 text-sm text-on-surface-variant">
-                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                Generating…
-              </div>
-            )}
-            <div className="absolute right-3 top-3">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  if (installCommand)
-                    void copyCommand(
-                      installCommand,
-                      "Copied install command",
-                      setCopied,
-                    );
-                }}
-                disabled={!installCommand}
-              >
-                {copied ? (
-                  <Check className="size-3.5" aria-hidden="true" />
-                ) : (
-                  <Copy className="size-3.5" aria-hidden="true" />
-                )}
-                {copied ? "Copied" : "Copy"}
-              </Button>
-            </div>
-          </div>
-
-          <div className="flex items-center justify-between">
-            <p className="text-xs text-outline">
-              Single-use and short-lived. Re-generate if it expires.
-            </p>
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={() => void mint()}
-              disabled={minting}
-            >
-              <RefreshCw
-                className={`size-3.5${minting ? " animate-spin" : ""}`}
-                aria-hidden="true"
-              />
-              Generate a new command
-            </Button>
-          </div>
-        </section>
+        <PairDeviceCard />
 
         <section className="space-y-3">
-          <div className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-widest text-outline">
-            <Trash2 className="size-3" aria-hidden="true" />
-            Uninstall command
-          </div>
-
-          <div className="relative rounded-lg border border-outline-variant/40 bg-surface-container-low p-4 pr-28">
-            <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs leading-relaxed text-on-surface">
-              {UNINSTALL_COMMAND}
-            </pre>
-            <div className="absolute right-3 top-3">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() =>
-                  void copyCommand(
-                    UNINSTALL_COMMAND,
-                    "Copied uninstall command",
-                    setCopiedUninstall,
-                  )
-                }
-              >
-                {copiedUninstall ? (
-                  <Check className="size-3.5" aria-hidden="true" />
-                ) : (
-                  <Copy className="size-3.5" aria-hidden="true" />
-                )}
-                {copiedUninstall ? "Copied" : "Copy"}
-              </Button>
-            </div>
-          </div>
-
+          <CommandBlock
+            label="Uninstall command"
+            icon={<Trash2 className="size-3" aria-hidden="true" />}
+            command={UNINSTALL_COMMAND}
+            copyToastLabel="Copied uninstall command"
+          />
           <p className="text-xs text-outline">
             Run on a paired machine to revert everything the installer did —
             restores your Claude Code / Codex settings, unregisters the plugin,

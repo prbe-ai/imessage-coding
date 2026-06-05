@@ -2,21 +2,24 @@
 
 /**
  * Top-right account menu. Trigger is the signed-in user's email; the dropdown
- * has a single "Sign out" action that revokes the Better Auth session and
- * bounces to /sign-in. Renders nothing when unauthenticated.
+ * has a "Settings" link and a "Sign out" action that revokes the Better Auth
+ * session and bounces to /sign-in. Renders nothing when unauthenticated.
  */
 
-import { LogOut } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { LogOut, Settings } from "lucide-react";
 
 import { signOut } from "@/lib/idp/better-auth-client";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
 export function AccountMenu({ email }: { email: string | null }) {
+  const router = useRouter();
   if (!email) return null;
   async function onSignOut() {
     await signOut();
@@ -38,6 +41,14 @@ export function AccountMenu({ email }: { email: string | null }) {
         sideOffset={8}
         className="onb-account-menu min-w-44"
       >
+        <DropdownMenuItem
+          onSelect={() => router.push("/settings")}
+          className="onb-account-item cursor-pointer gap-2"
+        >
+          <Settings className="size-4" aria-hidden="true" />
+          <span>Settings</span>
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
         <DropdownMenuItem
           onSelect={onSignOut}
           className="onb-account-item cursor-pointer gap-2"

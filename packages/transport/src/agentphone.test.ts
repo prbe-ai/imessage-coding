@@ -233,6 +233,58 @@ describe('AgentPhoneTransport.parseInbound', () => {
     expect(() => t2.parseInbound('null', 'w')).toThrow();
     expect(() => t2.parseInbound('[]', 'w')).toThrow();
   });
+
+  test('agent.message: data.mediaUrl is surfaced as mediaUrls[]', () => {
+    const body = JSON.stringify({
+      event: 'agent.message',
+      channel: 'mms',
+      data: { from: '+1', message: 'look', mediaUrl: 'https://cdn.example/a.jpg' },
+    });
+    expect(t.parseInbound(body, 'w')?.mediaUrls).toEqual([
+      'https://cdn.example/a.jpg',
+    ]);
+  });
+
+  test('a plural data.mediaUrls array is normalized + deduped with mediaUrl', () => {
+    const body = JSON.stringify({
+      event: 'agent.message',
+      channel: 'mms',
+      data: {
+        from: '+1',
+        message: '',
+        mediaUrl: 'https://cdn.example/a.jpg',
+        // dup of mediaUrl, a fresh url, plus junk entries that must be dropped
+        mediaUrls: ['https://cdn.example/a.jpg', 'https://cdn.example/b.png', '', 7],
+      },
+    });
+    expect(t.parseInbound(body, 'w')?.mediaUrls).toEqual([
+      'https://cdn.example/a.jpg',
+      'https://cdn.example/b.png',
+    ]);
+  });
+
+  test('no media → mediaUrls is omitted (a null mediaUrl is not surfaced)', () => {
+    const body = JSON.stringify({
+      event: 'agent.message',
+      channel: 'imessage',
+      data: { from: '+1', message: 'hi', mediaUrl: null },
+    });
+    expect(t.parseInbound(body, 'w')?.mediaUrls).toBe(undefined);
+  });
+
+  test('a reaction never carries media even if mediaUrl is present', () => {
+    const body = JSON.stringify({
+      event: 'agent.reaction',
+      channel: 'imessage',
+      data: {
+        reactionType: 'like',
+        messageId: 'm',
+        fromNumber: '+1',
+        mediaUrl: 'https://cdn.example/a.jpg',
+      },
+    });
+    expect(t.parseInbound(body, 'w')?.mediaUrls).toBe(undefined);
+  });
 });
 
 describe('extractProviderMessageId', () => {

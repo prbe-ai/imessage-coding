@@ -238,6 +238,15 @@ export interface InboundMessage {
    * X-Webhook-ID isn't in the expected shape.
    */
   providerMessageId?: string;
+  /**
+   * Image attachment URLs from the provider (MMS / iMessage photos), normalized
+   * from the webhook `data.mediaUrl` (and any plural `mediaUrls`). The control
+   * plane fetches + base64-encodes these into the LLM turn — see
+   * orchestrator/media.ts. Only a vision-capable backend (gemini-3.5-flash) can
+   * read them; image turns are routed there regardless of the text default.
+   * Absent/empty when the message carried no media.
+   */
+  mediaUrls?: string[];
 }
 
 /**

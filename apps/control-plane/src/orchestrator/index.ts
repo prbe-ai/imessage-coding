@@ -40,7 +40,7 @@ import {
   type InboundMessage,
   type SessionInfo,
 } from '@imsg/shared';
-import type { Transport } from '@imsg/transport';
+import { AGENTPHONE_DEFAULT_API_BASE, type Transport } from '@imsg/transport';
 import {
   consumeOnboardingTokenAndLinkNumber,
   enqueueReply,
@@ -67,7 +67,9 @@ import {
 import { waitForDelivered } from '../db/listener.ts';
 import { withAccountLease } from '../db/account-lock.ts';
 import { hashToken } from '../auth/device.ts';
-import { runAssistantTurn, type ToolExecutor } from './llm.ts';
+import { loadEnv, LLM_MODEL_GEMINI } from '../env.ts';
+import { runAssistantTurn, type ContentPart, type ToolExecutor } from './llm.ts';
+import { fetchInboundImages } from './media.ts';
 import { assistantTools, buildTurnMessages, type TurnMode } from './prompt.ts';
 import {
   deterministicTarget,
@@ -348,10 +350,39 @@ async function runUserTurn(
       replyTargets,
     });
 
+    // Inbound images (MMS / iMessage photos): fetch the bytes, inline them as
+    // base64 data URIs on the user turn, and route to the vision-capable backend.
+    // Best-effort — a fetch failure just drops that image (see media.ts); a
+    // text-only turn carries no media and skips all of this. Cerebras can't see
+    // images, so any successfully-fetched image forces gemini-3.5-flash.
+    let modelOverride: string | undefined;
+    const mediaUrls = batch.flatMap((m) => m.mediaUrls ?? []);
+    if (mediaUrls.length > 0) {
+      const { agentPhone } = loadEnv();
+      const imageParts = await fetchInboundImages(mediaUrls, {
+        apiKey: agentPhone.apiKey,
+        // Host-gate the API key to AgentPhone's own origin; default when unset.
+        apiBase: agentPhone.apiBase ?? AGENTPHONE_DEFAULT_API_BASE,
+      });
+      const userTurn = messages[messages.length - 1];
+      if (imageParts.length === 0) {
+        // Media was present but nothing fetched cleanly — proceed text-only.
+      } else if (userTurn?.role === 'user' && typeof userTurn.content === 'string') {
+        const parts: ContentPart[] = [{ type: 'text', text: userTurn.content }, ...imageParts];
+        userTurn.content = parts;
+        modelOverride = LLM_MODEL_GEMINI;
+      } else {
+        // Shouldn't happen (buildTurnMessages always ends with a string-content
+        // user turn) — log rather than silently drop fetched images if it ever does.
+        console.warn('[orchestrator] fetched inbound images but the user turn was not attachable; sending text-only');
+      }
+    }
+
     const outcome = await runAssistantTurn({
       messages,
       tools: assistantTools('user_message'),
       user: accountId,
+      ...(modelOverride ? { model: modelOverride } : {}),
       metadata: turnMeta(turnId, TurnTrigger.USER_MESSAGE, accountId),
       signal,
       commit,

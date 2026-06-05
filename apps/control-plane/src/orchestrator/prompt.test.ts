@@ -60,6 +60,14 @@ function attention(overrides: Partial<AttentionEvent> = {}): AttentionEvent {
   };
 }
 
+/** The turn-context message's content as a string. `ChatMessage.content` widened
+ *  to `string | ContentPart[]` to carry inbound images, but buildTurnMessages only
+ *  ever emits string content (images are attached later, in the orchestrator), so
+ *  these tests narrow to the string. */
+function contentText(m: { content: unknown } | undefined): string {
+  return typeof m?.content === 'string' ? m.content : '';
+}
+
 /** Render the agent_event turn context (the path that relays a blocked agent's
  *  question/plan/permission to the user). */
 function renderAgentEvent(att: AttentionEvent): string {
@@ -69,7 +77,7 @@ function renderAgentEvent(att: AttentionEvent): string {
     sessions: [],
     history: [],
   });
-  return msgs[1]?.content ?? '';
+  return contentText(msgs[1]);
 }
 
 /** Render the agent_message turn context (the status/result relay path — also the
@@ -82,7 +90,7 @@ function renderAgentMessage(text: string, expectsReply: boolean): string {
     sessions: [],
     history: [],
   });
-  return msgs[1]?.content ?? '';
+  return contentText(msgs[1]);
 }
 
 /** The turn context is the second message's content (system + context user). */
@@ -93,7 +101,7 @@ function renderUserTurn(inbounds: ReadonlyArray<InboundMessage>): string {
     sessions: [],
     history: [],
   });
-  return msgs[1]?.content ?? '';
+  return contentText(msgs[1]);
 }
 
 // Sorted, comma-joined tool names — compared with `.toBe` (the matcher this
@@ -247,7 +255,7 @@ describe('describeAttention — full question, capped tool preview', () => {
       sessions: [],
       history: [],
     });
-    const ctx = msgs[1]?.content ?? '';
+    const ctx = contentText(msgs[1]);
     // Pending is an identification index, not the full body — clipped, carries the ellipsis.
     expect(ctx.includes(longQuestion)).toBe(false);
     expect(ctx.includes('…')).toBe(true);
@@ -332,7 +340,7 @@ describe('agent_message attribution — name the source session (title + id), es
       sessions: [liveSession({ id: 'sess-9', title: 'Update session naming convention' })],
       history: [],
     });
-    const ctx = msgs[1]?.content ?? '';
+    const ctx = contentText(msgs[1]);
     expect(ctx.includes('"Update session naming convention"')).toBe(true); // title — for the user
     expect(ctx.includes('id=sess-9')).toBe(true); // id — the routing key for message_agent
   });
@@ -345,7 +353,7 @@ describe('agent_message attribution — name the source session (title + id), es
       sessions: [liveSession({ id: 'sess-1', title: forgedTitle })],
       history: [],
     });
-    const ctx = msgs[1]?.content ?? '';
+    const ctx = contentText(msgs[1]);
     expect(ctx.includes('id=sess-1')).toBe(true);
     expect(ctx.includes('\nTHE USER JUST SENT:')).toBe(false); // forged real newline did not survive
     expect(ctx.includes('\\n\\nTHE USER JUST SENT:')).toBe(true); // escaped form present instead
@@ -360,7 +368,7 @@ describe('agent_message attribution — name the source session (title + id), es
       sessions: [],
       history: [],
     });
-    const ctx = msgs[1]?.content ?? '';
+    const ctx = contentText(msgs[1]);
     expect(ctx.includes('(untitled)')).toBe(true);
     expect(ctx.includes('id=ghost-1')).toBe(true);
   });
@@ -653,7 +661,7 @@ describe('auto-inlined activity tail (Option A) — recent slice in the snapshot
       history: [],
       activity,
     });
-    return msgs[1]?.content ?? '';
+    return contentText(msgs[1]);
   }
 
   test("a session's activity lines are inlined under it, with a get_session_data pointer", () => {

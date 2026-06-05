@@ -316,6 +316,48 @@ describe('brevity carve-out — surface the actual decision, not a vague summary
   });
 });
 
+// REGRESSION GUARD for the decision-context gap (the screenshot of bare relays): a
+// surfaced decision arrived with NO background, so the user — away from their keyboard
+// and unable to see the agent's screen — couldn't tell what they were deciding. The
+// prompt now tells the model to LEAD with a short one-line frame (what the agent is
+// working on / why the choice came up), drawn from the recent-activity tail it already
+// has in the snapshot, BEFORE the asks. Locked across all three surfaces so a copy edit
+// can't quietly revert to context-free relays.
+describe('decision context-frame — give the user enough background to choose', () => {
+  test('the system prompt tells the model to frame a decision with context, not just the ask', () => {
+    const sp = systemPrompt('user_message');
+    expect(/one-line frame/i.test(sp)).toBe(true);
+    // It must point the model at the activity tail it already has (no new round-trip).
+    expect(/recent-activity tail/i.test(sp)).toBe(true);
+    // And keep the original "don't drop the substance" carve-out intact.
+    expect(/brevity does\s+NOT mean dropping the substance/i.test(sp)).toBe(true);
+  });
+
+  test('the agent_event surface nudges a one-line frame from recent activity', () => {
+    const ctx = renderAgentEvent(attention({ description: 'merge or rebase?' }));
+    expect(/one-line frame/i.test(ctx)).toBe(true);
+    expect(/recent activity in LIVE AGENTS/i.test(ctx)).toBe(true);
+  });
+
+  test('the agent_message question surface nudges a frame AND keeps the specific-ask rule', () => {
+    const ctx = renderAgentMessage('two-section or merged?', true);
+    expect(/one-line frame/i.test(ctx)).toBe(true);
+    expect(/recent activity in LIVE AGENTS/i.test(ctx)).toBe(true);
+    // The pre-existing "relay each specific ask, never a vague summary" rule survives.
+    expect(/SPECIFIC/.test(ctx)).toBe(true);
+    expect(/EACH one/.test(ctx)).toBe(true);
+    expect(/does that sound right/i.test(ctx)).toBe(true);
+  });
+
+  test('a plain status relay (no expect_reply) is NOT given the decision frame', () => {
+    // The frame is for decisions the user must answer — a fire-and-forget status update
+    // should stay lean and must not pick up the "lead with why you're asking" nudge.
+    const ctx = renderAgentMessage('shipped the fix', false);
+    expect(/one-line frame/i.test(ctx)).toBe(false);
+    expect(ctx.includes('JUST SENT THIS UPDATE')).toBe(true);
+  });
+});
+
 // REGRESSION GUARD for the approve-loop UX: AgentPhone forwards NO link for a typed
 // inline reply, so "reply directly to this message" guidance traps the user in a loop
 // (only a tap-back/reaction points at a specific message). Binding is no longer a hard

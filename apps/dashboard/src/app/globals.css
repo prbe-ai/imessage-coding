@@ -307,44 +307,18 @@
   animation: onb-fade-rise 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .onb-disclosure-text {
-  margin: 0 0 10px;
+  margin: 0;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.9;
   color: var(--onb-slate);
 }
-.onb-disclosure-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
 
-/* "Copy message" pill inside the disclosure. */
-.onb-copy-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-family: var(--font-sans);
-  font-size: 11.5px;
-  font-weight: 500;
-  color: var(--onb-slate);
-  background: var(--onb-bg);
-  border: 1px solid var(--onb-line-strong);
-  border-radius: 6px;
-  padding: 5px 9px;
-  cursor: pointer;
-  transition: color 120ms ease, border-color 120ms ease;
-}
-.onb-copy-btn:hover { color: var(--onb-ink); border-color: var(--onb-ink); }
-.onb-copy-btn svg { width: 13px; height: 13px; }
-.onb-copy-btn--done,
-.onb-copy-btn--done:hover { color: var(--onb-ok); border-color: var(--onb-ok); }
-
-/* Inline copyable agent number inside the disclosure. */
+/* Inline copyable agent number inside the disclosure line. */
 .onb-inline-copy {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  vertical-align: middle;
   font-family: var(--font-jetbrains-mono), ui-monospace, Menlo, monospace;
   font-size: 11px;
   font-weight: 500;

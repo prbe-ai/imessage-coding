@@ -1398,9 +1398,10 @@ export function composeLostConnectionMessage(devices: ReadonlyArray<LostDeviceLa
  * Notify the user that one or more whole DEVICES dropped out while AFK (every
  * session on the machine ended — a laptop closed / slept / crashed / lost
  * network). Driven by the liveness reaper via claimDevicesToNotifyLost, which is
- * already AFK-gated and deduped (each lost device is claimed exactly once, past a
- * debounce grace, re-armed on revival), so this just groups by account, composes,
- * and sends. Coalesced into ONE iMessage per account. Code-generated +
+ * already AFK-gated and hysteresis-deduped (a device texts only when a sustained
+ * recovery is followed by a sustained drop, so flaps collapse to at most one text),
+ * so this just groups by account, composes, and sends. Coalesced into ONE iMessage
+ * per account. Code-generated +
  * deterministic (no LLM turn, no attention row). Best-effort — never throws into
  * the reaper timer.
  */

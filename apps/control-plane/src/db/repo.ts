@@ -499,10 +499,12 @@ export async function upsertSession(args: {
       WHERE sessions.account_id = $3
      RETURNING *
      )
-     -- NOTE: a reconnect no longer clears the device's "lost connection" stamp.
-     -- Re-arming is now time-based (DEVICE_LOST_NOTIFY_COOLDOWN_SECONDS in
-     -- claimDevicesToNotifyLost), so a machine that flaps ended->active->ended
-     -- can't reset the dedup and re-fire a text on its next drop.
+     -- NOTE: the heartbeat path does NOT touch the device's connection-state
+     -- columns (online_since / lost_notified_at). The reaper is the SINGLE writer
+     -- of the online/offline hysteresis state machine (markDevicesOnline stamps the
+     -- streak start, claimDevicesToNotifyLost consumes it on a sustained drop), so a
+     -- machine that flaps ended->active->ended just keeps last_event_at fresh and
+     -- never perturbs the dedup. See claimDevicesToNotifyLost.
      SELECT * FROM up`,
     [
       args.sessionId,
@@ -615,32 +617,34 @@ export async function reapStaleSessions(
 }
 
 /**
- * Extra grace beyond the stale window before a fully-dropped device is ANNOUNCED
- * to the phone. The reaper marks sessions `ended` at SESSION_STALE_SECONDS so the
- * dashboard/orchestrator hide them promptly — but a control-plane deploy bounce, a
- * laptop-sleep blip, or an SSE reconnect makes live sessions miss a few beats, and
- * the very next heartbeat revives them (upsertSession). Announcing the moment a
- * device's last session ends would therefore fire a "lost connection" text on
- * every such flap. We only announce a device whose sessions have ALL stayed dead
- * this much longer, so a transient flap is swallowed silently.
+ * Sustained-OFFLINE window: how long a device's every session must have gone quiet
+ * before the machine is declared "lost" and ANNOUNCED to the phone. This is the
+ * "down" half of the connection hysteresis (markDevicesOnline / online_since are the
+ * "up" half). A control-plane deploy bounce, a laptop-sleep blip, an SSE reconnect,
+ * or a flapping network all make live sessions miss beats and then revive on the
+ * next heartbeat — so we wait out a real outage's worth of silence before alerting.
+ * Crucially, a machine that reconnects even ONCE inside this window is never
+ * declared offline at all (markDevicesOnline keeps its streak), so a laptop that
+ * keeps bouncing back faster than this simply never alerts again. Longer than the
+ * old 45s grace precisely to swallow multi-minute sleep/wifi flaps; the cost is the
+ * genuine "your laptop is gone" text arrives this much after it actually drops. 5
+ * minutes. Tunable.
  */
-export const DEVICE_LOST_NOTIFY_GRACE_SECONDS = 45;
+export const DEVICE_OFFLINE_SUSTAIN_SECONDS = 300;
 
 /**
- * Per-device cooldown between "lost connection" notices. The stale window + grace
- * (above) silently swallows a sub-minute blip; this longer window swallows a
- * MACHINE THAT KEEPS FLAPPING — repeatedly dropping and reconnecting over minutes
- * (unstable network, intermittent sleep, an SSE reconnect-loop). Without it, every
- * reconnect re-arms the dedup and every subsequent drop re-fires the text, so a
- * flaky laptop sends one "lost connection" per flap (the 6-in-33-min case that
- * motivated this). `lost_notified_at` is now the LAST-NOTIFIED time (never cleared
- * on reconnect); a device re-announces only after it has both RECONNECTED since the
- * last notice and stayed quiet again past this window (see claimDevicesToNotifyLost).
- * Net effect: a flapping machine texts at most once per cooldown, a machine that
- * just stays dropped texts exactly once, and a genuine later death (reconnect, work,
- * then quiet hours later) still re-announces. 30 minutes.
+ * Sustained-ONLINE window: how long a device must stay continuously online (since
+ * its `online_since` streak start) before a LATER drop is allowed to alert again.
+ * This is what re-arms the notice after a genuine recovery WITHOUT re-arming on a
+ * flap-blip: a laptop that wakes, beats once or twice, and sleeps again was never
+ * really "back", so its next silence is the SAME outage and must stay silent. Only a
+ * device that came back and held the connection this long, then dropped, counts as a
+ * new outage worth a fresh text. Net effect vs the old per-flap / cooldown behaviour:
+ * a machine flapping all night texts AT MOST ONCE (the first genuine sustained drop),
+ * a machine that just stays dropped texts exactly once, and a real reconnect-work-die
+ * cycle re-announces. 5 minutes. Tunable.
  */
-export const DEVICE_LOST_NOTIFY_COOLDOWN_SECONDS = 1800;
+export const DEVICE_ONLINE_SUSTAIN_SECONDS = 300;
 
 /** A device the reaper is announcing as "lost connection" — all its sessions
  *  dropped. Carries its account (the phone number is per-account) and identity
@@ -670,69 +674,118 @@ export type ClaimRun = (
 ) => Promise<ReadonlyArray<LostDeviceClaimRow>>;
 
 /**
- * Claim the devices whose whole machine dropped out, stamping each exactly-once,
- * and return the subset to ANNOUNCE to the phone. The notice is DEVICE-level, so
- * dedup is keyed on the device, not its sessions — that's the fix for the
- * duplicate "Lost connection with device X" texts: sessions dying in staggered
- * reaper sweeps, or one session flapping ended->active->ended, used to re-fire the
- * device line every sweep.
+ * The "came online" edge of the connection hysteresis: stamp `online_since` (the
+ * start of the current uptime streak) for every device that is beating right now
+ * (a session with a heartbeat inside the stale window) but has no streak recorded.
  *
- * A device is CLAIMED when it is live (not revoked/disabled), it HAS sessions (it
- * was in use), NONE of those sessions is still alive or only recently quiet (every
- * session is `ended` AND last beat older than the stale window + grace, so a flap a
- * heartbeat will revive isn't announced), and it is eligible to (re)announce:
- *   - NEVER announced before (`lost_notified_at IS NULL`), OR
- *   - it RECONNECTED since the last notice (some session beat after lost_notified_at
- *     — any device contact, heartbeat or tap, means the machine came back) AND the
- *     COOLDOWN has elapsed (lost_notified_at older than
- *     DEVICE_LOST_NOTIFY_COOLDOWN_SECONDS).
- * The `UPDATE ... RETURNING` re-stamps `lost_notified_at = now()` as it claims, so
- * across multiple control-plane instances each lost device is surfaced at most once
- * per cooldown window.
+ * Idempotent and stable by design — it only ever writes a NULL `online_since`, so:
+ *   - a continuously-online device keeps its ORIGINAL streak start (we never bump
+ *     it forward on later beats), so the streak measures true uptime;
+ *   - a flap whose offline gap is shorter than DEVICE_OFFLINE_SUSTAIN_SECONDS never
+ *     had its `online_since` cleared (claimDevicesToNotifyLost only clears on a
+ *     SUSTAINED drop), so the brief silence is folded into ONE continuous streak;
+ *   - across instances the lock-time re-check of `online_since IS NULL` means only
+ *     one writer wins, and the value is the same `now()` either way.
  *
- * Both halves matter. The reconnect check is what keeps a machine that just STAYS
- * dropped (laptop closed overnight) from re-firing every cooldown — with no beat
- * after the notice it never re-arms, so it texts exactly once. The cooldown is what
- * rate-limits a machine that keeps FLAPPING (drop->reconnect->drop): each cycle
- * does reconnect, but the window collapses them to at most one text per cooldown
- * instead of one per flap. A genuine later death — reconnect, real work, then quiet
- * again well after the window — satisfies both and re-announces. The stamp is never
- * cleared on reconnect (that old re-arm-on-revival is what re-fired one text per
- * flap); re-arming is derived from last_event_at + the cooldown timer instead.
+ * The reaper is the single writer of `online_since` (the heartbeat path deliberately
+ * does not touch it), so there is no race with upsertSession. Pairs with
+ * claimDevicesToNotifyLost (the "went offline" edge, which consumes the streak).
+ */
+export async function markDevicesOnline(
+  staleSeconds: number = SESSION_STALE_SECONDS,
+  run: ClaimRun = (text, params) => query<LostDeviceClaimRow>(text, params),
+): Promise<void> {
+  await run(
+    `UPDATE devices d
+        SET online_since = now()
+      WHERE d.online_since IS NULL
+        AND d.revoked_at IS NULL
+        AND d.disabled_at IS NULL
+        AND EXISTS (SELECT 1 FROM sessions s
+                     WHERE s.device_id = d.id
+                       AND s.last_event_at >= now() - ($1::int * interval '1 second'))`,
+    [staleSeconds],
+  );
+}
+
+/**
+ * The "went offline" edge of the connection hysteresis: claim every device whose
+ * whole machine has now dropped out, and return the subset to ANNOUNCE to the phone.
+ * The notice is DEVICE-level (it names the machine, not a session), so this is the
+ * single place the "lost connection" text is decided.
  *
- * The AFK gate is applied to ANNOUNCEMENT, not to claiming: we stamp every
- * fully-dropped device but only RETURN (notify) the ones that are afk='on' right
- * now. Stamping the afk='off' ones too is what records their death as handled —
+ * Hysteresis, not a cooldown. A device is processed here exactly when it has an open
+ * uptime streak (`online_since IS NOT NULL`) AND is now SUSTAINED-OFFLINE (no session
+ * has beaten for DEVICE_OFFLINE_SUSTAIN_SECONDS). For each such device we always
+ * CONSUME the streak (`online_since = NULL`) — that's what resets the state machine
+ * so the NEXT outage is judged on a fresh recovery — and we ALERT only when the
+ * streak that just ended was SUSTAINED-ONLINE: some session beat at least
+ * DEVICE_ONLINE_SUSTAIN_SECONDS after `online_since`, i.e. the machine genuinely held
+ * the connection, not a wake-beat-sleep blip. So:
+ *   - a laptop flapping all night → each blip opens a streak that never reaches the
+ *     online-sustain threshold, so every drop consumes-but-stays-silent: ONE text at
+ *     most (the first genuinely sustained drop), then nothing;
+ *   - a machine that just stays dropped → its streak is consumed once and never
+ *     reopened (it never beats again), so it texts exactly once;
+ *   - a real reconnect → work for minutes → die again → a fresh sustained streak,
+ *     so it correctly re-announces.
+ *
+ * Concurrency: the decision (`sustained_online`, afk) is computed in the CTE from the
+ * pre-update `online_since`, but the UPDATE's own WHERE re-checks `online_since IS
+ * NOT NULL` at row-lock time — so if another control-plane instance claimed the same
+ * device first (nulling the streak), this UPDATE matches zero rows and returns it to
+ * nobody. Exactly-once across instances, same guarantee the old single-statement
+ * claim got from its `lost_notified_at IS NULL` re-check.
+ *
+ * The AFK gate is applied to ANNOUNCEMENT, not to claiming: we consume the streak for
+ * EVERY sustained-offline device but only RETURN (notify) the ones that are afk='on'
+ * right now. Consuming the afk='off' ones too is what records their death as handled —
  * otherwise a machine that dropped while the user was AT THE KEYBOARD (afk off,
- * dashboard already showed it) would be eligible to retroactively text the moment
- * AFK is later toggled on. Stamping puts it into cooldown instead, so toggling AFK
- * on does not resurrect an old, already-seen death within the window.
+ * dashboard already showed it) would be eligible to retroactively text the moment AFK
+ * is later toggled on. `lost_notified_at` is no longer load-bearing for gating; it is
+ * kept and stamped on a real alert purely as an observability "last announced" mark.
  */
 export async function claimDevicesToNotifyLost(
-  graceSeconds: number = DEVICE_LOST_NOTIFY_GRACE_SECONDS,
-  staleSeconds: number = SESSION_STALE_SECONDS,
-  cooldownSeconds: number = DEVICE_LOST_NOTIFY_COOLDOWN_SECONDS,
+  offlineSustainSeconds: number = DEVICE_OFFLINE_SUSTAIN_SECONDS,
+  onlineSustainSeconds: number = DEVICE_ONLINE_SUSTAIN_SECONDS,
   run: ClaimRun = (text, params) => query<LostDeviceClaimRow>(text, params),
 ): Promise<LostDevice[]> {
   const rows = await run(
-    `UPDATE devices d
-        SET lost_notified_at = now()
-      WHERE (d.lost_notified_at IS NULL
-             OR (d.lost_notified_at < now() - ($3::int * interval '1 second')
-                 AND EXISTS (SELECT 1 FROM sessions s
-                              WHERE s.device_id = d.id
-                                AND s.last_event_at > d.lost_notified_at)))
-        AND d.revoked_at IS NULL
-        AND d.disabled_at IS NULL
-        AND EXISTS (SELECT 1 FROM sessions s WHERE s.device_id = d.id)
-        AND NOT EXISTS (
-          SELECT 1 FROM sessions s
-           WHERE s.device_id = d.id
-             AND (s.state <> 'ended'
-                  OR s.last_event_at >= now() - (($1::int + $2::int) * interval '1 second'))
-        )
-      RETURNING d.id, d.account_id, d.hostname, d.os, (d.afk = 'on') AS notify`,
-    [graceSeconds, staleSeconds, cooldownSeconds],
+    `WITH offline AS (
+       SELECT d.id,
+              d.account_id,
+              d.hostname,
+              d.os,
+              (d.afk = 'on') AS afk_on,
+              -- SUSTAINED-ONLINE: the streak that is now ending lasted at least the
+              -- online-sustain window (a beat landed >= online_since + window). A
+              -- wake-beat-sleep blip fails this → consumed silently, no text.
+              EXISTS (SELECT 1 FROM sessions s
+                       WHERE s.device_id = d.id
+                         AND s.last_event_at
+                               >= d.online_since + ($2::int * interval '1 second')) AS sustained_online
+         FROM devices d
+        WHERE d.revoked_at IS NULL
+          AND d.disabled_at IS NULL
+          AND d.online_since IS NOT NULL
+          -- SUSTAINED-OFFLINE: not a single session has beaten within the offline
+          -- window, so a flap a heartbeat would revive is NOT yet claimed.
+          AND NOT EXISTS (SELECT 1 FROM sessions s
+                           WHERE s.device_id = d.id
+                             AND s.last_event_at
+                                   >= now() - ($1::int * interval '1 second'))
+     )
+     UPDATE devices d
+        SET online_since = NULL,
+            lost_notified_at = CASE WHEN o.sustained_online THEN now()
+                                    ELSE d.lost_notified_at END
+       FROM offline o
+      WHERE d.id = o.id
+        -- Re-check at row-lock time → only one instance consumes a given streak.
+        AND d.online_since IS NOT NULL
+     RETURNING o.id, o.account_id, o.hostname, o.os,
+               (o.afk_on AND o.sustained_online) AS notify`,
+    [offlineSustainSeconds, onlineSustainSeconds],
   );
   return rows
     .filter((r) => r.notify)

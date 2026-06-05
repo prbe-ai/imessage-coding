@@ -27,9 +27,10 @@
  * pure AFK gate avoids a second source of truth for session state.
  */
 import { writeSync } from 'node:fs';
-import { AfkState } from '@imsg/shared';
-import { migrateLegacyDeviceDir } from '../../src/config.ts';
+import { AfkState, AgentKind } from '@imsg/shared';
+import { isPluginHousekeepingDir, migrateLegacyDeviceDir } from '../../src/config.ts';
 import { readAfk } from '../../src/state.ts';
+import { ensureTap } from '../../src/tap-spawn.ts';
 import { codexMessagedUserThisTurn, shouldBlockStop } from '../../src/codex-hooks.ts';
 
 // Relocate pre-0.1.7 state into ~/.imsg before reading afk.state.
@@ -55,6 +56,17 @@ const stopHookActive = input['stop_hook_active'] === true;
 const transcriptPath =
   typeof input['transcript_path'] === 'string' ? input['transcript_path'] : '';
 const messagedThisTurn = transcriptPath ? codexMessagedUserThisTurn(transcriptPath) : false;
+
+// Keep the tap alive on turn-end too (respawn a crashed tap; cover a session whose
+// rollout only appeared after SessionStart). Idempotent once the tap is healthy.
+const sessionId = typeof input['session_id'] === 'string' ? input['session_id'] : '';
+const cwd =
+  (process.env.CLAUDE_PROJECT_DIR && process.env.CLAUDE_PROJECT_DIR.trim()) ||
+  (typeof input['cwd'] === 'string' ? input['cwd'] : '') ||
+  process.cwd();
+if (sessionId && transcriptPath && !isPluginHousekeepingDir(cwd)) {
+  ensureTap({ sessionId, transcriptPath, cwd, agentKind: AgentKind.CODEX });
+}
 
 if (shouldBlockStop({ afk, stopHookActive, messagedThisTurn })) {
   // writeSync (not process.stdout.write) so the decision is flushed to fd 1

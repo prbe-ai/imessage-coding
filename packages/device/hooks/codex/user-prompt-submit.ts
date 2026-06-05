@@ -17,9 +17,10 @@
  * hook a single-purpose AFK nudge (no second source of truth for session state).
  */
 import { writeSync } from 'node:fs';
-import { AfkState } from '@imsg/shared';
-import { migrateLegacyDeviceDir } from '../../src/config.ts';
+import { AfkState, AgentKind } from '@imsg/shared';
+import { isPluginHousekeepingDir, migrateLegacyDeviceDir } from '../../src/config.ts';
 import { readAfk } from '../../src/state.ts';
+import { ensureTap } from '../../src/tap-spawn.ts';
 
 const USER_PROMPT_SUBMIT = 'UserPromptSubmit';
 
@@ -37,9 +38,28 @@ const AFK_TURN_CONTEXT =
 // Relocate pre-0.1.7 state into ~/.imsg before reading afk.state.
 migrateLegacyDeviceDir();
 
-// We don't need stdin contents, but drain it so the hook doesn't block on a
-// writer holding the pipe open (Codex passes the prompt JSON on stdin).
-await Bun.stdin.text().catch(() => '');
+// Codex passes {session_id, transcript_path, cwd, …} as the prompt JSON on stdin.
+// Parse it to (re)spawn the tap: the rollout file exists by the first
+// UserPromptSubmit even though it didn't at SessionStart, so THIS is where a Codex
+// session that previously captured zero history finally gets its tap. ensureTap is
+// idempotent (a stat) once the tap is alive.
+const raw = await Bun.stdin.text().catch(() => '');
+let input: Record<string, unknown> = {};
+try {
+  input = JSON.parse(raw) as Record<string, unknown>;
+} catch {
+  /* malformed — skip ensureTap; still emit the AFK nudge below */
+}
+const sessionId = typeof input['session_id'] === 'string' ? input['session_id'] : '';
+const transcriptPath =
+  typeof input['transcript_path'] === 'string' ? input['transcript_path'] : '';
+const cwd =
+  (process.env.CLAUDE_PROJECT_DIR && process.env.CLAUDE_PROJECT_DIR.trim()) ||
+  (typeof input['cwd'] === 'string' ? input['cwd'] : '') ||
+  process.cwd();
+if (sessionId && transcriptPath && !isPluginHousekeepingDir(cwd)) {
+  ensureTap({ sessionId, transcriptPath, cwd, agentKind: AgentKind.CODEX });
+}
 
 if (readAfk() === AfkState.ON) {
   writeSync(

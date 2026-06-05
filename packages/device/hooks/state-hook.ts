@@ -25,6 +25,7 @@ import { writeSync } from 'node:fs';
 import { AfkState, AttentionKind } from '@imsg/shared';
 import { migrateLegacyDeviceDir, pickEagerSessionId } from '../src/config.ts';
 import { readAfk } from '../src/state.ts';
+import { ensureTap } from '../src/tap-spawn.ts';
 import { messagedUserThisTurn } from '../src/transcript.ts';
 import { postState } from './state-ping.ts';
 
@@ -61,6 +62,18 @@ const evt = String(input['hook_event_name'] ?? input['hookEventName'] ?? '');
 const sessionId =
   (typeof input['session_id'] === 'string' && input['session_id']) || pickEagerSessionId() || '';
 const afk = readAfk() === AfkState.ON;
+const transcriptPath =
+  typeof input['transcript_path'] === 'string' ? input['transcript_path'] : '';
+const cwd =
+  (process.env.CLAUDE_PROJECT_DIR && process.env.CLAUDE_PROJECT_DIR.trim()) ||
+  (typeof input['cwd'] === 'string' ? input['cwd'] : '') ||
+  process.cwd();
+
+// Keep the tap alive on every turn boundary (UserPromptSubmit + Stop): respawn for
+// a session that was open before a plugin update, or whose detached tap crashed.
+// Cheap (a single stat) when the tap is already healthy, and placed BEFORE the AFK
+// Stop-gate below so a blocked-stop turn still re-ensures the tap.
+if (sessionId && transcriptPath) ensureTap({ sessionId, transcriptPath, cwd });
 
 // Fix A — AFK Stop gate. While AFK, don't let the turn END until the agent has
 // actually reached the user. If it never called message_user this turn, block the
@@ -70,8 +83,6 @@ const afk = readAfk() === AfkState.ON;
 // still working (composing the report).
 if (evt === STOP && afk) {
   const stopHookActive = input['stop_hook_active'] === true;
-  const transcriptPath =
-    typeof input['transcript_path'] === 'string' ? input['transcript_path'] : '';
   const messaged = transcriptPath ? messagedUserThisTurn(transcriptPath) : false;
   if (!messaged && !stopHookActive) {
     // writeSync (not process.stdout.write) so the decision is flushed to fd 1

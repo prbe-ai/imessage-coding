@@ -27,6 +27,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -44,6 +45,7 @@ import {
   deviceApiUrl,
   logDir,
   migrateLegacyDeviceDir,
+  sessionAliveFile,
   sessionCursorFile,
   sessionOutboxFile,
   sessionShutdownFile,
@@ -126,6 +128,17 @@ function writeCursor(c: Cursor): void {
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, JSON.stringify(c), 'utf8');
   renameSync(tmp, path);
+}
+
+/** Touch the liveness sentinel so ensureTap (tap-spawn.ts) can tell this tap is
+ *  alive. Done every loop iteration — including idle/killswitched ones — so the
+ *  signal is "the process is looping", independent of whether it shipped anything. */
+function touchAlive(): void {
+  try {
+    writeFileSync(sessionAliveFile(SESSION_ID), '');
+  } catch {
+    /* best-effort */
+  }
 }
 
 // --- durable per-session outbox (JSONL of un-shipped batches) ----------------
@@ -422,6 +435,7 @@ async function main(): Promise<number> {
 
   while (!shutdownObserved()) {
     tick += 1;
+    touchAlive(); // mark this tap alive for ensureTap's freshness check
 
     // Killswitch (device-level egress, fails OPEN on network error). We still TAIL
     // and advance the cursor when disabled — we just don't ship or drain, so a
@@ -531,4 +545,11 @@ async function sleepResponsive(ms: number): Promise<void> {
 
 const code = await main();
 log('tap_exit', { code });
+// Drop the liveness sentinel so a quick resume's ensureTap respawns instead of
+// seeing a stale-but-recent mtime and assuming this (now-exiting) tap is alive.
+try {
+  rmSync(sessionAliveFile(SESSION_ID), { force: true });
+} catch {
+  /* best-effort */
+}
 process.exit(code);

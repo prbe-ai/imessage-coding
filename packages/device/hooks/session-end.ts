@@ -7,7 +7,12 @@
  * it, which is why the daemon ALSO self-exits via its own lsof orphan check.
  */
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { migrateLegacyDeviceDir, sessionPidFile, sessionShutdownFile } from '../src/config.ts';
+import {
+  migrateLegacyDeviceDir,
+  sessionAliveFile,
+  sessionPidFile,
+  sessionShutdownFile,
+} from '../src/config.ts';
 import { clearHandshakeForProject } from '../src/handshake.ts';
 
 // Relocate pre-0.1.7 state into ~/.imsg before touching session files.
@@ -51,6 +56,14 @@ if (existsSync(pidFile)) {
   } catch {
     /* ignore */
   }
+}
+
+// Drop the liveness sentinel so a same-id resume's ensureTap respawns the tap
+// rather than seeing a recent mtime and assuming the (now-killed) tap is alive.
+try {
+  rmSync(sessionAliveFile(sessionId), { force: true });
+} catch {
+  /* ignore */
 }
 
 // Remove the sentinel — the daemon already got SIGTERM, and leaving it would make

@@ -201,6 +201,16 @@ export function sessionPidFile(sessionId: string): string {
 }
 
 /**
+ * Liveness sentinel: the tap daemon touches it every loop iteration. ensureTap
+ * (tap-spawn.ts) treats a tap as alive iff this file's mtime is recent — a
+ * FRESHNESS check, not a bare pid check, so a crashed tap (or a pid recycled by an
+ * unrelated process) reads as stale and gets respawned by the next hook.
+ */
+export function sessionAliveFile(sessionId: string): string {
+  return join(sessionsDir(), `${sessionId}.alive`);
+}
+
+/**
  * Captured session title (the first user message, sanitized + truncated). The
  * tap daemon writes it once from the transcript; the channel MCP server reads it
  * and forwards it on the heartbeat. A plain local file — NOT egress — so it's

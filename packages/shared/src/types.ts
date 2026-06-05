@@ -225,12 +225,19 @@ export interface InboundMessage {
    */
   reactionTo?: string;
   /**
-   * Per-delivery id (AgentPhone's `X-Webhook-ID`). Unique per inbound message
-   * and stable across the provider's retries — the natural idempotency key,
-   * though nothing dedupes on it yet. Inbound messages carry no body-level id,
-   * so this is the only per-message handle.
+   * Per-delivery id (AgentPhone's `X-Webhook-ID`, e.g. `del_<messageId>_<numberId>`).
+   * Stable across the provider's retries — the idempotency / dedup key. NOT a valid
+   * reply target on its own (passing the whole string 404s); the real message id is
+   * the embedded segment — see `providerMessageId`.
    */
   messageId: string;
+  /**
+   * The provider's REAL message id, parsed from `messageId` (the middle segment of
+   * `del_<messageId>_<numberId>`). A valid `OutboundMessage.replyToMessageId` target,
+   * available race-free at receipt (no conversation lookup). Undefined if the
+   * X-Webhook-ID isn't in the expected shape.
+   */
+  providerMessageId?: string;
 }
 
 /**

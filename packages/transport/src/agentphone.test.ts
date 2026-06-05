@@ -12,7 +12,7 @@
  */
 import { createHmac } from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
-import { AgentPhoneTransport } from './agentphone.ts';
+import { AgentPhoneTransport, extractProviderMessageId } from './agentphone.ts';
 
 const SECRET = 'test-webhook-secret-abc123';
 
@@ -232,6 +232,45 @@ describe('AgentPhoneTransport.parseInbound', () => {
     expect(() => t2.parseInbound('42', 'w')).toThrow();
     expect(() => t2.parseInbound('null', 'w')).toThrow();
     expect(() => t2.parseInbound('[]', 'w')).toThrow();
+  });
+});
+
+describe('extractProviderMessageId', () => {
+  test('pulls the real message id out of a del_<id>_<numberId> webhook id', () => {
+    expect(extractProviderMessageId('del_cmq0ho43a02mx8xzadsqzhrfs_cmpuda5m')).toBe(
+      'cmq0ho43a02mx8xzadsqzhrfs',
+    );
+  });
+
+  test('takes the segment right after del_ even with extra suffix segments', () => {
+    expect(extractProviderMessageId('del_MSG123_num_extra')).toBe('MSG123');
+  });
+
+  test('returns undefined for a non-del shape (caller falls back to a lookup)', () => {
+    expect(extractProviderMessageId('plain-webhook-id')).toBeUndefined();
+    expect(extractProviderMessageId('del_only')).toBeUndefined(); // no suffix segment
+    expect(extractProviderMessageId('')).toBeUndefined();
+    expect(extractProviderMessageId(undefined)).toBeUndefined();
+  });
+});
+
+describe('AgentPhoneTransport.parseInbound — providerMessageId', () => {
+  const t = new AgentPhoneTransport({ webhookSecret: SECRET });
+
+  test('parses the real message id from the X-Webhook-ID', () => {
+    const body = JSON.stringify({
+      event: 'agent.message',
+      channel: 'imessage',
+      data: { from: '+1', message: 'hi', conversationId: 'c1' },
+    });
+    const m = t.parseInbound(body, 'del_realMsgId99_num1');
+    expect(m?.messageId).toBe('del_realMsgId99_num1'); // dedup key unchanged
+    expect(m?.providerMessageId).toBe('realMsgId99'); // real reply target
+  });
+
+  test('leaves providerMessageId undefined for an unexpected webhook-id shape', () => {
+    const body = JSON.stringify({ event: 'agent.message', channel: 'imessage', data: { message: 'hi' } });
+    expect(t.parseInbound(body, 'whk_plain')?.providerMessageId).toBeUndefined();
   });
 });
 

@@ -145,6 +145,23 @@ function extractConversationMessages(
   return [];
 }
 
+/**
+ * Extract AgentPhone's REAL message id from the `X-Webhook-ID` delivery id.
+ * The delivery id has the shape `del_<messageId>_<numberId>` (verified live), so
+ * the message id is the middle segment — a valid `reply_to_message_id` target,
+ * available at receipt with no conversation lookup. A `cm…` message id has no
+ * underscores, so taking the segment right after `del` is unambiguous. Returns
+ * undefined for any other shape so callers fall back to a conversation lookup.
+ */
+export function extractProviderMessageId(
+  webhookId: string | undefined,
+): string | undefined {
+  if (!webhookId) return undefined;
+  const parts = webhookId.split('_');
+  if (parts[0] === 'del' && parts.length >= 3 && parts[1]) return parts[1];
+  return undefined;
+}
+
 export class AgentPhoneTransport implements Transport {
   private readonly apiKey: string | undefined;
   private readonly apiBase: string;
@@ -375,10 +392,10 @@ export class AgentPhoneTransport implements Transport {
    * or `null` when the event is not an actionable message/reaction (the caller
    * should then no-op with a 200, not orchestrate).
    *
-   * `webhookId` is the value of the `X-Webhook-ID` header. AgentPhone gives
-   * inbound messages no body-level id, so this per-delivery id is our stable
-   * per-message handle. It is stable across the provider's retries, so it is the
-   * natural idempotency key — though nothing dedupes on it yet (see callers).
+   * `webhookId` is the value of the `X-Webhook-ID` header (`del_<messageId>_<numberId>`).
+   * Stable across the provider's retries → the idempotency / dedup key. The real
+   * message id is its embedded middle segment — parsed into `providerMessageId` so a
+   * reply can thread under THIS message without a conversation lookup.
    */
   parseInbound(
     rawBody: Buffer | string,
@@ -427,6 +444,13 @@ export class AgentPhoneTransport implements Transport {
       channel,
       messageId: webhookId ?? '',
     };
+
+    // The real message id is embedded in the X-Webhook-ID (`del_<messageId>_…`),
+    // so a reply can thread under THIS message with no conversation lookup/race.
+    const providerMessageId = extractProviderMessageId(webhookId);
+    if (providerMessageId !== undefined) {
+      inbound.providerMessageId = providerMessageId;
+    }
 
     if (data.conversationId !== undefined) {
       inbound.conversationId = data.conversationId;

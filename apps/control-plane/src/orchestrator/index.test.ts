@@ -97,9 +97,16 @@ describe('buildReplyTargets', () => {
     expect(called).toBe(false);
   });
 
-  test('returns [] when the transport lacks the capability', async () => {
+  test('no capability + no webhook id → [] ; no capability + webhook id → current only', async () => {
     const t = fakeTransport(); // no resolveRecentInboundMessages
     expect(await buildReplyTargets(t, inbound({ conversationId: 'c' }))).toEqual([]);
+    // The current message is still targetable from the webhook-embedded id alone.
+    expect(
+      await buildReplyTargets(
+        t,
+        inbound({ conversationId: 'c', text: 'hi', providerMessageId: 'real_cur' }),
+      ),
+    ).toEqual([{ handle: 'u1', id: 'real_cur', text: 'hi' }]);
   });
 
   test('a transport rejection NEVER throws (turn-safety regression guard)', async () => {
@@ -116,6 +123,46 @@ describe('buildReplyTargets', () => {
     ]);
     const targets = await buildReplyTargets(t, inbound({ conversationId: 'c' }));
     expect(targets).toEqual([{ handle: 'u1', id: 'm_real', text: 'hello' }]);
+  });
+
+  test('prepends the current message (webhook-embedded id) as u1 when the lookup lacks it', async () => {
+    const t = fakeTransport(async () => [
+      { id: 'm_old1', text: 'older one' },
+      { id: 'm_old2', text: 'older two' },
+    ]);
+    const targets = await buildReplyTargets(
+      t,
+      inbound({ conversationId: 'c', text: 'just sent', providerMessageId: 'cur_real' }),
+    );
+    expect(targets).toEqual([
+      { handle: 'u1', id: 'cur_real', text: 'just sent' },
+      { handle: 'u2', id: 'm_old1', text: 'older one' },
+      { handle: 'u3', id: 'm_old2', text: 'older two' },
+    ]);
+  });
+
+  test('does NOT duplicate the current message when the lookup already returned it', async () => {
+    const t = fakeTransport(async () => [
+      { id: 'cur_real', text: 'just sent' }, // already indexed by the conversation API
+      { id: 'm_old', text: 'older' },
+    ]);
+    const targets = await buildReplyTargets(
+      t,
+      inbound({ conversationId: 'c', text: 'just sent', providerMessageId: 'cur_real' }),
+    );
+    expect(targets.map((x) => x.id).join(',')).toBe('cur_real,m_old'); // no dup
+  });
+
+  test('on lookup failure, still returns the current message from the webhook id', async () => {
+    const t = fakeTransport(async () => {
+      throw new Error('conversations API down');
+    });
+    expect(
+      await buildReplyTargets(
+        t,
+        inbound({ conversationId: 'c', text: 'hi', providerMessageId: 'cur_real' }),
+      ),
+    ).toEqual([{ handle: 'u1', id: 'cur_real', text: 'hi' }]);
   });
 });
 
@@ -144,6 +191,13 @@ describe('pickDefaultReplyTarget', () => {
     const targets = [{ handle: 'u1', id: 'm1', text: 'something' }];
     expect(pickDefaultReplyTarget(targets, inbound({ text: 'unmatched' }))).toBeUndefined();
     expect(pickDefaultReplyTarget([], inbound({ text: 'x' }))).toBeUndefined();
+  });
+
+  test('prefers the webhook-embedded id over body-matching (race-free, normalization-free)', () => {
+    const targets = [{ handle: 'u1', id: 'from_lookup', text: 'whatever' }];
+    expect(
+      pickDefaultReplyTarget(targets, inbound({ text: 'no match here', providerMessageId: 'real_cur' })),
+    ).toBe('real_cur');
   });
 });
 

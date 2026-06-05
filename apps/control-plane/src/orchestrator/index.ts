@@ -309,8 +309,14 @@ async function runUserTurn(
     ]);
     replyTargets = targets;
     // Default reply threads under the message THIS turn is answering (the burst's
-    // last), matched by text — not merely the newest row in the conversation.
+    // last) — its real id comes race-free from the webhook (providerMessageId).
     defaultReplyId = pickDefaultReplyTarget(targets, last);
+    // One-line diagnostic for the reply-threading path (providerMessageId is the
+    // load-bearing bit; without it the reply can't thread under the current message).
+    console.log(
+      `[assistant] reply-threading: providerMsgId=${last.providerMessageId ? 'parsed' : 'MISSING'} ` +
+        `default=${defaultReplyId ? 'set' : 'none'} handles=${targets.length} webhookId=${last.messageId.slice(0, 28)}`,
+    );
     // Deterministic binding drives the destructive-allow gate (never the model).
     // A tap-back / inline reply in the burst (if any) binds; else the latest text.
     const bindingInbound = [...batch].reverse().find((m) => m.reactionTo) ?? last;
@@ -1174,52 +1180,62 @@ export interface ReplyTarget {
   text: string;
 }
 
+/** Build a `u1`-handle current-message target from the webhook-embedded id, or []. */
+function currentTarget(last: InboundMessage): ReplyTarget[] {
+  return last.providerMessageId && last.text.trim().length > 0
+    ? [{ handle: 'u1', id: last.providerMessageId, text: last.text }]
+    : [];
+}
+
 /**
  * Build the set of recent user messages the model can thread a reply under, each
- * with a stable handle (`u1` = most recent). The webhook carries no message id,
- * so we read them from the conversation. Skips when:
- *   - the transport can't list messages (the capability is optional),
- *   - there's no conversation to search, or
- *   - the inbound is a TAP-BACK (a reaction, not a normal message).
- * Best-effort and SILENT: it never throws (safe to fold into Promise.all) and any
- * miss returns [] → replies fall back to un-threaded.
+ * with a stable handle (`u1` = most recent). The CURRENT message's id comes
+ * race-free from the webhook (`last.providerMessageId`); older messages' ids come
+ * from the conversation lookup. The current message is always prepended (if the
+ * conversation endpoint hasn't indexed it yet, it would otherwise be missing) so
+ * the just-received message is reliably targetable. Skips a TAP-BACK (a reaction,
+ * not a normal message) and a missing conversation. Best-effort and SILENT: never
+ * throws (safe to fold into Promise.all); a total miss returns [] → un-threaded.
  */
 export async function buildReplyTargets(
   transport: Transport,
   last: InboundMessage,
 ): Promise<ReplyTarget[]> {
-  if (!transport.resolveRecentInboundMessages) return [];
   if (!last.conversationId || last.reactionTo) return [];
   try {
-    const msgs = await transport.resolveRecentInboundMessages(
-      last.conversationId,
-      REPLY_TARGET_LIMIT,
-    );
-    return msgs
-      // Skip empty-text rows: they make useless handles, and defend against any
-      // non-message row (e.g. a reaction) ever surfacing on the conversation
-      // endpoint as a bare inbound row.
+    const older = transport.resolveRecentInboundMessages
+      ? await transport.resolveRecentInboundMessages(last.conversationId, REPLY_TARGET_LIMIT)
+      : [];
+    // Skip empty-text rows: useless handles, and a guard against any non-message
+    // row (e.g. a reaction) ever surfacing on the conversation endpoint.
+    const targets = older
       .filter((m) => m.text.trim().length > 0)
+      .map((m) => ({ id: m.id, text: m.text }));
+    // Prepend the current message unless the conversation lookup already has it.
+    const cur = currentTarget(last)[0];
+    if (cur && !targets.some((t) => t.id === cur.id)) targets.unshift(cur);
+    return targets
       .slice(0, REPLY_TARGET_LIMIT)
-      .map((m, i) => ({ handle: `u${i + 1}`, id: m.id, text: m.text }));
+      .map((t, i) => ({ handle: `u${i + 1}`, id: t.id, text: t.text }));
   } catch (err) {
     console.error('[assistant] buildReplyTargets failed', err);
-    return [];
+    // The conversation lookup blew up, but the current message is still
+    // targetable from the webhook-embedded id.
+    return currentTarget(last);
   }
 }
 
 /**
  * The DEFAULT reply target when message_user carries no `reply_to`: the message
- * THIS turn is answering — the burst's `last` — matched by text among the fetched
- * targets (newest match wins). Anchoring to `last`, not merely the newest row in
- * the conversation, keeps the default from threading under a newer message that
- * arrived after this batch was snapshotted (it belongs to a separate, about-to-run
- * turn). No match (e.g. a provider-normalized body) → undefined → un-threaded.
+ * THIS turn is answering (the burst's `last`). Prefer the webhook-embedded real id
+ * (race-free, no body-match) and fall back to matching the message text among the
+ * fetched targets. No id either way → undefined → un-threaded.
  */
 export function pickDefaultReplyTarget(
   targets: ReadonlyArray<ReplyTarget>,
   last: InboundMessage,
 ): string | undefined {
+  if (last.providerMessageId) return last.providerMessageId;
   return targets.find((t) => t.text === last.text)?.id;
 }
 

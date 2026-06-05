@@ -251,12 +251,6 @@ export default function OnboardingPage() {
         leftVisual={
           <StepVisual icon={<MessageSquare />} title={`Welcome, ${firstName}`} />
         }
-        footer={
-          <a className="imsg-blue-btn" href={href}>
-            <MessageSquare aria-hidden="true" />
-            Start texting
-          </a>
-        }
       >
         <p className="onb-confirm-body">
           Link your phone so you can steer Claude Code and Codex from iMessage. Tap the
@@ -266,6 +260,10 @@ export default function OnboardingPage() {
         <div className="onb-cmd" aria-label="Prefilled message">
           <p className="onb-cmd-text">{messageBody}</p>
         </div>
+        <a className="imsg-blue-btn" href={href}>
+          <MessageSquare aria-hidden="true" />
+          Start texting
+        </a>
         {agentNumber && (
           <div className="onb-disclosure">
             <button

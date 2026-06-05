@@ -517,6 +517,14 @@ async function subscribeEvents(): Promise<void> {
               ) {
                 writeAfk(body.afk);
                 log('afk_synced', { afk: body.afk });
+              } else if (isAfkState(body.afk) && readAfkDirty() && body.afk === readAfk()) {
+                // The server already holds our pending toggle (this push came from the
+                // device_state NOTIFY our own reconcile fired). Clear dirty here too,
+                // so a dirty flag can't wedge if the heartbeat echo path is starved
+                // (e.g. egress killswitched) — without it, every later dashboard afk
+                // change would be ignored indefinitely.
+                writeAfkDirty(false);
+                log('afk_sync_confirmed', { afk: body.afk, via: 'sse' });
               }
             }
             // SseEvent.PING (keepalive) + unknown events: ignore.
@@ -606,7 +614,14 @@ async function heartbeatLoop(): Promise<void> {
       else if (dirty && resp.classification === Classification.SUCCESS) {
         try {
           const r = JSON.parse(resp.body) as { afk?: string };
-          if (shouldClearDirty({ wasDirty: dirty, success: true, echoAfk: r.afk, localAfk })) {
+          // Re-read afk NOW: if a concurrent `imsg afk` toggle changed it during this
+          // in-flight beat, it re-set dirty for a NEW value — clearing on this stale
+          // echo would drop that toggle's self-heal. Only clear when local still
+          // equals what we actually asserted. (TOCTOU guard.)
+          if (
+            readAfk() === localAfk &&
+            shouldClearDirty({ wasDirty: dirty, success: true, echoAfk: r.afk, localAfk })
+          ) {
             writeAfkDirty(false);
             log('afk_sync_confirmed', { afk: r.afk });
           }

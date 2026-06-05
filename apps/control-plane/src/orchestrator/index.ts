@@ -82,14 +82,21 @@ const HISTORY_LIMIT = 20;
 const ACTIVITY_INLINE_PER_SESSION = 8;
 
 /** Each live session's recent activity tail, pre-formatted for the snapshot. Only
- *  AFK sessions have activity (wiped on afk-off), so this is empty on a non-AFK turn. */
+ *  AFK sessions have activity (wiped on afk-off), so this is empty on a non-AFK turn.
+ *  RESILIENT: the inline tail is a best-effort convenience (get_session_data is the
+ *  real read path), so a DB hiccup here returns an empty map rather than failing the
+ *  whole orchestrator turn — it rides in the snapshot's Promise.all. */
 async function loadInlineActivity(accountId: string): Promise<Map<string, string[]>> {
-  const raw = await recentActivityForAccount({
-    accountId,
-    perSession: ACTIVITY_INLINE_PER_SESSION,
-  });
   const out = new Map<string, string[]>();
-  for (const [sid, lines] of raw) out.set(sid, lines.map(formatActivityLine));
+  try {
+    const raw = await recentActivityForAccount({
+      accountId,
+      perSession: ACTIVITY_INLINE_PER_SESSION,
+    });
+    for (const [sid, lines] of raw) out.set(sid, lines.map(formatActivityLine));
+  } catch (err) {
+    console.error('[orchestrator] loadInlineActivity failed (continuing without tail)', err);
+  }
   return out;
 }
 

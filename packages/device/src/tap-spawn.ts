@@ -119,45 +119,56 @@ export function ensureTap(opts: {
   /** Injectable spawner (tests); defaults to the real detached spawn. */
   spawnTap?: TapSpawner;
 }): EnsureTapResult {
-  const { sessionId, transcriptPath, cwd, now = Date.now(), spawnTap = realSpawner } = opts;
-  // The byte-offset tailer needs a concrete file; for Codex the rollout often does
-  // not exist yet on the first hook fire — skip quietly and let a later hook retry.
-  if (!sessionId || !transcriptPath || !existsSync(transcriptPath)) return 'skipped';
-  if (!loadToken() || localDisabled()) return 'skipped';
-
-  if (tapAlive(sessionId, now)) return 'alive';
-
-  // (Re)spawn. Clear any stale shutdown sentinel from a prior run of this id.
-  mkdirSync(sessionsDir(), { recursive: true });
+  // BULLETPROOF: ensureTap runs from hooks BEFORE their own load-bearing output
+  // (e.g. the AFK Stop-gate's `{decision:'block'}` writeSync). A synchronous throw
+  // here — most likely spawn() EMFILE/ENOMEM under fd/memory pressure, exactly when
+  // many sessions are open — would crash the hook before that output and silently
+  // un-gate the AFK turn. So NOTHING in this function may propagate: on any error we
+  // log and return 'skipped'.
   try {
-    rmSync(sessionShutdownFile(sessionId), { force: true });
-  } catch {
-    /* ignore */
-  }
+    const { sessionId, transcriptPath, cwd, now = Date.now(), spawnTap = realSpawner } = opts;
+    // The byte-offset tailer needs a concrete file; for Codex the rollout often does
+    // not exist yet on the first hook fire — skip quietly and let a later hook retry.
+    if (!sessionId || !transcriptPath || !existsSync(transcriptPath)) return 'skipped';
+    if (!loadToken() || localDisabled()) return 'skipped';
 
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  if (opts.agentKind === AgentKind.CODEX) env.IMSG_AGENT_KIND = AgentKind.CODEX;
+    if (tapAlive(sessionId, now)) return 'alive';
 
-  const child = spawnTap(sessionId, transcriptPath, cwd, env);
-  child.unref();
+    // (Re)spawn. Clear any stale shutdown sentinel from a prior run of this id.
+    mkdirSync(sessionsDir(), { recursive: true });
+    try {
+      rmSync(sessionShutdownFile(sessionId), { force: true });
+    } catch {
+      /* ignore */
+    }
 
-  // Claim liveness immediately so a near-simultaneous ensureTap (e.g. Stop firing
-  // right after UserPromptSubmit) sees a fresh sentinel and does NOT double-spawn
-  // before the new tap's first loop iteration touches it.
-  try {
-    writeFileSync(sessionAliveFile(sessionId), '');
-  } catch {
-    /* ignore */
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    if (opts.agentKind === AgentKind.CODEX) env.IMSG_AGENT_KIND = AgentKind.CODEX;
+
+    const child = spawnTap(sessionId, transcriptPath, cwd, env);
+    child.unref();
+
+    // Claim liveness immediately so a near-simultaneous ensureTap (e.g. Stop firing
+    // right after UserPromptSubmit) sees a fresh sentinel and does NOT double-spawn
+    // before the new tap's first loop iteration touches it.
+    try {
+      writeFileSync(sessionAliveFile(sessionId), '');
+    } catch {
+      /* ignore */
+    }
+    try {
+      writeFileSync(sessionPidFile(sessionId), String(child.pid ?? ''), 'utf8');
+    } catch {
+      /* ignore */
+    }
+    spawnLog('tap_spawned', {
+      sessionId,
+      pid: child.pid ?? null,
+      agent: opts.agentKind ?? AgentKind.CLAUDE_CODE,
+    });
+    return 'spawned';
+  } catch (err) {
+    spawnLog('ensure_tap_error', { error: err instanceof Error ? err.message : String(err) });
+    return 'skipped';
   }
-  try {
-    writeFileSync(sessionPidFile(sessionId), String(child.pid ?? ''), 'utf8');
-  } catch {
-    /* ignore */
-  }
-  spawnLog('tap_spawned', {
-    sessionId,
-    pid: child.pid ?? null,
-    agent: opts.agentKind ?? AgentKind.CLAUDE_CODE,
-  });
-  return 'spawned';
 }

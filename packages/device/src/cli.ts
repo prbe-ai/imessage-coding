@@ -127,11 +127,14 @@ export async function afk(arg: string): Promise<number> {
     process.stderr.write('usage: imsg afk on|off|toggle\n');
     return 2;
   }
-  writeAfk(next);
-  // Mark dirty BEFORE the POST: if the POST is lost, the flag keeps the heartbeat
-  // re-asserting this toggle up (and blocks a stale down-push from reverting it)
-  // until the cloud confirms. Cleared immediately on a confirmed sync.
+  // Mark dirty BEFORE writing afk: if the process dies mid-toggle, the worst case is
+  // a dirty flag with the OLD afk (the heartbeat re-asserts a value the cloud already
+  // has — a harmless no-op). The reverse order could leave the NEW afk applied but
+  // un-dirty, so a stale server push would silently revert it with no self-heal.
   writeAfkDirty(true);
+  writeAfk(next);
+  // The flag keeps the heartbeat re-asserting this toggle up (and blocks a stale
+  // down-push from reverting it) until the cloud confirms; cleared on a confirmed sync.
   if (await syncState(next)) writeAfkDirty(false);
   process.stdout.write(`afk: ${next}\n`);
   return 0;

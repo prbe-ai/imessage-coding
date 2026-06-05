@@ -61,18 +61,19 @@ const projectDir =
 // record, so carry on — the first UserPromptSubmit recovers it.
 if (!sessionId || !transcriptPath) carryOn();
 
-// Never tap Codex's OWN plugin housekeeping sessions (install / marketplace
-// validation, rooted under ~/.codex/{plugins,marketplaces}/…). Those carry no user
-// prompt, so tapping them just registers titleless dashboard rows.
-if (isPluginHousekeepingDir(projectDir) || isPluginHousekeepingDir(cwdIn)) carryOn();
-
-// 1) Handshake for the MCP server's session-id resolution.
+// 1) Handshake for the MCP server's session-id resolution — written UNconditionally
+// (as before), so the housekeeping gate below scopes only the tap, not id resolution.
 try {
   writeHandshake({ sessionId, transcriptPath, cwd: projectDir, at: new Date().toISOString() });
 } catch {
   /* best-effort */
 }
 
-// 2) Spawn (or confirm) the tap daemon on the Codex branch.
+// 2) Never tap Codex's OWN plugin housekeeping sessions (install / marketplace
+// validation, rooted under ~/.codex/{plugins,marketplaces}/…). Those carry no user
+// prompt, so tapping them just registers titleless dashboard rows.
+if (isPluginHousekeepingDir(projectDir) || isPluginHousekeepingDir(cwdIn)) carryOn();
+
+// 3) Spawn (or confirm) the tap daemon on the Codex branch.
 ensureTap({ sessionId, transcriptPath, cwd: projectDir, agentKind: AgentKind.CODEX });
 carryOn();

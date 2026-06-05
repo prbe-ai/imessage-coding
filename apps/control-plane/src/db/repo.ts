@@ -961,7 +961,14 @@ export async function getSessionActivity(args: {
   const grep = args.grep && args.grep.trim() ? args.grep.trim() : undefined;
 
   const params: unknown[] = [args.sessionId, args.accountId];
-  const where: string[] = ['session_id = $1', 'account_id = $2'];
+  const where: string[] = [
+    'session_id = $1',
+    'account_id = $2',
+    // AFK-only exposure: the orchestrator reads a session's log ONLY while its device
+    // is AFK (it's wiped on afk-off). Gate at the read so an orphan row that escaped
+    // the wipe is never surfaced; correlated EXISTS keeps the bare column names valid.
+    "EXISTS (SELECT 1 FROM devices d WHERE d.id = session_activity.device_id AND d.afk = 'on')",
+  ];
 
   if (grep) {
     params.push(`%${grep}%`);
@@ -1027,7 +1034,11 @@ export async function recentActivityForAccount(args: {
                                    ORDER BY sa.line_no DESC, sa.block_idx DESC) AS rn
            FROM session_activity sa
            JOIN sessions s ON s.id = sa.session_id
-          WHERE sa.account_id = $1 AND s.state <> 'ended'
+           JOIN devices  d ON d.id = sa.device_id
+          -- AFK-only exposure: read activity ONLY while the device is AFK. Defense at
+          -- the READ enforces the invariant even if a row escaped the afk-off wipe
+          -- (e.g. an insert that committed just after the wipe's DELETE scanned).
+          WHERE sa.account_id = $1 AND s.state <> 'ended' AND d.afk = 'on'
        ) t
       WHERE rn <= $2
       ORDER BY session_id, line_no ASC, block_idx ASC`,

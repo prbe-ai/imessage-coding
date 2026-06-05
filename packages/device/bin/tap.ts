@@ -56,6 +56,7 @@ import {
   sessionAliveFile,
   sessionCursorFile,
   sessionOutboxFile,
+  sessionPidFile,
   sessionShutdownFile,
   sessionTitleFile,
   sessionsDir,
@@ -148,6 +149,24 @@ function touchAlive(): void {
     writeFileSync(sessionAliveFile(SESSION_ID), '');
   } catch {
     /* best-effort */
+  }
+}
+
+// Single-instance guard. The freshness sentinel leaves a tiny window where two
+// concurrent ensureTap fires can both spawn a tap for one session; two taps sharing
+// this session's append-only outbox + cursor would let one's full-file writeOutbox()
+// truncate a batch the other just appended (lost activity). So "newest pid wins":
+// each tap claims the pidfile at startup, and a tap whose pid is no longer the one on
+// disk yields. ensureTap writes the SAME pid (the child's) it spawned, so a single
+// tap never trips this — only a later concurrent spawn does, bounding coexistence to
+// one tick.
+const MY_PID = String(process.pid);
+function ownsSession(): boolean {
+  try {
+    const p = readFileSync(sessionPidFile(SESSION_ID), 'utf8').trim();
+    return p === '' || p === MY_PID; // empty/not-yet-written → assume ours
+  } catch {
+    return true; // no pidfile → ours
   }
 }
 
@@ -422,7 +441,13 @@ async function main(): Promise<number> {
     log('no_token', { hint: 'device not paired' });
     return 0;
   }
-  log('tap_start', { transcript: TRANSCRIPT, cwd: CWD });
+  log('tap_start', { transcript: TRANSCRIPT, cwd: CWD, pid: MY_PID });
+  // Claim the session: the newest tap's pid on disk is the survivor (see ownsSession).
+  try {
+    writeFileSync(sessionPidFile(SESSION_ID), MY_PID, 'utf8');
+  } catch {
+    /* best-effort — ensureTap also wrote it */
+  }
 
   // One-time title seed: scan the existing transcript from the top so a tap that
   // (re)starts mid-session recovers CC's already-written ai-title/custom-title —
@@ -448,6 +473,12 @@ async function main(): Promise<number> {
 
   while (!shutdownObserved()) {
     tick += 1;
+    // Yield if a newer tap claimed this session (concurrent double-spawn) — two taps
+    // must never share the outbox/cursor. The survivor's pid is the one on disk.
+    if (!ownsSession()) {
+      log('superseded_exit', { my_pid: MY_PID });
+      return 0;
+    }
     touchAlive(); // mark this tap alive for ensureTap's freshness check
 
     // Killswitch (device-level egress, fails OPEN on network error). We still TAIL

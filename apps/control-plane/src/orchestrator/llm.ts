@@ -61,8 +61,19 @@ interface ChatCompletionResponse {
   }>;
 }
 
-/** Per-round network timeout (each model call within a turn). */
-const REQUEST_TIMEOUT_MS = 20_000;
+/** Per-round network timeout (each model call within a turn). gpt-oss-120b is a
+ *  reasoning model whose tail latency occasionally runs past the old 20s cap; a
+ *  slow-but-healthy response was then aborted and surfaced to the user as the
+ *  fail-closed "trouble reaching my brain" clarify (observed failures clustered at
+ *  24-26s). 110s gives the reasoning tail ample room.
+ *
+ *  CEILING: this MUST stay below LEASE_TTL_SECONDS (120s, account-lock.ts). The
+ *  per-account cross-machine lease is a NON-renewed TTL row; a turn that holds it
+ *  past the TTL lets another Fly machine steal the lease and double-act the same
+ *  account. A single round capped under the TTL cannot breach it. Raising this at
+ *  or above 120s requires raising the lease TTL + acquire window, or adding lease
+ *  renewal — do not bump it in isolation. */
+const REQUEST_TIMEOUT_MS = 110_000;
 /** Sanity cap on tool-call rounds per turn (runaway guard, not a tight budget). */
 const MAX_ROUNDS = 8;
 /**

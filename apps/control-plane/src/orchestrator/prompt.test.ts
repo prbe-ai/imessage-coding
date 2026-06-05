@@ -522,3 +522,35 @@ describe("who-you're-texting profile block", () => {
     expect(String(system?.content).includes('email: jane@example.com')).toBe(true);
   });
 });
+
+describe('auto-inlined activity tail (Option A) — recent slice in the snapshot', () => {
+  function renderWithActivity(activity?: ReadonlyMap<string, ReadonlyArray<string>>): string {
+    const msgs = buildTurnMessages({
+      trigger: { kind: 'user_message', inbounds: [inbound()] },
+      pending: [],
+      sessions: [liveSession({ id: 'sess-1', afk: AfkState.ON })],
+      history: [],
+      activity,
+    });
+    return msgs[1]?.content ?? '';
+  }
+
+  test("a session's activity lines are inlined under it, with a get_session_data pointer", () => {
+    const ctx = renderWithActivity(
+      new Map([['sess-1', ['[10] user: fix the build', '[11] tool Bash: bun test']]]),
+    );
+    expect(ctx.includes('[10] user: fix the build')).toBe(true);
+    expect(ctx.includes('[11] tool Bash: bun test')).toBe(true);
+    expect(/recent \(oldest→newest; full log via get_session_data\)/.test(ctx)).toBe(true);
+  });
+
+  test('no activity map (or empty) → no tail rendered (lean snapshot preserved)', () => {
+    expect(renderWithActivity(undefined).includes('recent (oldest')).toBe(false);
+    expect(renderWithActivity(new Map()).includes('recent (oldest')).toBe(false);
+  });
+
+  test('a session absent from the map gets no tail', () => {
+    const ctx = renderWithActivity(new Map([['other-session', ['[1] user: hi']]]));
+    expect(ctx.includes('[1] user: hi')).toBe(false);
+  });
+});

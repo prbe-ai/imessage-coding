@@ -439,17 +439,19 @@ function agentLabel(agent: AgentKind): string {
   return AGENT_LABELS[agent] ?? agent;
 }
 
-/** Render the live snapshot + trigger as the first user message of the turn. The
- *  snapshot is deliberately LEAN — a compact pending + agent list and the recent
- *  thread; per-session activity detail lives behind get_session_data so the model
- *  fetches it on demand instead of being handed (and tempted to dump) a wall. */
+/** Render the live snapshot + trigger as the first user message of the turn. Each
+ *  AFK session carries a SHORT recent-activity tail (auto-inlined so the model has
+ *  context without a get_session_data round-trip); the full log still lives behind
+ *  that tool, so a deeper read never hands the model (or tempts it to dump) a wall.
+ *  `activity` maps session id → pre-formatted lines, oldest→newest. */
 function turnContext(args: {
   trigger: TurnTrigger;
   pending: ReadonlyArray<AttentionEvent>;
   sessions: ReadonlyArray<SessionInfo>;
   history: ReadonlyArray<{ direction: string; body: string }>;
+  activity?: ReadonlyMap<string, ReadonlyArray<string>>;
 }): string {
-  const { trigger, pending, sessions, history } = args;
+  const { trigger, pending, sessions, history, activity } = args;
   const lines: string[] = [];
 
   // Title+id together for every session we name. The id is the message_agent routing key
@@ -482,8 +484,15 @@ function turnContext(args: {
         `  - ${s.title ? JSON.stringify(truncate(s.title, 80)) : '(untitled)'}` +
           ` [${agentLabel(s.agent)}, ${s.state}, afk=${s.afk}] id=${s.id}`,
       );
+      // Auto-inlined recent activity tail (AFK sessions only — it's wiped on
+      // afk-off). The full, searchable log is still behind get_session_data.
+      const tail = activity?.get(s.id);
+      if (tail && tail.length > 0) {
+        lines.push('      recent (oldest→newest; full log via get_session_data):');
+        for (const a of tail) lines.push(`        ${a}`);
+      }
     }
-  lines.push('  (For what an agent is doing or to search its log, call get_session_data.)');
+  lines.push('  (For the full/searchable log of any agent, call get_session_data.)');
 
   lines.push('', 'RECENT THREAD (most recent last):');
   const ordered = [...history].reverse();
@@ -588,6 +597,7 @@ export function buildTurnMessages(args: {
   sessions: ReadonlyArray<SessionInfo>;
   history: ReadonlyArray<{ direction: string; body: string }>;
   profile?: UserProfile;
+  activity?: ReadonlyMap<string, ReadonlyArray<string>>;
 }): ChatMessage[] {
   return [
     { role: 'system', content: systemPrompt(args.trigger.kind, args.profile) },

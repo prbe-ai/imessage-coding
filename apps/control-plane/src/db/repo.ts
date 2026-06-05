@@ -1005,6 +1005,44 @@ export async function getSessionActivity(args: {
   }));
 }
 
+/**
+ * Most-recent `perSession` activity lines for EACH of an account's live sessions,
+ * grouped by session (oldest-first within each). Powers the orchestrator's
+ * auto-inlined snapshot tail — the model gets immediate "what's this agent doing"
+ * context without a get_session_data round-trip (which stays for deeper reads).
+ *
+ * Only AFK sessions have activity (it's wiped on afk-off), so a turn while nothing
+ * is AFK returns an empty map from one cheap windowed query.
+ */
+export async function recentActivityForAccount(args: {
+  accountId: string;
+  perSession: number;
+}): Promise<Map<string, SessionActivityLine[]>> {
+  const perSession = Math.min(Math.max(1, Math.floor(args.perSession)), SESSION_DATA_MAX_ROWS);
+  const rows = await query<SessionActivityRow & { session_id: string }>(
+    `SELECT session_id, line_no, block_idx, kind, tool_name, summary, body, is_error, created_at
+       FROM (
+         SELECT sa.*,
+                ROW_NUMBER() OVER (PARTITION BY sa.session_id
+                                   ORDER BY sa.line_no DESC, sa.block_idx DESC) AS rn
+           FROM session_activity sa
+           JOIN sessions s ON s.id = sa.session_id
+          WHERE sa.account_id = $1 AND s.state <> 'ended'
+       ) t
+      WHERE rn <= $2
+      ORDER BY session_id, line_no ASC, block_idx ASC`,
+    [args.accountId, perSession],
+  );
+  const out = new Map<string, SessionActivityLine[]>();
+  for (const r of rows) {
+    const line: SessionActivityLine = { ...toSessionActivity(r), lineNo: r.line_no, blockIdx: r.block_idx };
+    const arr = out.get(r.session_id);
+    if (arr) arr.push(line);
+    else out.set(r.session_id, [line]);
+  }
+  return out;
+}
+
 // --- attention events ---------------------------------------------------------
 
 /** Insert a device-reported attention event (account/device/session scoped). */

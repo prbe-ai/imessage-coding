@@ -55,6 +55,7 @@ import {
   listLiveSessionsForAccount,
   listPendingAttentionForAccount,
   logMessage,
+  recentActivityForAccount,
   recentMessages,
   resolveAttention,
   setAttentionNotifyMessageId,
@@ -75,6 +76,22 @@ import {
 } from './safety.ts';
 
 const HISTORY_LIMIT = 20;
+/** Per-session activity lines auto-inlined into the turn snapshot (Option A: hand
+ *  the orchestrator the recent slice so it has context without a get_session_data
+ *  round-trip). Kept small — deeper reads still go through the tool. */
+const ACTIVITY_INLINE_PER_SESSION = 8;
+
+/** Each live session's recent activity tail, pre-formatted for the snapshot. Only
+ *  AFK sessions have activity (wiped on afk-off), so this is empty on a non-AFK turn. */
+async function loadInlineActivity(accountId: string): Promise<Map<string, string[]>> {
+  const raw = await recentActivityForAccount({
+    accountId,
+    perSession: ACTIVITY_INLINE_PER_SESSION,
+  });
+  const out = new Map<string, string[]>();
+  for (const [sid, lines] of raw) out.set(sid, lines.map(formatActivityLine));
+  return out;
+}
 
 // Delivery-watch timing. A healthy device ACKs sub-second; everything below is
 // about NOT crying wolf when the gap is transient (a control-plane redeploy, a
@@ -269,7 +286,7 @@ async function runUserTurn(
   try {
     // (Inbound messages are logged once on receipt in orchestrate, NOT here —
     //  re-running an interrupted batch must not double-log them.)
-    const [pending, sessions, history, profile, resolvedReplyId] = await Promise.all([
+    const [pending, sessions, history, profile, resolvedReplyId, activity] = await Promise.all([
       listPendingAttentionForAccount(accountId),
       listLiveSessionsForAccount(accountId),
       recentMessages({ accountId, limit: HISTORY_LIMIT }),
@@ -280,6 +297,7 @@ async function runUserTurn(
       // never rejects, so folding it into Promise.all can't fail the turn — a
       // threading nicety must never take down a reply.
       resolveReplyTarget(transport, last),
+      loadInlineActivity(accountId),
     ]);
     replyTargetId = resolvedReplyId;
     // Deterministic binding drives the destructive-allow gate (never the model).
@@ -308,6 +326,7 @@ async function runUserTurn(
       sessions,
       history,
       profile,
+      activity,
     });
 
     const outcome = await runAssistantTurn({
@@ -429,11 +448,12 @@ async function runAgentEventTurnLocked(
   let toolCalls: number | undefined;
   let errMsg: string | undefined;
   try {
-    const [pending, sessions, history, profile] = await Promise.all([
+    const [pending, sessions, history, profile, activity] = await Promise.all([
       listPendingAttentionForAccount(accountId),
       listLiveSessionsForAccount(accountId),
       recentMessages({ accountId, limit: HISTORY_LIMIT }),
       getUserProfile(accountId),
+      loadInlineActivity(accountId),
     ]);
     const actions: string[] = [];
     const ctx: DispatchCtx = {
@@ -454,6 +474,7 @@ async function runAgentEventTurnLocked(
       sessions,
       history,
       profile,
+      activity,
     });
     const outcome = await runAssistantTurn({
       messages,
@@ -540,11 +561,12 @@ async function relayAgentMessageLocked(
   let toolCalls: number | undefined;
   let errMsg: string | undefined;
   try {
-    const [pending, sessions, history, profile] = await Promise.all([
+    const [pending, sessions, history, profile, activity] = await Promise.all([
       listPendingAttentionForAccount(accountId),
       listLiveSessionsForAccount(accountId),
       recentMessages({ accountId, limit: HISTORY_LIMIT }),
       getUserProfile(accountId),
+      loadInlineActivity(accountId),
     ]);
     const actions: string[] = [];
     const ctx: DispatchCtx = {
@@ -568,6 +590,7 @@ async function relayAgentMessageLocked(
       sessions,
       history,
       profile,
+      activity,
     });
     const outcome = await runAssistantTurn({
       messages,

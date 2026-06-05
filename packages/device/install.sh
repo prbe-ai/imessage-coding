@@ -225,6 +225,27 @@ rewrite_plugin_root() {
   ' "$file"
 }
 
+# Text counterpart to rewrite_plugin_root for NON-JSON files. The Codex /afk
+# command is a prompt that asks the agent to run
+# `bun ${CLAUDE_PLUGIN_ROOT}/bin/imsg.ts afk toggle`; ${CLAUDE_PLUGIN_ROOT} is a
+# Claude Code variable that Codex does NOT substitute in a command body, so the
+# agent runs a dangling path and the toggle silently fails (the user can't leave
+# AFK from Codex). Bake the absolute plugin root into the markdown — same
+# rationale as the hooks rewrite, but a plain string-replace since the file isn't
+# JSON. Same space-free path assumption as rewrite_plugin_root.
+rewrite_plugin_root_text() {
+  file="$1"
+  root="$2"
+  [ -f "$file" ] || return 0
+  PLUGIN_ROOT_ABS="$root" "$BUN" -e '
+    const fs = require("fs");
+    const f = process.argv[1];
+    const root = process.env.PLUGIN_ROOT_ABS;
+    const s = fs.readFileSync(f, "utf8").split("${CLAUDE_PLUGIN_ROOT}").join(root);
+    fs.writeFileSync(f, s);
+  ' "$file"
+}
+
 # =============================================================================
 # Shared: bake the control-plane URL into a staged plugin dir (build-config.json)
 # for LOCAL/checkout installs. The SERVED tarball already carries this file
@@ -542,7 +563,10 @@ install_for_codex() {
   #    plugin from), not the version-pinned ~/.codex/plugins/cache snapshot; verified
   #    on codex 0.137.0 that hooks execute from the marketplace dir.
   rewrite_plugin_root "$CODEX_PLUGIN_DIR/hooks/hooks.json" "$CODEX_PLUGIN_DIR"
-  say "rewrote bun -> absolute + baked absolute plugin root into Codex hooks.json; bun -> absolute in .mcp.codex.json"
+  # Same placeholder problem in the /afk command body — bake it absolute so the
+  # agent can actually run the toggle CLI under Codex (text file, not JSON).
+  rewrite_plugin_root_text "$CODEX_PLUGIN_DIR/commands/afk.md" "$CODEX_PLUGIN_DIR"
+  say "rewrote bun -> absolute + baked absolute plugin root into Codex hooks.json + commands/afk.md; bun -> absolute in .mcp.codex.json"
 
   # --- register the marketplace, then INSTALL the plugin ----------------------
   # `codex plugin marketplace add <local-dir>` writes [marketplaces.*]; the

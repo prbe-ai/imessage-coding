@@ -16,7 +16,6 @@ type ClaimRow = {
   account_id: string;
   hostname: string | null;
   os: string | null;
-  notify: boolean;
 };
 function recordingRun(rows: ReadonlyArray<ClaimRow>): {
   run: ClaimRun;
@@ -66,40 +65,22 @@ describe('claimDevicesToNotifyLost — conversation-relock wiring + afk gate', (
     expect(sql.includes("m.direction = 'inbound'")).toBe(true);
     expect(sql.includes('message_log m')).toBe(true);
     expect(sql.includes('m.account_id = d.account_id')).toBe(true);
-    // afk gate is on the RETURN, not the claim.
-    expect(sql.includes("(d.afk = 'on') AS notify")).toBe(true);
+    // AFK is the single gate, applied in the CLAIM (not a RETURNING flag).
+    expect(sql.includes("d.afk = 'on'")).toBe(true);
+    expect(sql.includes('AS notify')).toBe(false);
   });
 
-  test('only afk=on devices are RETURNED (afk=off are locked-but-silent)', async () => {
+  test('maps every returned (already afk-gated) row → LostDevice', async () => {
     const { run } = recordingRun([
-      {
-        id: 'd-afk-on',
-        account_id: 'acct-1',
-        hostname: 'Manavs-MacBook-Pro.local',
-        os: 'darwin',
-        notify: true,
-      },
-      {
-        id: 'd-afk-off',
-        account_id: 'acct-2',
-        hostname: 'At-Keyboard.local',
-        os: 'darwin',
-        notify: false,
-      },
+      { id: 'd1', account_id: 'a1', hostname: 'h1', os: 'o1' },
+      { id: 'd2', account_id: 'a2', hostname: 'h2', os: 'o2' },
     ]);
     const out = await claimDevicesToNotifyLost(undefined, undefined, run);
     expect(out).toEqual([
-      { id: 'd-afk-on', accountId: 'acct-1', hostname: 'Manavs-MacBook-Pro.local', os: 'darwin' },
+      { id: 'd1', accountId: 'a1', hostname: 'h1', os: 'o1' },
+      { id: 'd2', accountId: 'a2', hostname: 'h2', os: 'o2' },
     ]);
-  });
-
-  test('maps snake_case row → LostDevice and drops the notify flag', async () => {
-    const { run } = recordingRun([
-      { id: 'd1', account_id: 'a1', hostname: 'h1', os: 'o1', notify: true },
-    ]);
-    const out = await claimDevicesToNotifyLost(undefined, undefined, run);
-    expect(out).toEqual([{ id: 'd1', accountId: 'a1', hostname: 'h1', os: 'o1' }]);
-    // Exact key set proves the snake_case `account_id` and the `notify` flag are dropped.
+    // Exact key set proves the snake_case `account_id` is remapped.
     expect(Object.keys(out[0]!)).toEqual(['id', 'accountId', 'hostname', 'os']);
   });
 

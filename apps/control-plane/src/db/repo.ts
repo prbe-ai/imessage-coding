@@ -653,24 +653,22 @@ interface LostDeviceClaimRow {
   account_id: string;
   hostname: string | null;
   os: string | null;
-  notify: boolean;
 }
 
-/** The DB executor the claim runs through. Injectable so the afk-filter + mapping
- *  (the JS half of the claim) is unit-testable without a live Postgres; defaults to
- *  the real pool `query`. Mirrors the `run` seam in account-lock.ts. */
+/** The DB executor the claim runs through. Injectable so the row mapping (the JS
+ *  half of the claim) is unit-testable without a live Postgres; defaults to the
+ *  real pool `query`. Mirrors the `run` seam in account-lock.ts. */
 export type ClaimRun = (
   text: string,
   params: ReadonlyArray<unknown>,
 ) => Promise<ReadonlyArray<LostDeviceClaimRow>>;
 
 /**
- * Claim every device whose whole machine has dropped out and is DUE a "lost
- * connection" text, stamp it as notified, and return the afk='on' subset to announce.
- * The notice is DEVICE-level (it names the machine, not a session), so dedup is keyed
- * on the device. `lost_notified_at` is the LOCK — the last time we texted (or silently
- * "handled" an afk-off drop) — and the gate is CONVERSATION-RELOCK, not a cooldown
- * timer or a heartbeat streak:
+ * Claim every afk='on' device whose whole machine has dropped out and is DUE a "lost
+ * connection" text, stamp it as notified, and return it to announce. The notice is
+ * DEVICE-level (it names the machine, not a session), so dedup is keyed on the device.
+ * `lost_notified_at` is the LOCK — the last time we texted it — and the gate is
+ * CONVERSATION-RELOCK, not a cooldown timer or a heartbeat streak:
  *
  *   A device is DUE when it is OFFLINE (no session has beaten for the debounce
  *   DEVICE_OFFLINE_NOTIFY_SECONDS), it was in use (has sessions), and it is ARMED:
@@ -701,10 +699,13 @@ export type ClaimRun = (
  * re-checked at row-lock time, so once one instance stamps now(), the inbound that
  * armed it is no longer newer than the stamp and the other instance claims zero rows.
  *
- * The AFK gate is applied to ANNOUNCEMENT, not to claiming: we stamp (lock) every due
- * device but only RETURN the afk='on' ones. Locking the afk='off' ones too records
- * their death as handled, so a machine that dropped while the user was AT THE KEYBOARD
- * (afk off, dashboard already showed it) can't retroactively text when AFK toggles on.
+ * AFK is the single gate (`d.afk = 'on'`): afk is the device's last-known machine state
+ * and persists across a disconnect, so it distinguishes "you were driving this remotely
+ * when it dropped" (afk on → notify) from "you were AT THE KEYBOARD when it dropped"
+ * (afk off → ignored entirely, no claim, no lock). We deliberately do NOT silently lock
+ * afk='off' drops: if you later flip a still-offline device to afk='on' (e.g. from the
+ * dashboard, planning to drive it remotely), it then surfaces as lost — which is useful
+ * ("the host you're about to drive is offline"), not stale spam.
  */
 export async function claimDevicesToNotifyLost(
   offlineSeconds: number = DEVICE_OFFLINE_NOTIFY_SECONDS,
@@ -716,6 +717,10 @@ export async function claimDevicesToNotifyLost(
         SET lost_notified_at = now()
       WHERE d.revoked_at IS NULL
         AND d.disabled_at IS NULL
+        -- AFK is the single gate: only a device you were driving REMOTELY when it
+        -- dropped is worth a text (afk persists across the disconnect). afk='off'
+        -- drops (you were at the keyboard) are ignored entirely — never claimed.
+        AND d.afk = 'on'
         AND EXISTS (SELECT 1 FROM sessions s WHERE s.device_id = d.id)
         -- OFFLINE past the debounce: not one session has beaten recently.
         AND NOT EXISTS (SELECT 1 FROM sessions s
@@ -732,17 +737,15 @@ export async function claimDevicesToNotifyLost(
                          WHERE m.account_id = d.account_id
                            AND m.direction = 'inbound'
                            AND m.created_at >= now() - ($2::int * interval '1 second'))
-      RETURNING d.id, d.account_id, d.hostname, d.os, (d.afk = 'on') AS notify`,
+      RETURNING d.id, d.account_id, d.hostname, d.os`,
     [offlineSeconds, conversationActiveSeconds],
   );
-  return rows
-    .filter((r) => r.notify)
-    .map((r) => ({
-      id: r.id,
-      accountId: r.account_id,
-      hostname: r.hostname,
-      os: r.os,
-    }));
+  return rows.map((r) => ({
+    id: r.id,
+    accountId: r.account_id,
+    hostname: r.hostname,
+    os: r.os,
+  }));
 }
 
 // afk is MACHINE-WIDE and lives on `devices`. These RETURNING columns +

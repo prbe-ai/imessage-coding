@@ -77,12 +77,13 @@ CREATE TABLE IF NOT EXISTS devices (
                        CHECK (afk IN ('on', 'off')),
   -- LOCK for the DEVICE-keyed "lost connection" notice (names the whole machine, not
   -- a session). The reaper owns it (claimDevicesToNotifyLost): it stamps the last time
-  -- we texted the user the machine dropped (or silently "handled" an afk-off drop), and
-  -- the dedup is CONVERSATION-RELOCK — a dropped device is announced once, then NOT
-  -- again until the user RE-ENGAGES (an inbound message newer than this stamp), at which
-  -- point a later/continued drop re-announces. So a laptop that just flaps with no
-  -- texting from the user is announced exactly once, regardless of flap cadence; NULL =
-  -- never announced. Never written by the heartbeat path. See claimDevicesToNotifyLost.
+  -- we texted the user the machine dropped, and the dedup is CONVERSATION-RELOCK — a
+  -- dropped device is announced once, then NOT again until the user RE-ENGAGES (an
+  -- inbound message newer than this stamp), at which point a later/continued drop
+  -- re-announces. So a laptop that just flaps with no texting from the user is announced
+  -- exactly once, regardless of flap cadence. Only afk='on' devices are ever claimed
+  -- (afk='off' drops = you were at the keyboard, ignored). NULL = never announced.
+  -- Never written by the heartbeat path. See claimDevicesToNotifyLost.
   lost_notified_at   TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_devices_account ON devices(account_id);

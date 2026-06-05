@@ -11,7 +11,7 @@
 import { createApp } from './app.ts';
 import { loadEnv } from './env.ts';
 import { ensureListener } from './db/listener.ts';
-import { claimDevicesToNotifyLost, reapStaleSessions } from './db/repo.ts';
+import { claimDevicesToNotifyLost, markDevicesOnline, reapStaleSessions } from './db/repo.ts';
 import { notifyLostDevices } from './orchestrator/index.ts';
 import { getTransport } from './transport.ts';
 
@@ -37,16 +37,25 @@ const REAP_INTERVAL_MS = 10_000;
 // that reconnect seconds later. Boot stays cleanup-only; live detection (interval
 // sweeps) is where a genuine drop gets surfaced.
 //
-// Cleanup and announcement are decoupled: reapStaleSessions just hides dead
-// sessions from the dashboard/orchestrator; claimDevicesToNotifyLost is the
-// debounced + deduped, DEVICE-keyed announcer (a whole machine dropping out,
-// surfaced at most once past a grace, re-armed on revival). So a session that
-// flaps ended->active->ended on a deploy bounce or sleep — or a machine's
-// sessions dying across staggered sweeps — never re-fires the device notice.
+// Cleanup, connection-state tracking, and announcement are decoupled:
+//   - reapStaleSessions just hides dead sessions from the dashboard/orchestrator;
+//   - markDevicesOnline tracks the "came online" edge (online_since streak start) —
+//     run every sweep, boot included, since it is pure state tracking;
+//   - claimDevicesToNotifyLost is the DEVICE-keyed announcer, the "went offline"
+//     edge of a connection hysteresis: it texts only on a SUSTAINED drop that
+//     followed a SUSTAINED recovery, so a laptop flapping all night texts at most
+//     once. (markDevicesOnline-set / claim-consumed `online_since` is the state; see
+//     repo.ts.) The boot sweep stays notify=false so a deploy's own downtime window
+//     can't false-positive before devices have had a chance to re-beat.
+// Delivery is best-effort-once: claimDevicesToNotifyLost consumes the streak as it
+// claims, so if this instance dies between that commit and notifyLostDevices, that one
+// notice is dropped (no other instance re-claims it). Acceptable — the bug we're
+// fixing is OVER-notification; an outbox for guaranteed delivery is out of scope.
 function sweepStaleSessions(notify: boolean): void {
   reapStaleSessions()
     .then(async (reaped) => {
       if (reaped.length > 0) console.log(`[reaper] ended ${reaped.length} stale session(s)`);
+      await markDevicesOnline();
       if (!notify) return;
       const lost = await claimDevicesToNotifyLost();
       if (lost.length > 0) await notifyLostDevices(getTransport(), lost);

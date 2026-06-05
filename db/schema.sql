@@ -75,17 +75,23 @@ CREATE TABLE IF NOT EXISTS devices (
   -- device syncs it down via the SSE `state` event. afk ∈ on|off (string-checked).
   afk                TEXT        NOT NULL DEFAULT 'off'
                        CHECK (afk IN ('on', 'off')),
-  -- LAST time the reaper ANNOUNCED this device as "lost connection" to the phone
-  -- (all its sessions dropped). Dedups the notice with a per-device COOLDOWN: a
-  -- device whose sessions die in staggered reaper sweeps, or that flaps
-  -- ended->active->ended on a deploy bounce / laptop sleep / unstable network, is
-  -- announced AT MOST ONCE per DEVICE_LOST_NOTIFY_COOLDOWN_SECONDS. NOT cleared on
-  -- reconnect (the old re-arm-on-revival re-fired one text per flap). Re-announcing
-  -- requires BOTH a reconnect since this time (a session beat newer than it) AND the
-  -- cooldown elapsed — so a machine that just stays dropped texts exactly once,
-  -- while a flapping one is rate-limited to one text per window. See
-  -- claimDevicesToNotifyLost. NULL = never announced. Device-keyed (not
-  -- session-keyed): the user-facing notice names the whole device.
+  -- Connection hysteresis state machine for the DEVICE-keyed "lost connection"
+  -- notice (names the whole machine, not a session). The reaper is the single
+  -- writer of both columns.
+  --   online_since: start of the device's current uptime streak. markDevicesOnline
+  --     stamps it when a fully-offline device starts beating again; it is NOT bumped
+  --     on later beats, so it measures TRUE continuous uptime, and a sub-threshold
+  --     offline blip is folded into one streak (claim only clears it on a SUSTAINED
+  --     drop). NULL = device is offline / has no open streak.
+  --   lost_notified_at: LAST time we actually announced a lost connection. Kept for
+  --     observability only — gating is now hysteresis (online_since), not a cooldown.
+  -- A device alerts when an open streak that was SUSTAINED-ONLINE
+  -- (DEVICE_ONLINE_SUSTAIN_SECONDS) goes SUSTAINED-OFFLINE
+  -- (DEVICE_OFFLINE_SUSTAIN_SECONDS); the drop consumes the streak (online_since →
+  -- NULL). Net: a flapping laptop texts at most once, a stays-dropped machine
+  -- exactly once, a real reconnect→work→die cycle re-announces. See
+  -- markDevicesOnline / claimDevicesToNotifyLost.
+  online_since       TIMESTAMPTZ,
   lost_notified_at   TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_devices_account ON devices(account_id);
@@ -119,6 +125,19 @@ UPDATE devices d SET lost_notified_at = now()
  WHERE d.lost_notified_at IS NULL
    AND EXISTS (SELECT 1 FROM sessions s WHERE s.device_id = d.id)
    AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.device_id = d.id AND s.state <> 'ended');
+-- Idempotent add for already-provisioned DBs. Apply to the live DB BEFORE the code
+-- deploy: the reaper's markDevicesOnline / claimDevicesToNotifyLost read+write this
+-- column, so a missing column would 500 every sweep. online_since is additive — the
+-- old code ignores it — so applying this ahead of the deploy is safe.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS online_since TIMESTAMPTZ;
+-- Deliberately NO data backfill: the post-deploy boot reaper sweep runs
+-- markDevicesOnline() (notify=false) and stamps online_since for every currently-ONLINE
+-- device using the canonical SESSION_STALE_SECONDS — so we don't duplicate that window
+-- as a magic literal here, and the constant stays single-sourced. The result is the
+-- same storm-proof state: a device left NULL (offline at deploy) can't alert until it
+-- genuinely reconnects and then drops sustained, and a freshly-stamped online device
+-- needs a full sustained-online→sustained-offline cycle first — so the first post-deploy
+-- sweeps neither storm nor mis-fire.
 
 -- -----------------------------------------------------------------------------
 -- pairing_tokens — single-use, short-TTL tokens embedded in install.sh and

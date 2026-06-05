@@ -174,7 +174,7 @@ describe('buildTurnMessages — RECENT THREAD reply-handle overlay', () => {
         { handle: 'u2', text: 'older question' },
       ],
     });
-    const ctx = msgs[1]?.content ?? '';
+    const ctx = contentText(msgs[1]);
     expect(ctx.includes('user [u1]: newest')).toBe(true);
     expect(ctx.includes('user [u2]: older question')).toBe(true);
     // Assistant lines never get a handle (you reply to the user, not yourself).
@@ -194,7 +194,7 @@ describe('buildTurnMessages — RECENT THREAD reply-handle overlay', () => {
       history: [{ direction: 'inbound', body: 'no id for me' }],
       replyTargets: [], // nothing to match against → no handle, line still shown
     });
-    const ctx = msgs[1]?.content ?? '';
+    const ctx = contentText(msgs[1]);
     expect(ctx.includes('user: no id for me')).toBe(true);
     expect(ctx.includes('[u1]')).toBe(false);
   });
@@ -213,7 +213,7 @@ describe('buildTurnMessages — RECENT THREAD reply-handle overlay', () => {
         { handle: 'u2', text: 'ok' },
       ],
     });
-    const ctx = msgs[1]?.content ?? '';
+    const ctx = contentText(msgs[1]);
     expect(ctx.includes('[u1]')).toBe(true);
     expect(ctx.includes('[u2]')).toBe(true);
   });

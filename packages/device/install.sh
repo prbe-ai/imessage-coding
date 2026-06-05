@@ -709,6 +709,17 @@ case "$IMSG_AGENT_TARGET" in
   both)        install_for_claude_code; install_for_codex ;;
 esac
 
+# How to actually use it now that the device is paired.
+printf '\n'
+say "============================================================================"
+say " You're all set — here's how to use it:"
+say "   1. Open a coding agent (Claude Code or Codex), or pick a session you've"
+say "      already got running."
+say "   2. Turn on AFK mode:  run  /afk  in Claude Code  (or  \$afk  in Codex)."
+say "   3. That's it. The agent texts you when it needs you, and you can text it"
+say "      back anytime from your phone."
+say "============================================================================"
+
 if [ -n "${IMSG_INSTALL_BASE:-}" ]; then
   say "revert anytime:  curl -fsSL ${IMSG_INSTALL_BASE%/}/uninstall.sh | IMSG_AGENT_TARGET=${IMSG_AGENT_TARGET} sh"
 else

@@ -26,6 +26,7 @@ import { MessageSquare, PhoneCall, Terminal } from "lucide-react";
 import { useSession } from "@/lib/idp/better-auth-client";
 import { AccountMenu } from "@/components/account-menu";
 import { PairDeviceCard } from "@/components/pair-device-card";
+import { UsageSteps } from "@/components/usage-steps";
 import {
   OnboardingShell,
   StepVisual,
@@ -284,6 +285,7 @@ export default function OnboardingPage() {
           account. You can always pair more devices later from Integrations.
         </p>
         <PairDeviceCard />
+        <UsageSteps />
       </OnboardingShell>
     );
   }

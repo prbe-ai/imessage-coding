@@ -12,6 +12,7 @@ import { NextResponse } from "next/server";
 
 import { requireAccount } from "@/lib/server-session";
 import { query } from "@/lib/db";
+import { accountHasDevice } from "@/lib/devices";
 import type { OnboardingStatusResponse } from "@/lib/api/contracts";
 
 export const dynamic = "force-dynamic";
@@ -49,6 +50,7 @@ export async function POST(req: Request): Promise<Response> {
     matched: true,
     phoneNumber: row.phone_number,
     verified: Boolean(row.verified_at),
+    hasDevice: await accountHasDevice(ctx.accountId),
   };
   return NextResponse.json(body, { status: 200 });
 }

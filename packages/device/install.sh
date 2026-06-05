@@ -718,6 +718,9 @@ say "      already got running."
 say "   2. Turn on AFK mode:  run  /afk  in Claude Code  (or  \$afk  in Codex)."
 say "   3. That's it. The agent texts you when it needs you, and you can text it"
 say "      back anytime from your phone."
+say ""
+say "   If you don't see it yet, reload your plugins or restart your coding"
+say "   session (or open a new terminal) to pick up the change."
 say "============================================================================"
 
 if [ -n "${IMSG_INSTALL_BASE:-}" ]; then

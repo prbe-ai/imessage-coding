@@ -51,7 +51,20 @@ const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024;
 /** Cap images considered per turn — a defensive bound on a burst of attachments. */
 const MAX_IMAGES = 8;
-const IMAGE_CONTENT_TYPE_PREFIX = 'image/';
+/**
+ * Content-types we forward to the model — exactly the raster formats Gemini's
+ * vision input accepts. Deliberately NOT a blanket `image/*`: AgentPhone's media
+ * endpoint serves an `image/svg+xml` placeholder for media-less messages (verified
+ * live), and SVG (plus other `image/*` oddballs) would be base64'd and then 400 the
+ * Gemini call — failing an otherwise-fine turn. iPhone HEIC/HEIF is included.
+ */
+const ALLOWED_IMAGE_TYPES: ReadonlySet<string> = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/heic',
+  'image/heif',
+]);
 
 /** AgentPhone media-fetch options. `apiBase` is the AgentPhone API origin; the key
  *  is only ever sent to that host (see module doc). */
@@ -134,8 +147,9 @@ async function fetchOneImage(
 
     const rawType = res.headers.get('content-type') ?? '';
     const contentType = rawType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
-    if (!contentType.startsWith(IMAGE_CONTENT_TYPE_PREFIX)) {
-      console.warn(`[media] non-image content-type "${contentType}"; skipping`);
+    if (!ALLOWED_IMAGE_TYPES.has(contentType)) {
+      // Includes AgentPhone's image/svg+xml placeholder and anything Gemini can't read.
+      console.warn(`[media] unsupported image content-type "${contentType}"; skipping`);
       return null;
     }
 

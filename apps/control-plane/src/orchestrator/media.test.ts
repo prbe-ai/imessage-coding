@@ -59,6 +59,14 @@ describe('fetchInboundImages', () => {
     expect(await fetchInboundImages(['https://cdn/a'])).toEqual([]);
   });
 
+  test('an image/svg+xml placeholder is skipped (Gemini-unsupported)', async () => {
+    // AgentPhone serves a small image/svg+xml placeholder for media-less messages
+    // (verified live); SVG isn't a Gemini-supported type, so it must be dropped.
+    globalThis.fetch = (async () =>
+      imageResponse([1, 2, 3], 'image/svg+xml')) as unknown as typeof fetch;
+    expect(await fetchInboundImages(['https://api.agentphone.ai/v1/messages/x/media'])).toEqual([]);
+  });
+
   test('a non-OK response is skipped', async () => {
     globalThis.fetch = (async () =>
       new Response('nope', { status: 404 })) as unknown as typeof fetch;
@@ -84,7 +92,7 @@ describe('fetchInboundImages', () => {
       const headers = (init?.headers ?? {}) as Record<string, string>;
       auths.push(headers['Authorization']);
       if (auths.length === 1) return new Response('unauth', { status: 401 });
-      return imageResponse([9], 'image/gif');
+      return imageResponse([9], 'image/png');
     }) as unknown as typeof fetch;
 
     const parts = await fetchInboundImages(['https://api.agentphone.ai/m/a.gif'], {

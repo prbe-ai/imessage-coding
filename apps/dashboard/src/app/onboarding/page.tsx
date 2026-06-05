@@ -25,7 +25,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Check, Copy, MessageSquare, PhoneCall, Terminal } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  Copy,
+  MessageSquare,
+  PhoneCall,
+  Terminal,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { useSession } from "@/lib/idp/better-auth-client";
@@ -63,6 +70,8 @@ export default function OnboardingPage() {
   const [confirming, setConfirming] = useState(false);
   // Which value was just copied to the clipboard (for the ✓ affordance), if any.
   const [copied, setCopied] = useState<"message" | "number" | null>(null);
+  // "Not on a Mac?" disclosure — collapsed until the user opens it.
+  const [notOnMacOpen, setNotOnMacOpen] = useState(false);
 
   const bootStartedRef = useRef(false);
   const copyResetRef = useRef<number | null>(null);
@@ -258,39 +267,56 @@ export default function OnboardingPage() {
           button below — it opens Messages with a one-time code prefilled. Just
           hit send, and we&apos;ll link your number automatically.
         </p>
-        <div className="onb-cmd onb-cmd--copy" aria-label="Prefilled message">
+        <div className="onb-cmd" aria-label="Prefilled message">
           <p className="onb-cmd-text">{messageBody}</p>
-          <button
-            type="button"
-            className={`onb-copy-btn${copied === "message" ? " onb-copy-btn--done" : ""}`}
-            onClick={() => void copy(messageBody, "message", "Copied message")}
-          >
-            {copied === "message" ? (
-              <Check aria-hidden="true" />
-            ) : (
-              <Copy aria-hidden="true" />
-            )}
-            {copied === "message" ? "Copied" : "Copy"}
-          </button>
         </div>
         {agentNumber && (
-          <p className="onb-fineprint">
-            Not on a Mac? Copy the message above and text it to{" "}
+          <div className="onb-disclosure">
             <button
               type="button"
-              className={`onb-inline-copy${copied === "number" ? " onb-inline-copy--done" : ""}`}
-              onClick={() => void copy(agentNumber, "number", "Copied number")}
-              aria-label={`Copy number ${agentNumber}`}
+              className="onb-disclosure-trigger"
+              aria-expanded={notOnMacOpen}
+              aria-controls="onb-not-on-mac"
+              onClick={() => setNotOnMacOpen((open) => !open)}
             >
-              {agentNumber}
-              {copied === "number" ? (
-                <Check aria-hidden="true" />
-              ) : (
-                <Copy aria-hidden="true" />
-              )}
-            </button>{" "}
-            from your phone.
-          </p>
+              Not on a Mac?
+              <ChevronDown aria-hidden="true" />
+            </button>
+            {notOnMacOpen && (
+              <div className="onb-disclosure-panel" id="onb-not-on-mac">
+                <p className="onb-disclosure-text">
+                  Text the message to this number from any phone:
+                </p>
+                <div className="onb-disclosure-row">
+                  <button
+                    type="button"
+                    className={`onb-inline-copy${copied === "number" ? " onb-inline-copy--done" : ""}`}
+                    onClick={() => void copy(agentNumber, "number", "Copied number")}
+                    aria-label={`Copy number ${agentNumber}`}
+                  >
+                    {agentNumber}
+                    {copied === "number" ? (
+                      <Check aria-hidden="true" />
+                    ) : (
+                      <Copy aria-hidden="true" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className={`onb-copy-btn${copied === "message" ? " onb-copy-btn--done" : ""}`}
+                    onClick={() => void copy(messageBody, "message", "Copied message")}
+                  >
+                    {copied === "message" ? (
+                      <Check aria-hidden="true" />
+                    ) : (
+                      <Copy aria-hidden="true" />
+                    )}
+                    {copied === "message" ? "Copied" : "Copy message"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         )}
         <p className="onb-fineprint">
           Waiting for your message… this page updates on its own once it lands.

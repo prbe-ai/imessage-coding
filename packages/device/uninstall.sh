@@ -135,8 +135,10 @@ uninstall_codex() {
     say "note: bun not on PATH — remove the Codex plugin block from $CODEX_CONFIG by hand"
   fi
 
-  # 3. remove the installer-managed /afk custom prompt — ONLY if it still carries
-  #    our marker, so a user's own ~/.codex/prompts/afk.md is never clobbered.
+  # 3. remove the LEGACY /afk custom prompt left by older installers (the Codex
+  #    prompts mechanism was dropped in favor of the skill at skills/afk/SKILL.md,
+  #    which lives in the plugin tree and is removed with it). Marker-guarded so a
+  #    user's own ~/.codex/prompts/afk.md is never clobbered.
   CODEX_AFK_PROMPT="${CODEX_HOME}/prompts/afk.md"
   if [ -f "$CODEX_AFK_PROMPT" ] && grep -q 'imsg-device:managed' "$CODEX_AFK_PROMPT"; then
     rm -f "$CODEX_AFK_PROMPT"

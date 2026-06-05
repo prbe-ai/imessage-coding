@@ -333,7 +333,7 @@ install_for_claude_code() {
   # The CC plugin never loads the Codex-only manifests/hooks; drop them so they
   # don't confuse CC's loader (it would otherwise see two marketplace.json files).
   rm -rf "$PLUGIN_DIR/.codex-plugin" "$PLUGIN_DIR/hooks/codex" "$PLUGIN_DIR/commands/codex" \
-         "$PLUGIN_DIR/.mcp.codex.json"
+         "$PLUGIN_DIR/.mcp.codex.json" "$PLUGIN_DIR/skills"
 
   vendor_shared "$PLUGIN_DIR"
   bake_build_config "$PLUGIN_DIR"
@@ -513,25 +513,22 @@ install_for_codex() {
   # prompt — a safety regression). Only the now-duplicate hooks/codex/hooks.json
   # (moved up) is removed.
   rm -f "$CODEX_PLUGIN_DIR/hooks/codex/hooks.json"
-  # Codex slash command: a plugin's commands/*.md is NOT surfaced by Codex — only
-  # Claude Code auto-discovers plugin commands (confirmed against the Codex plugin
-  # manifest schema: skills/mcpServers/apps/hooks, no `commands` field). Codex's
-  # ONLY user-typed slash-command mechanism is a custom prompt under
-  # ~/.codex/prompts/<name>.md (filename -> /<name>). So install the prompt-style
-  # /afk THERE, with the absolute CLI path baked (Codex doesn't expand
-  # ${CLAUDE_PLUGIN_ROOT} in a prompt body either). The file carries an
-  # `imsg-device:managed` marker so uninstall deletes ONLY our copy, never a
-  # user's own ~/.codex/prompts/afk.md.
-  CODEX_PROMPT_SRC="$CODEX_PLUGIN_DIR/commands/codex/afk.md"
-  if [ -f "$CODEX_PROMPT_SRC" ]; then
-    mkdir -p "$CODEX_HOME/prompts"
-    cp -f "$CODEX_PROMPT_SRC" "$CODEX_HOME/prompts/afk.md"
-    rewrite_plugin_root_text "$CODEX_HOME/prompts/afk.md" "$CODEX_PLUGIN_DIR"
-    say "installed Codex /afk custom prompt -> $CODEX_HOME/prompts/afk.md"
+  # Codex has NO user slash-command for plugins (verified against codex v0.137.0
+  # source): a plugin's commands/*.md is never read, and the ~/.codex/prompts custom-
+  # prompt feature was removed in 0.117+. The only user-invocable mechanism is a
+  # SKILL declared via the manifest `skills` path, triggered by typing `$afk` in the
+  # composer. The skill ships in the plugin tree at skills/afk/SKILL.md; bake the
+  # absolute CLI path into it (Codex doesn't expand ${CLAUDE_PLUGIN_ROOT} in a skill
+  # body). The skill lives under the plugin dir, so it is removed with the plugin on
+  # uninstall — no separate cleanup needed.
+  CODEX_SKILL="$CODEX_PLUGIN_DIR/skills/afk/SKILL.md"
+  if [ -f "$CODEX_SKILL" ]; then
+    rewrite_plugin_root_text "$CODEX_SKILL" "$CODEX_PLUGIN_DIR"
+    say "baked absolute CLI path into Codex \$afk skill -> $CODEX_SKILL"
   else
-    say "note: $CODEX_PROMPT_SRC missing — /afk not installed for Codex"
+    say "note: $CODEX_SKILL missing — \$afk skill not installed for Codex"
   fi
-  # The plugin's own commands/ dir is dead weight under Codex (it ignores it); drop it.
+  # Codex never reads a plugin's commands/ dir (Claude Code does); drop it here.
   rm -rf "$CODEX_PLUGIN_DIR/commands"
 
   # Build the root catalog from the Codex marketplace.json (source "." -> subdir),

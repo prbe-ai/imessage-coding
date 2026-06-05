@@ -152,4 +152,35 @@ describe('fetchInboundImages', () => {
     ]);
     expect(parts.length).toBe(2); // first two fit (10MB); third would exceed 12MB
   });
+
+  test('a duplicate media URL in the burst is fetched once', async () => {
+    let count = 0;
+    globalThis.fetch = (async () => {
+      count++;
+      return imageResponse([1, 2], 'image/png');
+    }) as unknown as typeof fetch;
+    const parts = await fetchInboundImages([
+      'https://cdn/same.png',
+      'https://cdn/same.png',
+    ]);
+    expect(parts.length).toBe(1);
+    expect(count).toBe(1); // deduped before fetch
+  });
+
+  test('private / loopback / metadata hosts are rejected before any fetch (SSRF)', async () => {
+    let called = false;
+    globalThis.fetch = (async () => {
+      called = true;
+      return imageResponse([1]);
+    }) as unknown as typeof fetch;
+    const parts = await fetchInboundImages([
+      'https://169.254.169.254/latest/meta-data/', // cloud metadata
+      'https://127.0.0.1/x.png',
+      'https://localhost/x.png',
+      'https://10.0.0.5/x.png',
+      'https://[::1]/x.png',
+    ]);
+    expect(parts).toEqual([]);
+    expect(called).toBe(false); // never fetched
+  });
 });

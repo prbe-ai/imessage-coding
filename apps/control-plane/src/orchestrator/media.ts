@@ -23,8 +23,13 @@
  *     fires; it only matters if AgentPhone ever gates the proxy.
  *   - Body size is bounded by STREAMING with a running byte counter (plus a
  *     Content-Length pre-check), so a misbehaving host can't OOM us via a huge or
- *     never-ending body. A per-turn aggregate cap keeps the combined request under
- *     the model's inline-data ceiling.
+ *     never-ending body. Fetches run at a bounded CONCURRENCY (not all at once) and
+ *     stop once the per-turn aggregate budget is spent, so peak resident memory is
+ *     ~concurrency × per-image cap, independent of how many URLs arrive. A per-turn
+ *     aggregate cap also keeps the combined request under the model's inline ceiling.
+ *   - SSRF guard: literal private / loopback / link-local hosts (incl. the cloud
+ *     metadata IP) are rejected before any fetch. The URL still arrives in an
+ *     HMAC-verified webhook, so this is defense-in-depth, not the primary control.
  *
  * Everything here is best-effort and fail-OPEN per image: any error (network,
  * timeout, oversize, wrong type) drops that one attachment and the turn proceeds
@@ -54,6 +59,13 @@ const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024;
 /** Cap images considered per turn — a defensive bound on a burst of attachments. */
 const MAX_IMAGES = 8;
+/**
+ * Max media fetches in flight at once. Bounds peak resident memory to
+ * ~FETCH_CONCURRENCY × MAX_IMAGE_BYTES (here ~21MB) regardless of MAX_IMAGES, so a
+ * burst of large photos can't spike memory the way an all-at-once Promise.all would.
+ * Small because images-per-turn is normally 1; this only caps the rare burst.
+ */
+const FETCH_CONCURRENCY = 3;
 /**
  * Content-types we forward to the model — exactly the raster formats Gemini's
  * vision input accepts. Deliberately NOT a blanket `image/*`: for a NON-PHOTO
@@ -94,32 +106,47 @@ export async function fetchInboundImages(
   mediaUrls: ReadonlyArray<string>,
   opts: MediaFetchOptions = {},
 ): Promise<ImageContentPart[]> {
-  if (mediaUrls.length === 0) return [];
-  const considered = mediaUrls.slice(0, MAX_IMAGES);
-  const fetched = await Promise.all(
-    considered.map((url) => fetchOneImage(url, opts)),
+  // Dedup across a coalesced burst (the same photo can arrive on two inbounds),
+  // then cap the count. Order preserved (Set keeps insertion order).
+  const urls = [...new Set(mediaUrls)].slice(0, MAX_IMAGES);
+  if (urls.length === 0) return [];
+
+  // Bounded-concurrency pool: at most FETCH_CONCURRENCY fetches in flight, and we
+  // stop starting new ones once the per-turn byte budget is spent — so peak memory
+  // is ~concurrency × per-image, not (count × per-image), and we don't read bodies
+  // we'd only discard. Results are indexed by input position to preserve order.
+  const results: Array<FetchedImage | null> = new Array(urls.length).fill(null);
+  let committed = 0; // accepted bytes so far — bounds the combined request size
+  let next = 0; // next URL index to claim
+  let dropped = 0;
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      // Budget spent — don't start fetches whose bytes we'd just drop.
+      if (committed >= MAX_TOTAL_IMAGE_BYTES) return;
+      const i = next++;
+      if (i >= urls.length) return;
+      const f = await fetchOneImage(urls[i] as string, opts);
+      if (f === null) continue;
+      if (committed + f.bytes > MAX_TOTAL_IMAGE_BYTES) {
+        dropped++;
+        continue;
+      }
+      committed += f.bytes;
+      results[i] = f;
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(FETCH_CONCURRENCY, urls.length) }, worker),
   );
 
-  // Accept in input order until the aggregate cap would be exceeded; drop the
-  // rest so the combined request stays under the model's inline-data ceiling.
-  const parts: ImageContentPart[] = [];
-  let total = 0;
-  let dropped = 0;
-  for (const f of fetched) {
-    if (f === null) continue;
-    if (total + f.bytes > MAX_TOTAL_IMAGE_BYTES) {
-      dropped++;
-      continue;
-    }
-    total += f.bytes;
-    parts.push(f.part);
-  }
   if (dropped > 0) {
     console.warn(
       `[media] dropped ${dropped} image(s) over the ${MAX_TOTAL_IMAGE_BYTES}B per-turn cap`,
     );
   }
-  return parts;
+  return results.filter((f): f is FetchedImage => f !== null).map((f) => f.part);
 }
 
 async function fetchOneImage(
@@ -213,14 +240,52 @@ async function readBounded(res: Response, max: number): Promise<Uint8Array | nul
   return out;
 }
 
-/** Parse an https URL; returns the URL or null for any other scheme / invalid input. */
+/** Parse an https URL; returns the URL or null for any other scheme, a private /
+ *  loopback / link-local host (SSRF guard), or invalid input. */
 function parseHttpsUrl(url: string): URL | null {
   try {
     const u = new URL(url);
-    return u.protocol === 'https:' ? u : null;
+    if (u.protocol !== 'https:') return null;
+    if (isPrivateHost(u.hostname)) return null;
+    return u;
   } catch {
     return null;
   }
+}
+
+/**
+ * True for a literal loopback / private / link-local host — including the cloud
+ * metadata IP (169.254.169.254) and localhost-style names. Defense-in-depth so a
+ * (signed) media URL can't point our server-side fetch at internal infrastructure.
+ * Does NOT resolve DNS, so a public name pointing at a private IP isn't caught —
+ * acceptable given the URL already passed HMAC verification.
+ */
+function isPrivateHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+  if (
+    h === 'localhost' ||
+    h.endsWith('.localhost') ||
+    h.endsWith('.local') ||
+    h.endsWith('.internal')
+  ) {
+    return true;
+  }
+  // IPv6 loopback (::1), link-local (fe80::/10), unique-local (fc00::/7).
+  if (h === '::1' || h.startsWith('fe8') || h.startsWith('fe9') ||
+      h.startsWith('fea') || h.startsWith('feb') || h.startsWith('fc') || h.startsWith('fd')) {
+    return true;
+  }
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true; // link-local incl. metadata endpoint
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT shared range
+  }
+  return false;
 }
 
 /** True when `url`'s host matches the AgentPhone API origin (configured or default). */

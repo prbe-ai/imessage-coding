@@ -17,7 +17,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { AfkState, isAfkState } from '@imsg/shared';
-import { afkStateFile, pendingStateFile } from './config.ts';
+import { afkDirtyFile, afkStateFile, pendingStateFile } from './config.ts';
 
 function readRaw(path: string): string {
   try {
@@ -40,6 +40,16 @@ export function readAfk(): AfkState {
 
 export function writeAfk(state: AfkState): void {
   writeRaw(afkStateFile(), state);
+}
+
+/** Whether the local afk toggle is still awaiting cloud confirmation. Defaults to
+ *  false (clean) when the flag file is missing/garbage. See afkDirtyFile(). */
+export function readAfkDirty(): boolean {
+  return readRaw(afkDirtyFile()) === '1';
+}
+
+export function writeAfkDirty(dirty: boolean): void {
+  writeRaw(afkDirtyFile(), dirty ? '1' : '0');
 }
 
 /** Pending-attention count for the statusline (best-effort cache). */

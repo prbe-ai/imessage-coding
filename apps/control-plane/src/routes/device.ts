@@ -667,6 +667,8 @@ deviceRoutes.post(DeviceApiRoute.HEARTBEAT, async (c) => {
     cwd?: unknown;
     title?: unknown;
     agent?: unknown;
+    afk?: unknown;
+    afkDirty?: unknown;
   };
   const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
   if (!sessionId) {
@@ -703,6 +705,21 @@ deviceRoutes.post(DeviceApiRoute.HEARTBEAT, async (c) => {
     deviceId: auth.deviceId,
     accountId: auth.accountId,
   });
+
+  // Dirty-afk reconcile: the device only sends afk while a local toggle is un-acked
+  // (its POST /api/device/state may have been lost). The device is authoritative
+  // for its OWN machine afk, so adopt it — this is what makes the toggle (and the
+  // afk-off wipe) reliable without a retry queue. A non-dirty heartbeat sends no
+  // afk, so a steady beat never clobbers a dashboard change. Echo the resulting afk
+  // so the device can clear its dirty flag. Only touch the DB when it actually
+  // differs, so a no-op heartbeat doesn't spuriously fire the device_state NOTIFY.
+  if (body.afkDirty === true && isAfkState(body.afk)) {
+    const state = await getDeviceState({ deviceId: auth.deviceId, accountId: auth.accountId });
+    if (state.afk !== body.afk) {
+      await setDeviceAfk({ deviceId: auth.deviceId, accountId: auth.accountId, afk: body.afk });
+    }
+    return c.json({ ok, afk: body.afk });
+  }
   return c.json({ ok });
 });
 

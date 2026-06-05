@@ -156,6 +156,15 @@ export function afkStateFile(): string {
   return join(deviceDir(), 'afk.state');
 }
 
+/** Local AFK "dirty" flag. Set when `imsg afk` toggles but the cloud POST may not
+ *  have landed; cleared once a heartbeat confirms the server adopted the value.
+ *  While dirty: (a) the heartbeat re-asserts afk up (so a lost POST self-heals),
+ *  and (b) a down-pushed afk is NOT applied — so a stale server value can never
+ *  revert a fresh local toggle whose POST was dropped. */
+export function afkDirtyFile(): string {
+  return join(deviceDir(), 'afk.dirty');
+}
+
 /** Cached pending-attention count for the statusline (written by channel server). */
 export function pendingStateFile(): string {
   return join(deviceDir(), 'pending.state');

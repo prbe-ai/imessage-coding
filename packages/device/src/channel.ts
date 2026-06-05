@@ -63,7 +63,8 @@ import { Classification, postJson } from './httpclient.ts';
 import { HaltError, drain, enqueue } from './outbox.ts';
 import { egressEnabled } from './killswitch.ts';
 import { sanitizeOptional, sanitizeText } from './sanitize.ts';
-import { readAfk, writeAfk, writePending } from './state.ts';
+import { readAfk, readAfkDirty, writeAfk, writeAfkDirty, writePending } from './state.ts';
+import { shouldAdoptDownstreamAfk, shouldClearDirty } from './afk-sync.ts';
 import { messageUserBlockedWhenAfkOff } from './afk-gate.ts';
 
 // Relocate pre-0.1.7 state from ~/.claude/plugins/imsg-device → ~/.imsg (once).
@@ -502,11 +503,18 @@ async function subscribeEvents(): Promise<void> {
               // loop isn't held on the round-trip.
               if (items.length > 0) void ackInbox(items.map((it) => it.id));
             } else if (event === SseEvent.STATE) {
-              // Mirror the control plane's authoritative afk into the local
-              // afk.state file the PreToolUse hook reads (guarded: write on
-              // change). This is the dashboard/CLI toggle reaching the hook.
+              // Mirror the control plane's afk into the local afk.state file the
+              // PreToolUse hook reads — a dashboard/CLI toggle reaching the hook.
+              // GUARD: never adopt while a local toggle is still dirty (its POST may
+              // have been lost). Otherwise a stale server value pushed on a new
+              // session's first flush would silently REVERT a fresh local toggle —
+              // the revert race. The heartbeat re-asserts the dirty value up and
+              // clears the flag once the cloud confirms.
               const body = JSON.parse(data) as { afk?: string };
-              if (isAfkState(body.afk) && body.afk !== readAfk()) {
+              if (
+                isAfkState(body.afk) &&
+                shouldAdoptDownstreamAfk({ pushedAfk: body.afk, dirty: readAfkDirty(), localAfk: readAfk() })
+              ) {
                 writeAfk(body.afk);
                 log('afk_synced', { afk: body.afk });
               }
@@ -546,12 +554,13 @@ function reconnectBackoffMs(failures: number): number {
   return base + Math.floor(Math.random() * 250);
 }
 
-// --- heartbeat: liveness + session touch -------------------------------------
-// NOTE: afk is NOT sent up here. The control plane is the source of truth: afk
-// flows DOWN to the device via the `state` SSE event (set from the dashboard or
-// the CLI's POST /api/device/state), and the heartbeat route ignores any afk in
-// the body anyway. Sending it would falsely imply an up-sync and risk clobbering
-// the authoritative value.
+// --- heartbeat: liveness + session touch + dirty-afk reconcile ----------------
+// afk normally flows DOWN (the `state` SSE event from a dashboard/CLI toggle). The
+// ONE exception: while a local toggle is DIRTY (its POST /api/device/state may have
+// been lost), the heartbeat re-asserts {afk, afkDirty:true} UP. The server adopts a
+// dirty value (the device is authoritative for its own machine afk) and echoes its
+// resulting afk; the loop clears the flag once that echo confirms the toggle landed.
+// A non-dirty heartbeat sends no afk, so it can never clobber a dashboard change.
 
 /** The session title captured locally by the tap daemon — Claude Code's own
  *  ai-title / a /rename custom-title, else the provisional first message — or
@@ -572,6 +581,11 @@ async function heartbeatLoop(): Promise<void> {
     const token = loadToken();
     const enabled = token ? await egressEnabled(token).catch(() => true) : false;
     if (token && enabled) {
+      // Re-assert afk up ONLY while a local toggle is dirty (un-acked). The local
+      // afk is captured before the POST so the echo comparison below is against the
+      // value we actually asserted.
+      const dirty = readAfkDirty();
+      const localAfk = readAfk();
       const body = JSON.stringify({
         sessionId: SESSION_ID,
         deviceId: DEVICE_ID,
@@ -582,10 +596,24 @@ async function heartbeatLoop(): Promise<void> {
         cwd: PROJECT_CWD,
         // Omitted (dropped by JSON.stringify) until the tap captures it.
         title: readSessionTitle(),
+        ...(dirty ? { afk: localAfk, afkDirty: true } : {}),
         at: new Date().toISOString(),
       });
       const resp = await postJson(deviceApiUrl(DeviceApiRoute.HEARTBEAT), body, { bearer: token });
       if (resp.classification === Classification.HALT) log('heartbeat_halt', { reason: '401' });
+      // Clear the dirty flag once the server echoes an afk matching what we asserted
+      // — the toggle has landed in the cloud (and triggered the afk-off wipe, if any).
+      else if (dirty && resp.classification === Classification.SUCCESS) {
+        try {
+          const r = JSON.parse(resp.body) as { afk?: string };
+          if (shouldClearDirty({ wasDirty: dirty, success: true, echoAfk: r.afk, localAfk })) {
+            writeAfkDirty(false);
+            log('afk_sync_confirmed', { afk: r.afk });
+          }
+        } catch {
+          /* malformed body — stay dirty, retry next heartbeat */
+        }
+      }
     }
     await drainOutbox(); // also flush any backlog on the heartbeat cadence
     await sleep(HEARTBEAT_INTERVAL_MS);

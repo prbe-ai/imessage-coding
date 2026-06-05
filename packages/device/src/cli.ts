@@ -17,7 +17,7 @@ import { deviceApiUrl, deviceIdFile } from './config.ts';
 import { clearToken, ensureDeviceDir, loadToken, saveToken } from './creds.ts';
 import { Classification, parseJson, postJson } from './httpclient.ts';
 import { rowCount } from './outbox.ts';
-import { readAfk, readPending, writeAfk } from './state.ts';
+import { readAfk, readPending, writeAfk, writeAfkDirty } from './state.ts';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -97,22 +97,24 @@ export async function pair(pairingToken: string): Promise<number> {
  * device-wide update (any 2xx == SUCCESS). The local state file is already
  * the authoritative fast path for the hook; this sync just mirrors to cloud.
  */
-async function syncState(afk: AfkState): Promise<void> {
+async function syncState(afk: AfkState): Promise<boolean> {
   const token = loadToken();
-  if (!token) return; // unpaired: local-only toggle still applied
+  if (!token) return false; // unpaired: local-only toggle still applied
   const resp = await postJson(
     deviceApiUrl(DeviceApiRoute.STATE),
     JSON.stringify({ afk }),
     { bearer: token },
   );
+  if (resp.classification === Classification.SUCCESS) return true;
   if (resp.classification === Classification.HALT) {
     process.stderr.write('warning: device token revoked — re-pair with `imsg pair <token>`\n');
     clearToken();
-  } else if (resp.classification !== Classification.SUCCESS) {
-    // Non-fatal: local state is authoritative for the hook; cloud will catch up
-    // on the next heartbeat.
+  } else {
+    // Non-fatal: the local state is authoritative for the hook, and the heartbeat
+    // will re-assert this toggle up to the cloud while it stays dirty (below).
     process.stderr.write(`warning: could not sync state to cloud (${resp.error || resp.status})\n`);
   }
+  return false;
 }
 
 export async function afk(arg: string): Promise<number> {
@@ -126,7 +128,11 @@ export async function afk(arg: string): Promise<number> {
     return 2;
   }
   writeAfk(next);
-  await syncState(next);
+  // Mark dirty BEFORE the POST: if the POST is lost, the flag keeps the heartbeat
+  // re-asserting this toggle up (and blocks a stale down-push from reverting it)
+  // until the cloud confirms. Cleared immediately on a confirmed sync.
+  writeAfkDirty(true);
+  if (await syncState(next)) writeAfkDirty(false);
   process.stdout.write(`afk: ${next}\n`);
   return 0;
 }

@@ -181,11 +181,15 @@ function extractMessage(payload: Record<string, unknown>): ExtractedActivity[] {
   const isUser = kind === ActivityKind.USER_MESSAGE;
   const out: ExtractedActivity[] = [];
   for (const raw of contentTexts(payload['content'])) {
-    // The AGENTS.md project-instructions frame is pure injected context with no
-    // prompt — drop it so it can't become the "first user message" (the session
-    // title). An attached-files / in-app-browser turn prepends context and
-    // delimits the real prompt with a marker — unwrap back to that prompt.
-    if (isUser && isAgentsInstructions(raw)) continue;
+    // Injected-context frames carry no prompt and must never become the "first
+    // user message" (the session title): the AGENTS.md project-instructions frame,
+    // and startup-context frames (<environment_context> etc.). The whole-message
+    // drop above only fires when EVERY block is a startup-context tag — but Codex
+    // packs the AGENTS.md frame AND the <environment_context> frame into ONE user
+    // message, so that check misses and the env frame would leak as the title. Drop
+    // both kinds per-block here too. An attached-files / in-app-browser turn prepends
+    // context and delimits the real prompt with a marker — unwrap back to that prompt.
+    if (isUser && (isAgentsInstructions(raw) || isStartupContextText(raw))) continue;
     const t = sanitizeText(isUser ? unwrapCodexRequest(raw) : raw);
     if (t.trim()) out.push({ kind, text: t });
   }

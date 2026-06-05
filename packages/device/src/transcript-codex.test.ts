@@ -94,6 +94,46 @@ describe('extractCodexActivity', () => {
     ).toEqual([]);
   });
 
+  test('AGENTS.md + <environment_context> packed in ONE user message: both blocks dropped', () => {
+    // Codex (exec) sends the project-instructions frame AND the env frame as two
+    // blocks of the SAME first user message. The whole-message drop misses (AGENTS.md
+    // is not a startup-context TAG), so each frame must be dropped per-block — else the
+    // <environment_context> block leaks as the first USER_MESSAGE (the session title).
+    expect(
+      extractCodexActivity(
+        responseItem({
+          type: 'message',
+          role: 'user',
+          content: [
+            { type: 'input_text', text: '# AGENTS.md instructions for /Users/me/repo\n\nstuff' },
+            { type: 'input_text', text: '<environment_context>\n  <cwd>/Users/me/repo</cwd>\n</environment_context>' },
+          ],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  test('first user message after the injected frames becomes the title (not the env frame)', () => {
+    // End-to-end title path: a rollout whose first user line is the packed
+    // AGENTS.md+env frame, then the real prompt, must title from the real prompt.
+    const rollout = [
+      JSON.stringify(
+        responseItem({
+          type: 'message',
+          role: 'user',
+          content: [
+            { type: 'input_text', text: '# AGENTS.md instructions for /repo' },
+            { type: 'input_text', text: '<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>' },
+          ],
+        }),
+      ),
+      JSON.stringify(
+        responseItem({ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'fix the dashboard title' }] }),
+      ),
+    ];
+    expect(firstCodexUserMessage(rollout)).toBe('fix the dashboard title');
+  });
+
   test('an attached-files turn is unwrapped to the real prompt (wrapper dropped)', () => {
     const out = extractCodexActivity(
       responseItem({

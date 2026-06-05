@@ -192,14 +192,14 @@ rewrite_bun() {
 
 # Shared: bake an ABSOLUTE plugin dir in place of the ${CLAUDE_PLUGIN_ROOT}
 # placeholder inside a hooks JSON's `command` strings. Needed for CODEX HOOKS only.
-# Codex collapses ${CLAUDE_PLUGIN_ROOT} -> "./" when it snapshots the plugin, but —
-# unlike the MCP server, which it runs from the plugin root via cwd:"." — it runs
+# Codex collapses ${CLAUDE_PLUGIN_ROOT} -> "./" when it snapshots the plugin and runs
 # HOOK commands from the WORKSPACE cwd, not the plugin root. So "bun ./hooks/codex/
 # X.ts" fails with `error: Module not found` (exit 1) and every hook silently dies
 # (and a failed PermissionRequest hook fails OPEN to the local prompt — a safety
 # regression). Baking the absolute install dir makes the command cwd-independent;
 # Codex leaves an absolute path untouched. Uses bun (no jq). CC ignores this file.
-# Do NOT apply to .mcp.codex.json — the MCP cwd:"." path already resolves correctly.
+# This JSON-walker rewrites `command` strings (hooks.json); the MCP file's path lives
+# in `args` (an array), so that one is baked via rewrite_plugin_root_text instead.
 rewrite_plugin_root() {
   file="$1"
   root="$2"
@@ -454,12 +454,17 @@ install_for_claude_code() {
 #                 server's cwd:"." — so the placeholder/relative form fails every
 #                 hook with "Module not found", exit 1).
 #   3. MCP:       registered by the plugin manifest's mcpServers pointer
-#                 (.mcp.codex.json, IMSG_AGENT_KIND=codex). That file uses Codex's
-#                 local-MCP convention — top-level "cwd": "." + relative `start`,
-#                 NOT "--cwd ${CLAUDE_PLUGIN_ROOT}" (same non-expansion gotcha as
-#                 the hooks; it was the "MCP failed to start" bug). We do NOT also
-#                 write [mcp_servers.imsg-device] into config.toml — the plugin-
-#                 declared server is the single source of truth.
+#                 (.mcp.codex.json, IMSG_AGENT_KIND=codex). That file OMITS "cwd" so
+#                 Codex spawns the server in the session WORKSPACE (cwd.unwrap_or(
+#                 fallback_cwd)) — which is what lets the channel server learn the real
+#                 project and register the Codex session on the dashboard (a pinned
+#                 "cwd": "." made process.cwd() the plugin dir, so every session looked
+#                 like a housekeeping dir and the heartbeat went inert). With no cwd a
+#                 relative `start` can't resolve, so args use an ABSOLUTE
+#                 ${CLAUDE_PLUGIN_ROOT}/src/channel.ts (baked at install; Codex does NOT
+#                 expand it in MCP args). We do NOT also write [mcp_servers.imsg-device]
+#                 into config.toml — the plugin-declared server is the single source of
+#                 truth.
 #   4. Register:  `codex plugin marketplace add <local-dir>` writes [marketplaces.*],
 #                 then `codex plugin add <plugin@marketplace>` installs (snapshots
 #                 into ~/.codex/plugins/cache) AND enables it — the same thing the
@@ -557,23 +562,26 @@ install_for_codex() {
   # Absolute-path the bun interpreter in the Codex hooks + MCP file.
   rewrite_bun "$CODEX_PLUGIN_DIR/hooks/hooks.json"
   rewrite_bun "$CODEX_PLUGIN_DIR/.mcp.codex.json"
-  # Codex runs HOOK commands from the workspace cwd (NOT the plugin root — that's
-  # only true for the MCP server's cwd:"."), and it collapses ${CLAUDE_PLUGIN_ROOT}
-  # to a dangling "./" at snapshot time, so the placeholder form fails every hook
-  # with "Module not found". Bake the absolute plugin dir so the path is cwd-
-  # independent. Hooks only — the MCP file's cwd:"." already resolves correctly.
-  # ASSUMPTIONS (hold for the default install, document rather than over-engineer):
-  #  - The baked path is spliced UNQUOTED into a single space-joined command string
-  #    (same as rewrite_bun's interpreter path), so it must be free of spaces / shell
-  #    metacharacters. True for the default ~/.codex/marketplaces/... location. A
-  #    $HOME/$CODEX_HOME containing a space would break the hooks; the robust fix is
-  #    an argv-array hook command — only adopt after confirming Codex supports it
-  #    (its exec-vs-shell model is undocumented; blind quoting could regress exec).
-  #  - We bake $CODEX_PLUGIN_DIR (the marketplace source dir Codex resolves the
-  #    plugin from), not the version-pinned ~/.codex/plugins/cache snapshot; verified
-  #    on codex 0.137.0 that hooks execute from the marketplace dir.
+  # Codex runs HOOK commands from the workspace cwd and collapses ${CLAUDE_PLUGIN_ROOT}
+  # to a dangling "./" at snapshot time, so the placeholder form fails every hook with
+  # "Module not found". Bake the absolute plugin dir so the path is cwd-independent.
+  #
+  # The MCP server (.mcp.codex.json) needs the SAME treatment for a DIFFERENT reason:
+  # it deliberately OMITS "cwd" so Codex spawns it with cwd = the user's WORKSPACE
+  # (codex's stdio launcher does cwd.unwrap_or(fallback_cwd), fallback = session cwd).
+  # That is what lets the channel server read the real PROJECT_CWD and register the
+  # session on the dashboard — the old "cwd": "." pinned cwd to the plugin dir, so
+  # every Codex session looked like a housekeeping dir and the heartbeat went inert
+  # (nothing on the dashboard). With no cwd, a relative `start` can't resolve, so the
+  # args use ${CLAUDE_PLUGIN_ROOT}/src/channel.ts — baked absolute here too.
+  # ASSUMPTIONS (hold for the default install): the baked path is spliced into a
+  # space-joined hook command / a JSON arg, so it must be free of spaces / shell
+  # metacharacters — true for the default ~/.codex/marketplaces/... location. We bake
+  # $CODEX_PLUGIN_DIR (the marketplace dir Codex resolves the plugin from), verified on
+  # codex 0.137.0.
   rewrite_plugin_root "$CODEX_PLUGIN_DIR/hooks/hooks.json" "$CODEX_PLUGIN_DIR"
-  say "rewrote bun -> absolute + baked absolute plugin root into Codex hooks.json; bun -> absolute in .mcp.codex.json"
+  rewrite_plugin_root_text "$CODEX_PLUGIN_DIR/.mcp.codex.json" "$CODEX_PLUGIN_DIR"
+  say "rewrote bun -> absolute + baked plugin root into Codex hooks.json + .mcp.codex.json (MCP runs from workspace cwd so sessions register)"
 
   # --- register the marketplace, then INSTALL the plugin ----------------------
   # `codex plugin marketplace add <local-dir>` writes [marketplaces.*]; the
@@ -654,19 +662,19 @@ install_for_codex() {
   say "ensured [features] plugin_hooks=true in $CODEX_CONFIG (non-destructive merge)"
 
   # --- MCP server registration ------------------------------------------------
-  # The plugin manifest's "mcpServers": "./.mcp.codex.json" registers the MCP
-  # server when Codex loads the plugin. CRITICAL: that file uses the CODEX local-
-  # MCP convention — a top-level "cwd": "." (resolved to the plugin root) + the
-  # relative `start` script — NOT Claude Code's "--cwd ${CLAUDE_PLUGIN_ROOT}".
-  # Codex does NOT expand ${CLAUDE_PLUGIN_ROOT} in MCP args, so the old form made
-  # bun chdir into a literal "${CLAUDE_PLUGIN_ROOT}" → ENOENT → the server died on
-  # the initialize handshake ("MCP client for imsg-device failed to start"), which
-  # is also why Codex sessions never reached the dashboard (no heartbeat). The
-  # curated openai-developers plugin uses exactly this cwd:"." + relative form.
-  # rewrite_bun (above) made "bun" absolute; the relative `start` resolves against
-  # the cwd Codex sets from the manifest. We deliberately do NOT also write
+  # The plugin manifest's "mcpServers": "./.mcp.codex.json" registers the MCP server
+  # when Codex loads the plugin. That file OMITS "cwd" on purpose: Codex spawns a local
+  # stdio MCP server with cwd = cwd.unwrap_or(fallback_cwd), and fallback_cwd is the
+  # session's WORKSPACE dir — so the channel server's process.cwd() becomes the real
+  # project (not the plugin dir). That is what makes the Codex session register on the
+  # dashboard: with the old "cwd": "." pinned to the plugin dir, isPluginHousekeepingDir
+  # matched every session and the heartbeat went inert. Because there is no cwd, the
+  # command can't be the relative `start` script — it's `bun ${CLAUDE_PLUGIN_ROOT}/src/
+  # channel.ts`, baked absolute above (Codex does NOT expand ${CLAUDE_PLUGIN_ROOT} in MCP
+  # args). channel.ts resolves its deps + build-config via import.meta and ~/.imsg via
+  # $HOME, so a non-plugin cwd is fine. We deliberately do NOT also write
   # [mcp_servers.imsg-device] into config.toml (a second, drift-prone source).
-  say "MCP server registered via plugin manifest mcpServers (.mcp.codex.json, cwd:'.')"
+  say "MCP server registered via plugin manifest mcpServers (.mcp.codex.json, no cwd -> spawns in workspace)"
 
   # --- pair (shared) ----------------------------------------------------------
   pair_device "${CODEX_PLUGIN_DIR}/bin/imsg.ts"

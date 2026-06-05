@@ -7,12 +7,14 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { MessageChannel, TurnOutcome, type InboundMessage } from '@imsg/shared';
+import type { Transport } from '@imsg/transport';
 import {
   classifyTurnOutcome,
   composeDeliveryFollowup,
   composeDeliveryRetraction,
   composeLostConnectionMessage,
   extractOnboardingToken,
+  resolveReplyTarget,
   shouldInterrupt,
   takeBatch,
   type LostDeviceLabel,
@@ -27,6 +29,68 @@ function inbound(overrides: Partial<InboundMessage> = {}): InboundMessage {
     ...overrides,
   };
 }
+
+/** Minimal Transport whose only interesting method is resolveInboundMessageId.
+ *  Pass `resolve` to wire the capability; omit it to model a transport without it. */
+function fakeTransport(
+  resolve?: (cid: string, opts?: { matchBody?: string }) => Promise<string | undefined>,
+): Transport {
+  return {
+    send: async () => ({ id: 'x' }),
+    verifyWebhook: () => true,
+    parseInbound: () => null,
+    ...(resolve ? { resolveInboundMessageId: resolve } : {}),
+  } as Transport;
+}
+
+describe('resolveReplyTarget', () => {
+  test('resolves via the transport using conversationId + the message body', async () => {
+    const calls: Array<{ cid: string; matchBody?: string }> = [];
+    const t = fakeTransport(async (cid, opts) => {
+      calls.push({ cid, matchBody: opts?.matchBody });
+      return 'msg_real';
+    });
+    const id = await resolveReplyTarget(
+      t,
+      inbound({ conversationId: 'conv_1', text: 'ship it' }),
+    );
+    expect(id).toBe('msg_real');
+    expect(calls).toEqual([{ cid: 'conv_1', matchBody: 'ship it' }]);
+  });
+
+  test('skips (no transport call) when there is no conversationId', async () => {
+    let called = false;
+    const t = fakeTransport(async () => {
+      called = true;
+      return 'x';
+    });
+    expect(await resolveReplyTarget(t, inbound({ conversationId: undefined }))).toBeUndefined();
+    expect(called).toBe(false);
+  });
+
+  test('skips a TAP-BACK — a reaction text is the reaction type, not a body', async () => {
+    let called = false;
+    const t = fakeTransport(async () => {
+      called = true;
+      return 'x';
+    });
+    const m = inbound({ conversationId: 'c', reactionTo: 'agent_msg', text: 'like' });
+    expect(await resolveReplyTarget(t, m)).toBeUndefined();
+    expect(called).toBe(false);
+  });
+
+  test('returns undefined when the transport lacks the capability', async () => {
+    const t = fakeTransport(); // no resolveInboundMessageId
+    expect(await resolveReplyTarget(t, inbound({ conversationId: 'c' }))).toBeUndefined();
+  });
+
+  test('a resolver rejection NEVER throws (turn-safety regression guard)', async () => {
+    const t = fakeTransport(async () => {
+      throw new Error('conversations API down');
+    });
+    expect(await resolveReplyTarget(t, inbound({ conversationId: 'c' }))).toBeUndefined();
+  });
+});
 
 function inflight(
   overrides: Partial<{ interruptible: boolean; committed: boolean }> = {},

@@ -195,7 +195,7 @@ export async function orchestrate(
           transport,
           result.accountId,
           "You're all set — your number is linked. Let's get coding.",
-          { replyToMessageId: inbound.messageId, fallbackTo: inbound.from },
+          { fallbackTo: inbound.from },
         );
         return { handled: true, accountId: result.accountId, reason: 'onboarding_linked' };
       }
@@ -208,7 +208,6 @@ export async function orchestrate(
         .send({
           to: inbound.from,
           text: onboardingFailureReply(result.reason),
-          replyToMessageId: inbound.messageId,
         })
         .catch((err) => console.error('[onboarding] failed-reply send failed', err));
       return { handled: true, reason: `onboarding_failed_${result.reason}` };
@@ -259,15 +258,25 @@ async function runUserTurn(
   let rounds: number | undefined;
   let toolCalls: number | undefined;
   let errMsg: string | undefined;
+  // Real provider id of the user message we're replying to, for inline-reply
+  // threading. Resolved best-effort below; undefined → reply is sent un-threaded.
+  let replyTargetId: string | undefined;
   try {
     // (Inbound messages are logged once on receipt in orchestrate, NOT here —
     //  re-running an interrupted batch must not double-log them.)
-    const [pending, sessions, history, profile] = await Promise.all([
+    const [pending, sessions, history, profile, resolvedReplyId] = await Promise.all([
       listPendingAttentionForAccount(accountId),
       listLiveSessionsForAccount(accountId),
       recentMessages({ accountId, limit: HISTORY_LIMIT }),
       getUserProfile(accountId),
+      // Thread the agent's reply under the user's actual message (a true iMessage
+      // inline reply). The webhook never carries the user message's real provider
+      // id, so resolve it here. resolveReplyTarget catches its own errors and
+      // never rejects, so folding it into Promise.all can't fail the turn — a
+      // threading nicety must never take down a reply.
+      resolveReplyTarget(transport, last),
     ]);
+    replyTargetId = resolvedReplyId;
     // Deterministic binding drives the destructive-allow gate (never the model).
     // A tap-back / inline reply in the burst (if any) binds; else the latest text.
     const bindingInbound = [...batch].reverse().find((m) => m.reactionTo) ?? last;
@@ -280,6 +289,7 @@ async function runUserTurn(
       accountId,
       transport,
       inbound: last,
+      replyToMessageId: replyTargetId,
       pending,
       sessions,
       boundTarget,
@@ -305,7 +315,7 @@ async function runUserTurn(
       execTool: makeExecTool(ctx),
       onUnsentText: async (text) => {
         await sendToUser(transport, accountId, text, {
-          replyToMessageId: last.messageId,
+          replyToMessageId: replyTargetId,
           fallbackTo: last.from,
         });
         sent.count += 1;
@@ -347,7 +357,7 @@ async function runUserTurn(
       transport,
       accountId,
       "Sorry — I'm having trouble reaching my brain right now. Try again in a moment.",
-      { replyToMessageId: last.messageId, fallbackTo: last.from },
+      { replyToMessageId: replyTargetId, fallbackTo: last.from },
     ).catch(() => {});
     return { handled: true, accountId, reason: 'turn_error' };
   } finally {
@@ -616,6 +626,9 @@ interface DispatchCtx {
   transport: Transport;
   /** Present on user-message turns (for reply addressing). */
   inbound?: InboundMessage;
+  /** Real provider id of the user message to thread replies under (user-message
+   *  turns only; undefined when unresolved → replies send un-threaded). */
+  replyToMessageId?: string;
   pending: ReadonlyArray<AttentionEvent>;
   /** Live sessions snapshot for this account (backs get_session_state). */
   sessions: ReadonlyArray<SessionInfo>;
@@ -692,7 +705,7 @@ async function execMessageUser(ctx: DispatchCtx, args: Record<string, unknown>):
 
   if (text) {
     const id = await sendToUser(ctx.transport, ctx.accountId, text, {
-      replyToMessageId: ctx.inbound?.messageId,
+      replyToMessageId: ctx.replyToMessageId,
       fallbackTo: ctx.inbound?.from,
     });
     // Count only ACTUAL deliveries: a failed send must not suppress the agent-event
@@ -1051,6 +1064,32 @@ async function sendToUser(
   }
 }
 
+/**
+ * Resolve the real provider id of the user message we're replying to, so the
+ * reply threads under it as an iMessage inline reply. Skips when:
+ *   - the transport can't resolve ids (the capability is optional),
+ *   - there's no conversation to search, or
+ *   - the inbound is a TAP-BACK (its `text` is the reaction type, not a message
+ *     body — body-matching would thread under an unrelated message).
+ * Best-effort and SILENT: it never throws (safe to fold into Promise.all) and any
+ * miss returns undefined → the reply is sent un-threaded (today's behavior).
+ */
+export async function resolveReplyTarget(
+  transport: Transport,
+  last: InboundMessage,
+): Promise<string | undefined> {
+  if (!transport.resolveInboundMessageId) return undefined;
+  if (!last.conversationId || last.reactionTo) return undefined;
+  try {
+    return await transport.resolveInboundMessageId(last.conversationId, {
+      matchBody: last.text,
+    });
+  } catch (err) {
+    console.error('[assistant] resolveReplyTarget failed', err);
+    return undefined;
+  }
+}
+
 /** Fold the turn's actions into history so the next turn knows what was done. */
 async function recordActions(accountId: string, actions: string[]): Promise<void> {
   if (actions.length === 0) return;
@@ -1085,8 +1124,10 @@ async function surfaceRequestMessage(
   ctx: DispatchCtx,
   target: AttentionEvent,
 ): Promise<string | undefined> {
+  // Deliberately NOT threaded under the user's message: this is a tap-back
+  // TARGET, and an inline-reply bubble can bury it / muddy the 👍👎 gesture the
+  // whole approve-loop depends on. Permission surfaces stay top-level.
   const id = await sendToUser(ctx.transport, ctx.accountId, composeNotification(target), {
-    replyToMessageId: ctx.inbound?.messageId,
     fallbackTo: ctx.inbound?.from,
   });
   if (id) {

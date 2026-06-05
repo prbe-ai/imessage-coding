@@ -32,6 +32,22 @@ import type { SendResult, Transport } from './transport.ts';
 const DEFAULT_API_BASE = 'https://api.agentphone.ai';
 
 /**
+ * How many recent conversation messages to scan when resolving an inbound
+ * message's real id (`resolveInboundMessageId`). The webhook arrives for the
+ * newest message, so the target is at the head of the list; a small window keeps
+ * the lookup cheap while tolerating a few interleaved outbound/reaction rows.
+ */
+const CONVERSATION_LOOKUP_LIMIT = 10;
+
+/**
+ * Hard cap on the inbound-id lookup. This GET runs inside the turn's gating
+ * Promise.all, so a hung conversations endpoint would otherwise stall the whole
+ * user turn (the catch only covers thrown errors, not a hang). Bounding it keeps
+ * threading a true best-effort nicety: on timeout we abort and send un-threaded.
+ */
+const CONVERSATION_LOOKUP_TIMEOUT_MS = 4_000;
+
+/**
  * Max allowed clock skew (seconds) between the signed webhook timestamp and now.
  * A signature older/newer than this is rejected as a replay. 5 minutes mirrors
  * the common provider convention (Stripe/Svix use the same window).
@@ -98,6 +114,37 @@ interface AgentPhoneEventData {
   createdAt?: string;
 }
 
+/**
+ * One message object from `GET /v1/conversations/{id}/messages`. Only the fields
+ * `resolveInboundMessageId` needs; all optional so a partial/renamed payload
+ * degrades to "no match" instead of throwing.
+ */
+interface AgentPhoneConversationMessage {
+  id?: string;
+  body?: string;
+  direction?: string; // "inbound" | "outbound"
+  receivedAt?: string;
+}
+
+/**
+ * Pull the message array out of the conversation-messages response. The exact
+ * envelope key is not pinned across AgentPhone versions, so accept a bare array
+ * or a wrapper under `items` / `data` / `messages`. Anything else → empty.
+ */
+function extractConversationMessages(
+  json: unknown,
+): AgentPhoneConversationMessage[] {
+  if (Array.isArray(json)) return json as AgentPhoneConversationMessage[];
+  if (json && typeof json === 'object') {
+    const obj = json as Record<string, unknown>;
+    for (const key of ['items', 'data', 'messages']) {
+      const v = obj[key];
+      if (Array.isArray(v)) return v as AgentPhoneConversationMessage[];
+    }
+  }
+  return [];
+}
+
 export class AgentPhoneTransport implements Transport {
   private readonly apiKey: string | undefined;
   private readonly apiBase: string;
@@ -126,45 +173,56 @@ export class AgentPhoneTransport implements Transport {
 
     // Verified live against the API + the official AgentPhone client
     // (github.com/AgentPhone-AI/agentphone-mcp `sendMessage`, 2026-06-01):
-    //   POST /v1/messages { agent_id, to_number, body, media_url?, number_id? }
-    // AgentPhone threads the reply into the right conversation purely from
-    // agent_id + to_number, so a reply target is NOT required.
+    //   POST /v1/messages { agent_id, to_number, body, reply_to_message_id? }
+    // AgentPhone routes the message into the right conversation purely from
+    // agent_id + to_number; `reply_to_message_id` is OPTIONAL and only renders an
+    // iMessage inline-reply bubble.
     //
-    // We deliberately do NOT forward msg.replyToMessageId here. AgentPhone's
-    // optional `reply_to_message_id` must be a real *message* id; an inbound
-    // webhook gives us only the per-delivery `X-Webhook-ID` (what populates
-    // InboundMessage.messageId), never a message id. Passing that delivery id
-    // makes AgentPhone fail to resolve the parent and reject the whole send with
-    // `404 {"detail":"Reply target not found."}` — so every reply silently
-    // failed while the user saw only a read receipt. Omitting it sends cleanly.
-    const url = `${this.apiBase}/v1/messages`;
-    const body: Record<string, unknown> = {
+    // SAFETY: `reply_to_message_id` must be a REAL AgentPhone Message.id. A
+    // stale/unknown id is rejected with `404 {"detail":"Reply target not found."}`
+    // — and that rejects the WHOLE send, which is how every reply once silently
+    // failed (the user saw only a read receipt). So we degrade closed: when a
+    // reply target is set and the provider 404s "reply target not found", we
+    // resend ONCE without it. The message always lands; worst case it is just not
+    // threaded. Callers therefore only ever pass real message ids, and even a
+    // stale one can never drop the reply.
+    const base: Record<string, unknown> = {
       agent_id: this.agentId,
       to_number: msg.to,
       body: msg.text,
     };
+    const replyTo = msg.replyToMessageId;
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
+    let res = await this.postMessages(
+      replyTo ? { ...base, reply_to_message_id: replyTo } : base,
+    );
+    let errText = res.ok ? '' : await res.text().catch(() => '');
+    if (
+      !res.ok &&
+      replyTo &&
+      res.status === 404 &&
+      /reply target not found/i.test(errText)
+    ) {
+      console.warn(
+        '[agentphone] reply target not found; resending without reply_to_message_id',
+      );
+      res = await this.postMessages(base);
+      errText = res.ok ? '' : await res.text().catch(() => '');
+    }
 
     if (!res.ok) {
-      const detail = await res.text().catch(() => '');
       throw new Error(
-        `AgentPhoneTransport.send failed: ${res.status} ${res.statusText} ${detail}`,
+        `AgentPhoneTransport.send failed: ${res.status} ${res.statusText} ${errText}`,
       );
     }
 
-    // Verified live: a 200 returns { id, status, channel, from_number,
-    // to_number, ... }. The extra fallbacks are belt-and-suspenders.
+    // Verified live: a 200 returns { id, status, channel, from_number, to_number,
+    // reply_to_message_id, reply_parent_unresolved, ... }. The extra id fallbacks
+    // are belt-and-suspenders.
     const json = (await res.json().catch(() => ({}))) as {
       id?: string;
       message_id?: string;
+      reply_parent_unresolved?: boolean;
       data?: { id?: string; message_id?: string };
     };
     const id =
@@ -173,7 +231,80 @@ export class AgentPhoneTransport implements Transport {
       json.data?.id ??
       json.data?.message_id ??
       '';
-    return { id };
+    const result: SendResult = { id };
+    if (json.reply_parent_unresolved === true) {
+      // The message DID send — it just wasn't threaded. Surface for observability;
+      // never retry on this (the 404 path above is the only reply-target retry).
+      console.warn(
+        '[agentphone] reply_parent_unresolved: message delivered un-threaded',
+      );
+      result.replyParentUnresolved = true;
+    }
+    return result;
+  }
+
+  /** POST a prepared body to /v1/messages. Caller owns response handling so the
+   *  reply-target 404 retry can reuse one code path. */
+  private async postMessages(
+    body: Record<string, unknown>,
+  ): Promise<Response> {
+    return fetch(`${this.apiBase}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.apiKey as string}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Resolve the real AgentPhone Message.id of an inbound user message so an
+   * outbound reply can thread under it. Inbound webhooks carry no message id, so
+   * we read the conversation and match on body.
+   *
+   * Returns the id ONLY on an EXACT inbound `matchBody` match (newest occurrence
+   * wins). No match → `undefined`. We deliberately do NOT fall back to "newest
+   * inbound": on duplicate texts ("yes"/"ok"), provider retries, or reaction rows
+   * that would thread the reply under the wrong message, and a wrong thread is
+   * worse than none. Best-effort and fail-open: any non-200, shape mismatch, or
+   * network error → `undefined` (caller sends un-threaded).
+   */
+  async resolveInboundMessageId(
+    conversationId: string,
+    opts?: { matchBody?: string },
+  ): Promise<string | undefined> {
+    if (!this.apiKey || !conversationId) return undefined;
+    const matchBody = opts?.matchBody;
+    // With no body to anchor on we cannot safely pick a target.
+    if (matchBody === undefined) return undefined;
+
+    try {
+      const url =
+        `${this.apiBase}/v1/conversations/${encodeURIComponent(conversationId)}` +
+        `/messages?limit=${CONVERSATION_LOOKUP_LIMIT}`;
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        // Bound the lookup so a slow/black-holed endpoint can't stall the turn.
+        signal: AbortSignal.timeout(CONVERSATION_LOOKUP_TIMEOUT_MS),
+      });
+      if (!res.ok) return undefined;
+      const json: unknown = await res.json().catch(() => undefined);
+
+      let best: { id: string; receivedAt: string } | undefined;
+      for (const m of extractConversationMessages(json)) {
+        if (m.direction !== 'inbound') continue;
+        if (m.body !== matchBody) continue;
+        if (typeof m.id !== 'string' || m.id.length === 0) continue;
+        const at = typeof m.receivedAt === 'string' ? m.receivedAt : '';
+        if (!best || at > best.receivedAt) best = { id: m.id, receivedAt: at };
+      }
+      return best?.id;
+    } catch (err) {
+      console.error('[agentphone] resolveInboundMessageId failed', err);
+      return undefined;
+    }
   }
 
   /**

@@ -10,6 +10,12 @@ import type { InboundMessage, OutboundMessage } from '@imsg/shared';
 export interface SendResult {
   /** Provider message id of the sent message. */
   id: string;
+  /**
+   * The provider could not resolve the `replyToMessageId` parent, so the message
+   * was delivered WITHOUT an inline-reply thread. Observability only — the
+   * message already sent, so this is never a retry trigger.
+   */
+  replyParentUnresolved?: boolean;
 }
 
 export interface Transport {
@@ -50,4 +56,19 @@ export interface Transport {
     rawBody: Buffer | string,
     webhookId?: string,
   ): InboundMessage | null;
+
+  /**
+   * Resolve the provider's real message id for an inbound user message so an
+   * outbound reply can thread under it (`OutboundMessage.replyToMessageId`).
+   * Inbound webhooks carry no body-level message id, so this looks the message
+   * up by conversation. Optional capability.
+   *
+   * Returns the id ONLY on an exact `matchBody` match — threading under the wrong
+   * message is worse than not threading, so an ambiguous/absent match (and ANY
+   * error) resolves to `undefined`. MUST be best-effort and never throw.
+   */
+  resolveInboundMessageId?(
+    conversationId: string,
+    opts?: { matchBody?: string },
+  ): Promise<string | undefined>;
 }

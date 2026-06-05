@@ -234,3 +234,254 @@ describe('AgentPhoneTransport.parseInbound', () => {
     expect(() => t2.parseInbound('[]', 'w')).toThrow();
   });
 });
+
+// -----------------------------------------------------------------------------
+// Outbound reply threading (reply_to_message_id) — network is stubbed.
+// -----------------------------------------------------------------------------
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+function textResponse(status: number, body: string): Response {
+  return new Response(body, { status });
+}
+
+/** A transport with creds set so send()/resolve() reach the (stubbed) network. */
+function wired(): AgentPhoneTransport {
+  return new AgentPhoneTransport({
+    apiKey: 'k_test',
+    agentId: 'agt_test',
+    webhookSecret: SECRET,
+  });
+}
+
+/** Capture an async rejection's message (this project's bun:test types lack
+ *  `.rejects`/`mock`, so assert on a captured string instead). */
+async function caught(p: Promise<unknown>): Promise<string | undefined> {
+  try {
+    await p;
+    return undefined;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+/** Install a queue-backed fetch stub for ONE test, always restoring after (this
+ *  project's bun:test has no beforeEach/afterEach in its type defs). The handler
+ *  pops the next queued Response; `calls` records each outgoing request. */
+async function withSend(
+  queue: Response[],
+  run: (calls: Array<{ url: string; init?: RequestInit }>) => Promise<void>,
+): Promise<void> {
+  const real = globalThis.fetch;
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = (async (url: unknown, init?: unknown) => {
+    calls.push({ url: String(url), init: init as RequestInit });
+    const next = queue.shift();
+    if (!next) throw new Error('test: no queued response');
+    return next;
+  }) as unknown as typeof fetch;
+  try {
+    await run(calls);
+  } finally {
+    globalThis.fetch = real;
+  }
+}
+
+const replyBody = (call?: { init?: RequestInit }): Record<string, unknown> =>
+  JSON.parse(String(call?.init?.body));
+
+describe('AgentPhoneTransport.send — reply threading + 404 safety net', () => {
+  test('forwards reply_to_message_id when set', async () => {
+    await withSend([jsonResponse(200, { id: 'm_1' })], async (calls) => {
+      const res = await wired().send({ to: '+1', text: 'hi', replyToMessageId: 'msg_real' });
+      expect(res.id).toBe('m_1');
+      expect(calls.length).toBe(1);
+      expect(replyBody(calls[0])['reply_to_message_id']).toBe('msg_real');
+    });
+  });
+
+  test('omits reply_to_message_id when not set', async () => {
+    await withSend([jsonResponse(200, { id: 'm_2' })], async (calls) => {
+      await wired().send({ to: '+1', text: 'hi' });
+      expect('reply_to_message_id' in replyBody(calls[0])).toBe(false);
+    });
+  });
+
+  test('reply-target 404 retries ONCE without the parent and still delivers', async () => {
+    await withSend(
+      [
+        textResponse(404, '{"detail":"Reply target not found."}'),
+        jsonResponse(200, { id: 'm_3' }),
+      ],
+      async (calls) => {
+        const res = await wired().send({ to: '+1', text: 'hi', replyToMessageId: 'stale_id' });
+        expect(res.id).toBe('m_3');
+        expect(calls.length).toBe(2);
+        expect(replyBody(calls[0])['reply_to_message_id']).toBe('stale_id'); // threaded
+        expect('reply_to_message_id' in replyBody(calls[1])).toBe(false); // un-threaded retry
+      },
+    );
+  });
+
+  test('a non-reply 404 throws and does NOT retry', async () => {
+    await withSend([textResponse(404, '{"detail":"Agent not found."}')], async (calls) => {
+      const msg = await caught(wired().send({ to: '+1', text: 'hi', replyToMessageId: 'x' }));
+      expect(msg !== undefined && /send failed: 404/.test(msg)).toBe(true);
+      expect(calls.length).toBe(1);
+    });
+  });
+
+  test('a reply-target 404 with NO parent set just throws (nothing to strip)', async () => {
+    await withSend([textResponse(404, '{"detail":"Reply target not found."}')], async (calls) => {
+      const msg = await caught(wired().send({ to: '+1', text: 'hi' }));
+      expect(msg !== undefined && /send failed: 404/.test(msg)).toBe(true);
+      expect(calls.length).toBe(1);
+    });
+  });
+
+  test('reply_parent_unresolved:true is surfaced on the result', async () => {
+    await withSend(
+      [jsonResponse(200, { id: 'm_4', reply_parent_unresolved: true })],
+      async () => {
+        const res = await wired().send({ to: '+1', text: 'hi', replyToMessageId: 'msg' });
+        expect(res.id).toBe('m_4');
+        expect(res.replyParentUnresolved).toBe(true);
+      },
+    );
+  });
+
+  test('reply_parent_unresolved absent → result flag is undefined (no false noise)', async () => {
+    await withSend([jsonResponse(200, { id: 'm_5' })], async () => {
+      const res = await wired().send({ to: '+1', text: 'hi' });
+      expect(res.replyParentUnresolved).toBeUndefined();
+    });
+  });
+});
+
+/** As withSend, but for the GET resolver: stub returns `responder()` and the
+ *  test body gets a `lastUrl()` accessor. Always restores fetch. */
+async function withResolve(
+  responder: () => Promise<Response>,
+  run: (lastUrl: () => string) => Promise<void>,
+): Promise<void> {
+  const real = globalThis.fetch;
+  let lastUrl = '';
+  globalThis.fetch = (async (url: unknown) => {
+    lastUrl = String(url);
+    return responder();
+  }) as unknown as typeof fetch;
+  try {
+    await run(() => lastUrl);
+  } finally {
+    globalThis.fetch = real;
+  }
+}
+
+describe('AgentPhoneTransport.resolveInboundMessageId', () => {
+  test('returns the id of the EXACT inbound body match (ignores same-body outbound)', async () => {
+    await withResolve(
+      async () =>
+        jsonResponse(200, {
+          items: [
+            { id: 'out_1', body: 'ship it', direction: 'outbound', receivedAt: 't3' },
+            { id: 'in_1', body: 'ship it', direction: 'inbound', receivedAt: 't2' },
+            { id: 'in_0', body: 'hello', direction: 'inbound', receivedAt: 't1' },
+          ],
+        }),
+      async () => {
+        expect(
+          await wired().resolveInboundMessageId('conv_1', { matchBody: 'ship it' }),
+        ).toBe('in_1');
+      },
+    );
+  });
+
+  test('picks the NEWEST inbound when the body repeats', async () => {
+    await withResolve(
+      async () =>
+        jsonResponse(200, {
+          items: [
+            { id: 'in_old', body: 'yes', direction: 'inbound', receivedAt: '2026-01-01T00:00:00Z' },
+            { id: 'in_new', body: 'yes', direction: 'inbound', receivedAt: '2026-01-02T00:00:00Z' },
+          ],
+        }),
+      async () => {
+        expect(await wired().resolveInboundMessageId('c', { matchBody: 'yes' })).toBe('in_new');
+      },
+    );
+  });
+
+  test('no exact match → undefined (does NOT fall back to newest inbound)', async () => {
+    await withResolve(
+      async () =>
+        jsonResponse(200, {
+          items: [{ id: 'in_1', body: 'different', direction: 'inbound', receivedAt: 't1' }],
+        }),
+      async () => {
+        expect(
+          await wired().resolveInboundMessageId('c', { matchBody: 'ship it' }),
+        ).toBeUndefined();
+      },
+    );
+  });
+
+  test('empty list → undefined', async () => {
+    await withResolve(
+      async () => jsonResponse(200, { items: [] }),
+      async () => {
+        expect(await wired().resolveInboundMessageId('c', { matchBody: 'x' })).toBeUndefined();
+      },
+    );
+  });
+
+  test('matchBody omitted → undefined (never guesses without an anchor)', async () => {
+    await withResolve(
+      async () => jsonResponse(200, { items: [] }),
+      async () => {
+        expect(await wired().resolveInboundMessageId('c')).toBeUndefined();
+      },
+    );
+  });
+
+  test('non-200 → undefined', async () => {
+    await withResolve(
+      async () => textResponse(500, 'boom'),
+      async () => {
+        expect(await wired().resolveInboundMessageId('c', { matchBody: 'x' })).toBeUndefined();
+      },
+    );
+  });
+
+  test('network error → undefined (best-effort, never throws)', async () => {
+    await withResolve(
+      () => Promise.reject(new Error('ECONNRESET')),
+      async () => {
+        expect(await wired().resolveInboundMessageId('c', { matchBody: 'x' })).toBeUndefined();
+      },
+    );
+  });
+
+  test('tolerates a bare-array envelope', async () => {
+    await withResolve(
+      async () => jsonResponse(200, [{ id: 'in_1', body: 'hi', direction: 'inbound', receivedAt: 't1' }]),
+      async () => {
+        expect(await wired().resolveInboundMessageId('c', { matchBody: 'hi' })).toBe('in_1');
+      },
+    );
+  });
+
+  test('hits the conversation-messages endpoint with a limit (id url-encoded)', async () => {
+    await withResolve(
+      async () => jsonResponse(200, { items: [] }),
+      async (lastUrl) => {
+        await wired().resolveInboundMessageId('conv ab/cd', { matchBody: 'x' });
+        expect(lastUrl().includes('/v1/conversations/conv%20ab%2Fcd/messages')).toBe(true);
+        expect(lastUrl().includes('limit=')).toBe(true);
+      },
+    );
+  });
+});

@@ -14,10 +14,13 @@
  *   - HTTPS only. The URL arrives inside an HMAC-verified webhook (the route
  *     verifies the signature before parseInbound), so an external attacker can't
  *     inject a fetch target — but we still treat the host as untrusted data.
- *   - The AgentPhone API key is attached ONLY on a 401/403 retry AND ONLY when the
- *     URL host matches AgentPhone's own API origin. A presigned/CDN URL (different
- *     host) is public and gets no bearer — so the key can never leak to a third
- *     party, and an auth header can't break a presigned scheme.
+ *   - VERIFIED LIVE (2026-06-05): the media URL is an UNAUTHENTICATED proxy on
+ *     AgentPhone's own host (api.agentphone.ai/v1/messages/{id}/media) — a plain GET
+ *     returns 200, no key needed, no presign/expiry. So the unauthenticated fetch
+ *     below always succeeds. We KEEP a defensive 401/403 retry with the API key, but
+ *     attach it ONLY when the URL host matches AgentPhone's own origin (a different
+ *     host gets no bearer — the key can never leak to a third party). Today it never
+ *     fires; it only matters if AgentPhone ever gates the proxy.
  *   - Body size is bounded by STREAMING with a running byte counter (plus a
  *     Content-Length pre-check), so a misbehaving host can't OOM us via a huge or
  *     never-ending body. A per-turn aggregate cap keeps the combined request under
@@ -53,10 +56,12 @@ const MAX_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_IMAGES = 8;
 /**
  * Content-types we forward to the model — exactly the raster formats Gemini's
- * vision input accepts. Deliberately NOT a blanket `image/*`: AgentPhone's media
- * endpoint serves an `image/svg+xml` placeholder for media-less messages (verified
- * live), and SVG (plus other `image/*` oddballs) would be base64'd and then 400 the
- * Gemini call — failing an otherwise-fine turn. iPhone HEIC/HEIF is included.
+ * vision input accepts. Deliberately NOT a blanket `image/*`: for a NON-PHOTO
+ * message the upstream carrier returns an `image/svg+xml` PLACEHOLDER, proxied
+ * verbatim through AgentPhone's unauthenticated media endpoint (verified live).
+ * This allowlist IS the placeholder filter — SVG (and any other non-raster oddball)
+ * is dropped before encoding, so a placeholder can't be base64'd and then 400 the
+ * Gemini call, failing an otherwise-fine turn. iPhone HEIC/HEIF is included.
  */
 const ALLOWED_IMAGE_TYPES: ReadonlySet<string> = new Set([
   'image/png',
@@ -148,8 +153,9 @@ async function fetchOneImage(
     const rawType = res.headers.get('content-type') ?? '';
     const contentType = rawType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
     if (!ALLOWED_IMAGE_TYPES.has(contentType)) {
-      // Includes AgentPhone's image/svg+xml placeholder and anything Gemini can't read.
-      console.warn(`[media] unsupported image content-type "${contentType}"; skipping`);
+      // Drops the upstream image/svg+xml placeholder (non-photo messages) and any
+      // other type Gemini can't read — before we waste a base64 + a failed call.
+      console.warn(`[media] skipping non-photo / unsupported media type "${contentType}"`);
       return null;
     }
 

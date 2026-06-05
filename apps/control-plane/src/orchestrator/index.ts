@@ -48,6 +48,7 @@ import {
   findVerifiedPhoneForAccount,
   getAttentionForAccount,
   getSessionActivity,
+  getUserProfile,
   insertTurn,
   isInboxDelivered,
   isSessionLive,
@@ -261,10 +262,11 @@ async function runUserTurn(
   try {
     // (Inbound messages are logged once on receipt in orchestrate, NOT here —
     //  re-running an interrupted batch must not double-log them.)
-    const [pending, sessions, history] = await Promise.all([
+    const [pending, sessions, history, profile] = await Promise.all([
       listPendingAttentionForAccount(accountId),
       listLiveSessionsForAccount(accountId),
       recentMessages({ accountId, limit: HISTORY_LIMIT }),
+      getUserProfile(accountId),
     ]);
     // Deterministic binding drives the destructive-allow gate (never the model).
     // A tap-back / inline reply in the burst (if any) binds; else the latest text.
@@ -290,6 +292,7 @@ async function runUserTurn(
       pending,
       sessions,
       history,
+      profile,
     });
 
     const outcome = await runAssistantTurn({
@@ -411,10 +414,11 @@ async function runAgentEventTurnLocked(
   let toolCalls: number | undefined;
   let errMsg: string | undefined;
   try {
-    const [pending, sessions, history] = await Promise.all([
+    const [pending, sessions, history, profile] = await Promise.all([
       listPendingAttentionForAccount(accountId),
       listLiveSessionsForAccount(accountId),
       recentMessages({ accountId, limit: HISTORY_LIMIT }),
+      getUserProfile(accountId),
     ]);
     const actions: string[] = [];
     const ctx: DispatchCtx = {
@@ -434,6 +438,7 @@ async function runAgentEventTurnLocked(
       pending,
       sessions,
       history,
+      profile,
     });
     const outcome = await runAssistantTurn({
       messages,
@@ -520,10 +525,11 @@ async function relayAgentMessageLocked(
   let toolCalls: number | undefined;
   let errMsg: string | undefined;
   try {
-    const [pending, sessions, history] = await Promise.all([
+    const [pending, sessions, history, profile] = await Promise.all([
       listPendingAttentionForAccount(accountId),
       listLiveSessionsForAccount(accountId),
       recentMessages({ accountId, limit: HISTORY_LIMIT }),
+      getUserProfile(accountId),
     ]);
     const actions: string[] = [];
     const ctx: DispatchCtx = {
@@ -546,6 +552,7 @@ async function relayAgentMessageLocked(
       pending,
       sessions,
       history,
+      profile,
     });
     const outcome = await runAssistantTurn({
       messages,

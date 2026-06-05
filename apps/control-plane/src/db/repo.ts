@@ -21,6 +21,8 @@ import {
   type DeviceInfo,
   type InboxItem,
   type SessionInfo,
+  type UserMachine,
+  type UserProfile,
 } from '@imsg/shared';
 import { query, queryOne, withTransaction } from './pool.ts';
 
@@ -210,6 +212,59 @@ export async function findVerifiedPhoneForAccount(
     [accountId],
   );
   return row?.phone_number;
+}
+
+/**
+ * The little we know about an account's human, for the orchestrator's system
+ * prompt: email (the account), the most-recently-verified phone, and their
+ * non-revoked paired machines (most-recently-paired first, capped). One round
+ * trip — phone + machines are correlated subqueries off the account row. Returns
+ * undefined only if the account row itself is gone (machines is `[]`, never null,
+ * for an account with no devices). No new storage; purely a read of what exists.
+ */
+const USER_PROFILE_MACHINE_LIMIT = 12;
+export async function getUserProfile(accountId: string): Promise<UserProfile | undefined> {
+  const row = await queryOne<{
+    email: string;
+    phone: string | null;
+    machines: Array<{ hostname: string | null; os: string | null }> | null;
+  }>(
+    `SELECT
+       a.email,
+       (SELECT c.phone_number
+          FROM conversations c
+         WHERE c.account_id = a.id AND c.verified_at IS NOT NULL
+         ORDER BY c.verified_at DESC
+         LIMIT 1) AS phone,
+       (SELECT COALESCE(
+                 json_agg(
+                   json_build_object('hostname', m.hostname, 'os', m.os)
+                   ORDER BY m.paired_at DESC),
+                 '[]'::json)
+          FROM (
+            SELECT d.hostname, d.os, d.paired_at
+              FROM devices d
+             WHERE d.account_id = a.id AND d.revoked_at IS NULL
+             ORDER BY d.paired_at DESC
+             LIMIT ${USER_PROFILE_MACHINE_LIMIT}
+          ) m) AS machines
+       FROM accounts a
+      WHERE a.id = $1`,
+    [accountId],
+  );
+  if (!row) return undefined;
+  const machines: UserMachine[] = (row.machines ?? [])
+    .map((m): UserMachine => {
+      const machine: UserMachine = {};
+      if (m.hostname) machine.hostname = m.hostname;
+      if (m.os) machine.os = m.os;
+      return machine;
+    })
+    // Drop a device with neither a hostname nor an os — nothing to name it by.
+    .filter((m) => m.hostname || m.os);
+  const profile: UserProfile = { email: row.email, machines };
+  if (row.phone) profile.phone = row.phone;
+  return profile;
 }
 
 /**

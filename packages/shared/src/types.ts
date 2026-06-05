@@ -127,6 +127,28 @@ export interface DeviceInfo {
   sessionCount: number;
 }
 
+/** One of the user's paired machines, as a fact about them for the orchestrator
+ *  prompt (not the killswitch/afk-bearing DeviceInfo). hostname/os are
+ *  device-reported and may be absent. */
+export interface UserMachine {
+  hostname?: string;
+  os?: string;
+}
+
+/**
+ * The little we know about the human on the other end of a conversation, surfaced
+ * read-only into the assistant's system prompt so it can be personal (name their
+ * machines, know who it serves). NO new storage: `email` is the account row,
+ * `phone` the verified conversation number, `machines` their non-revoked devices.
+ */
+export interface UserProfile {
+  email: string;
+  /** Most-recently-verified phone number for the account, if any. */
+  phone?: string;
+  /** Non-revoked paired machines, most-recently-paired first (may be empty). */
+  machines: UserMachine[];
+}
+
 /**
  * One surfaced unit of session activity (the transcript tap). The device derives
  * these from the Claude Code transcript and ships them in REALTIME whenever the

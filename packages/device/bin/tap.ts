@@ -2,13 +2,20 @@
 /**
  * @imsg/device — per-session transcript TAP daemon.
  *
- * Spawned (detached) by the SessionStart hook with the session's real id +
- * transcript path. It tails the Claude Code `.jsonl` transcript, reduces each
- * new block to a lightweight ActivityEvent (see activity.ts), and ships batches
- * to POST /api/device/activity in REALTIME whenever the killswitch permits — at
- * the keyboard or AFK — so the control plane's activity log is always current for
- * get_session_data. Only the device killswitch gates shipping; the byte cursor
- * advances regardless, so a killswitched stretch is skipped, not queued.
+ * Spawned (detached) by ensureTap (SessionStart + every per-turn hook) with the
+ * session's real id + transcript path. It tails the Claude Code `.jsonl`
+ * transcript, reduces each new block to a lightweight ActivityEvent (see
+ * activity.ts), and ships batches to POST /api/device/activity.
+ *
+ * The DB mirror is EPHEMERAL + AFK-gated. We upload ONLY while the user is AFK —
+ * the orchestrator (which reads this via get_session_data) runs only then — and
+ * the server WIPES it when AFK turns off. So shipping needs egress (killswitch) AND
+ * afk on. On the off→on edge we backfill the whole session from byte 0 so the
+ * orchestrator gets context from BEFORE the user stepped away; on on→off we discard
+ * the un-shipped outbox (the server wipes the DB, the local transcript stays as the
+ * durable record). The byte cursor advances every tick regardless — for the title
+ * and so we never re-tail — so a not-AFK or killswitched stretch is skipped, never
+ * queued for a later dump.
  *
  * One daemon per session (keyed by CC's real session id). State (cursor, outbox)
  * is per-session, so concurrent sessions never share a writer — unlike the MCP
@@ -34,6 +41,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
   ActivityKind,
+  AfkState,
   AgentKind,
   DeviceApiRoute,
   SESSION_TITLE_MAX_LEN,
@@ -53,6 +61,8 @@ import {
   sessionsDir,
 } from '../src/config.ts';
 import { loadToken } from '../src/creds.ts';
+import { readAfk } from '../src/state.ts';
+import { classifyAfkTick } from '../src/tap-afk.ts';
 import { egressEnabled } from '../src/killswitch.ts';
 import { Classification, backoffMs, postJson } from '../src/httpclient.ts';
 import { readNew } from '../src/transcript.ts';
@@ -432,20 +442,58 @@ async function main(): Promise<number> {
   let idle = false;
   let sawReader = false;
   let orphanMisses = 0;
+  // AFK edge tracking for the ephemeral DB mirror: false→true triggers a full
+  // backfill; true→false discards the un-shipped outbox (the server wipes the DB).
+  let lastAfk = false;
 
   while (!shutdownObserved()) {
     tick += 1;
     touchAlive(); // mark this tap alive for ensureTap's freshness check
 
     // Killswitch (device-level egress, fails OPEN on network error). We still TAIL
-    // and advance the cursor when disabled — we just don't ship or drain, so a
-    // killswitched stretch is skipped (not queued for a later dump).
+    // and advance the cursor when disabled — we just don't ship or drain.
     const enabled = await egressEnabled(token).catch(() => true);
-    // Ship the activity log in REALTIME whenever egress is on — NOT gated on AFK —
-    // so the control plane's session_activity is always current for the orchestrator
-    // (get_session_data and the live snapshot), at the keyboard or away. The
-    // killswitch is the only gate; the cursor still advances regardless.
-    const shipping = enabled;
+    // The DB mirror of session activity is EPHEMERAL + AFK-gated: we only upload
+    // while the user is AFK (the orchestrator reads it ONLY then), and the server
+    // wipes it when AFK turns off. So shipping needs egress AND afk on. The byte
+    // cursor still advances regardless — for the title, and so we don't re-tail.
+    const afkOn = readAfk() === AfkState.ON;
+    const { shipping, shouldBackfill, shouldClearOutbox } = classifyAfkTick(
+      lastAfk,
+      afkOn,
+      enabled,
+    );
+
+    // AFK just turned ON → backfill the whole session from byte 0 (independent of
+    // the tail cursor, like the title seed) so the orchestrator gets full context
+    // INCLUDING what happened before the user stepped away. Retried next tick if the
+    // read fails (lastAfk only advances once it lands). The server dedups on
+    // (session_id, line_no, block_idx), so re-running a backfill is idempotent.
+    let backfilledThisTick = false;
+    if (shouldBackfill) {
+      try {
+        const all = readNew(TRANSCRIPT, 0).lines;
+        const events = buildEvents(all, 0, new Date().toISOString());
+        if (events.length > 0) enqueueEvents(events);
+        backfilledThisTick = true;
+        log('afk_backfill', { lines: all.length, events: events.length });
+      } catch {
+        /* transcript not readable yet — retry next tick (lastAfk stays false) */
+      }
+    }
+
+    // AFK just turned OFF → discard any un-shipped activity. The server wipes the DB
+    // mirror on the afk-off transition, so draining a stale queue afterward would
+    // re-populate what was just wiped. The local transcript on disk stays as the
+    // durable record (we never delete it).
+    if (shouldClearOutbox) {
+      try {
+        writeOutbox([]);
+      } catch {
+        /* best-effort */
+      }
+      log('afk_off_outbox_cleared', {});
+    }
 
     let hadLines = false;
     try {
@@ -455,15 +503,14 @@ async function main(): Promise<number> {
         hadLines = true;
         // Upgrade the session title (CC ai-title/custom-title, else provisional
         // first message) regardless of the ship gate — it's a local write, not
-        // egress, so it stays outside the killswitch gate below.
+        // egress, so it stays outside the AFK gate below.
         scanForTitle(res.lines);
         // lineNo is a MONOTONIC per-session event index (never reset), so it stays
         // a stable, unique dedup key derived from the (uncommitted-until-success)
         // cursor: a crash-before-commit re-read re-derives the same lineNos and the
-        // server's ON CONFLICT de-dupes. (On the effectively-impossible transcript
-        // shrink, the byte cursor resets but lineNo keeps climbing, so re-read lines
-        // get fresh keys and re-ship rather than silently colliding/dropping.)
-        if (shipping) {
+        // server's ON CONFLICT de-dupes. Skip the incremental ship on a tick we
+        // already backfilled (the backfill covered these lines).
+        if (shipping && !backfilledThisTick) {
           const events = buildEvents(res.lines, cursor.lineNo, new Date().toISOString());
           if (events.length > 0) enqueueEvents(events);
         }
@@ -484,9 +531,14 @@ async function main(): Promise<number> {
       }
     }
 
-    // Drain only while egress is enabled — the killswitch pauses delivery; anything
-    // already enqueued ships on the next enabled tick.
-    if (enabled) {
+    // Advance the AFK edge: mark "on" only once the backfill has actually landed,
+    // so a failed backfill read retries on the next tick instead of being skipped.
+    if (!afkOn) lastAfk = false;
+    else if (backfilledThisTick || lastAfk) lastAfk = true;
+
+    // Drain only while egress is enabled AND afk is on — a drain after afk-off would
+    // ship queued rows the server just wiped (and we cleared the outbox above).
+    if (enabled && afkOn) {
       try {
         const shipped = await drain(token);
         if (shipped > 0) log('drained', { shipped });

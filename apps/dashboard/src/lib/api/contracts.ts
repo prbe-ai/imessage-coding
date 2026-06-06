@@ -82,6 +82,21 @@ export interface SetAfkResponse {
   updated: number;
 }
 
+/** Body of POST /api/home/session-title — set a session's manual display name
+ *  (the user-side counterpart to the agent's rename_session tool). An empty/
+ *  whitespace-only `title` clears the override (revert to the auto-title). */
+export interface SetSessionTitleRequest {
+  sessionId: string;
+  title: string;
+}
+
+export interface SetSessionTitleResponse {
+  /** The stored override after cleaning, or null when cleared. */
+  title: string | null;
+  /** Whether a session row actually matched (false = unknown/foreign session). */
+  updated: boolean;
+}
+
 // ── Integrations ──────────────────────────────────────────────────────────
 
 /** Response of POST /api/integrations/pairing-token — a single-use pairing

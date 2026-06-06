@@ -11,6 +11,7 @@ import type {
   LinkedNumberResponse,
   SessionsResponse,
   SetAfkResponse,
+  SetSessionTitleResponse,
   SseTicketResponse,
 } from "@/lib/api/contracts";
 
@@ -49,4 +50,17 @@ export function setAfk(
   signal?: AbortSignal,
 ): Promise<SetAfkResponse> {
   return apiPost<SetAfkResponse>("/api/home/afk", { afk, deviceId }, signal);
+}
+
+/** Set a session's manual display name (empty string clears it → auto-title). */
+export function setSessionTitle(
+  sessionId: string,
+  title: string,
+  signal?: AbortSignal,
+): Promise<SetSessionTitleResponse> {
+  return apiPost<SetSessionTitleResponse>(
+    DashboardApiRoute.SESSION_TITLE,
+    { sessionId, title },
+    signal,
+  );
 }

@@ -39,6 +39,7 @@ import {
   listDevices,
   listSessions,
   setAfk,
+  setSessionTitle,
 } from "@/lib/api/home";
 import { chatDeepLink } from "@/lib/deep-link";
 import { extractError } from "@/lib/utils";
@@ -259,6 +260,32 @@ export default function HomePage() {
     [afkBusy],
   );
 
+  // ── Rename a session's display name (manual override). ────────────────
+  const onRenameSession = useCallback(
+    async (sessionId: string, name: string) => {
+      // Optimistic: show the new name now (empty clears → folder fallback until
+      // the SSE event reconciles to the server's auto-title). Snapshot for rollback.
+      const next = name.trim() || undefined;
+      let prevSessions: SessionInfo[] | null = null;
+      setSessions((prev) => {
+        prevSessions = prev;
+        return prev
+          ? prev.map((s) => (s.id === sessionId ? { ...s, title: next } : s))
+          : prev;
+      });
+      try {
+        const res = await setSessionTitle(sessionId, name);
+        // updated === false means no session matched (ended/foreign between render
+        // and submit) — the write never took, so surface it as a failure.
+        if (!res.updated) throw new Error("Session is no longer available.");
+      } catch (err) {
+        setSessions(prevSessions);
+        toast.error(extractError(err, "Couldn't rename the session."));
+      }
+    },
+    [],
+  );
+
   const userEmail = session?.user?.email ?? null;
 
   if (isPending || !phoneNumber) {
@@ -337,6 +364,9 @@ export default function HomePage() {
                   sessions={sessionsForDevice(d.id)}
                   afkBusy={afkBusy}
                   onToggleAfk={(next) => void onDeviceAfk(d.id, next)}
+                  onRenameSession={(sessionId, name) =>
+                    void onRenameSession(sessionId, name)
+                  }
                 />
               ))}
             </div>

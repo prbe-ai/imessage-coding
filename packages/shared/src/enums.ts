@@ -64,6 +64,15 @@ export type AfkState = (typeof AfkState)[keyof typeof AfkState];
 export const MESSAGE_USER_TOOL = 'message_user';
 
 // -----------------------------------------------------------------------------
+// MCP tool the agent (or the user, via the remote chat) calls to set/update this
+// session's display name as work progresses. Writes a manual-override title that
+// outranks the tap's auto-generated ai-title; the heartbeat ships it like any
+// other title. Declared here so the registration (channel.ts) and any future
+// transcript matcher share one identifier.
+// -----------------------------------------------------------------------------
+export const RENAME_SESSION_TOOL = 'rename_session';
+
+// -----------------------------------------------------------------------------
 // Why the agent is asking for the user's attention.
 // -----------------------------------------------------------------------------
 export const AttentionKind = {
@@ -182,6 +191,11 @@ export const DeviceApiRoute = {
   /** Fire-and-forget agent→user message (status/result). The server agent relays
    *  it and drops it — it is NEVER an attention and has no `resolved` lifecycle. */
   MESSAGE: '/api/device/message',
+  /** Agent-set manual display name (the `rename_session` tool). Writes
+   *  sessions.manual_title (an override surfaced as COALESCE(manual_title, title));
+   *  the device heartbeat's auto-title keeps writing sessions.title untouched. An
+   *  empty name clears the override (revert to the auto-title). */
+  SESSION_TITLE: '/api/device/session-title',
   /** BLOCKING approve-and-resume for agents with no native verdict-push channel
    *  (Codex). A PreToolUse/PermissionRequest hook POSTs the pending destructive
    *  tool here and the request HANGS until the user's tap-back verdict arrives or
@@ -205,6 +219,10 @@ export const DashboardApiRoute = {
   EVENTS: '/api/dashboard/events',
   /** Dashboard same-origin: GET → { ticket } for the EVENTS stream. */
   SSE_TICKET: '/api/home/sse-ticket',
+  /** Dashboard same-origin: POST → set a session's manual display name (the
+   *  user-side counterpart to the agent's rename_session tool). Writes
+   *  sessions.manual_title (account-scoped); an empty name clears it. */
+  SESSION_TITLE: '/api/home/session-title',
 } as const;
 export type DashboardApiRoute =
   (typeof DashboardApiRoute)[keyof typeof DashboardApiRoute];

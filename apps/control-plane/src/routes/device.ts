@@ -39,6 +39,7 @@ import {
   isAgentKind,
   isAttentionEvent,
   isUuid,
+  manualTitleValue,
   type AttentionEvent,
 } from '@imsg/shared';
 import {
@@ -61,6 +62,7 @@ import {
   markInboxDelivered,
   resolveAttention,
   setDeviceAfk,
+  setManualTitle,
   touchSession,
   upsertSession,
 } from '../db/repo.ts';
@@ -158,6 +160,7 @@ deviceRoutes.post(DeviceApiRoute.PAIR, async (c) => {
 // --- everything below requires a device_token --------------------------------
 deviceRoutes.use(`${DeviceApiRoute.ATTENTION}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.MESSAGE}`, requireDevice);
+deviceRoutes.use(`${DeviceApiRoute.SESSION_TITLE}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.ACTIVITY}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.EVENTS}`, requireDevice);
 deviceRoutes.use(`${DeviceApiRoute.ACK}`, requireDevice);
@@ -320,6 +323,40 @@ deviceRoutes.post(DeviceApiRoute.MESSAGE, async (c) => {
     },
   );
   return c.json({ relayed: true });
+});
+
+// --- SESSION_TITLE (agent rename_session) -------------------------------------
+// The agent's `rename_session` tool POSTs here to set this session's manual
+// display name. Mirrors the dashboard inline-edit (POST /api/home/session-title):
+// both write `manual_title`, which readers surface as COALESCE(manual_title,
+// title). It is a SEPARATE column from the heartbeat's auto-title, so a rename
+// can't be clobbered by the next ≤10s beat. An empty name clears the override
+// (revert to the auto-title). NOT AFK-gated: a label is session metadata (like
+// cwd/title), not user-facing comms, so it applies at the keyboard too.
+deviceRoutes.post(DeviceApiRoute.SESSION_TITLE, async (c) => {
+  const auth = device(c);
+  const body = (await c.req.json().catch(() => ({}))) as {
+    sessionId?: unknown;
+    title?: unknown;
+  };
+  const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+  if (!sessionId) return c.json({ error: 'missing_session_id' }, 400);
+  if (!isUuid(sessionId)) return c.json({ error: 'invalid_session_id' }, 400);
+  // Clean + clamp server-side (defense-in-depth; the device cleans too). An empty
+  // result clears the override → null.
+  const title = manualTitleValue(typeof body.title === 'string' ? body.title : '');
+  // Scope check: the session must belong to this device/account (tenant isolation).
+  const session = await getSessionForDevice({
+    sessionId,
+    deviceId: auth.deviceId,
+    accountId: auth.accountId,
+  });
+  if (!session) return c.json({ error: 'unknown_session' }, 404);
+  // Honor the write's own scope result too — closes the TOCTOU if the row is
+  // reaped between the ownership read and the update.
+  const updated = await setManualTitle({ sessionId, accountId: auth.accountId, title });
+  if (!updated) return c.json({ error: 'unknown_session' }, 404);
+  return c.json({ title });
 });
 
 // --- PERMISSION (BLOCKING approve-and-resume for Codex) ------------------------

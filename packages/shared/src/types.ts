@@ -99,6 +99,22 @@ export interface SessionInfo {
  *  re-clamped server-side as defense-in-depth. */
 export const SESSION_TITLE_MAX_LEN = 80;
 
+/** Normalize any session label (tap auto-title or a manual rename) to a single
+ *  trimmed line within the length cap. Shared so the tap's capture path and the
+ *  `rename_session` tool clean names identically. */
+export function cleanSessionTitle(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, SESSION_TITLE_MAX_LEN);
+}
+
+/** The value to persist for a manual rename (sessions.manual_title): the cleaned
+ *  name, or null when it cleans to empty — which CLEARS the override so readers
+ *  fall back to the auto-title. The single source of truth for the empty→clear
+ *  rule, shared by the agent's device route and the dashboard's BFF route. */
+export function manualTitleValue(raw: string): string | null {
+  const cleaned = cleanSessionTitle(raw);
+  return cleaned.length > 0 ? cleaned : null;
+}
+
 /** Max length (chars) of an attention `description` / `inputPreview` the control
  *  plane will store. Capped device-side at egress (`sanitizeText`); re-clamped
  *  server-side as defense-in-depth so a forged/buggy client can't bloat the

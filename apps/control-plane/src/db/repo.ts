@@ -122,8 +122,13 @@ interface MessageLogRow {
 // SessionInfo.afk therefore always reflects the device's value.
 const SESSION_FROM = 'FROM sessions s JOIN devices d ON d.id = s.device_id';
 const SESSION_COLUMNS =
-  's.id, s.device_id, s.account_id, s.cwd, s.title, s.agent, s.state, ' +
-  's.last_event_at, d.afk';
+  's.id, s.device_id, s.account_id, s.cwd, ' +
+  // Effective label: a manual rename (agent rename_session tool or a dashboard
+  // edit, stored in manual_title) wins over the device-derived auto-title.
+  // Aliased back to `title` so every reader (dashboard SSE, orchestrator prompt)
+  // gets the override transparently — SessionRow.title is the effective value.
+  'COALESCE(s.manual_title, s.title) AS title, ' +
+  's.agent, s.state, s.last_event_at, d.afk';
 
 function toSessionInfo(r: SessionRow): SessionInfo {
   const info: SessionInfo = {
@@ -534,6 +539,30 @@ export async function touchSession(args: {
       WHERE id = $1 AND device_id = $2 AND account_id = $3
       RETURNING id`,
     [args.sessionId, args.deviceId, args.accountId],
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Set (or clear) a session's MANUAL display-name override — the explicit rename
+ * from the agent's `rename_session` tool or a dashboard inline-edit. Writes
+ * `manual_title` (NOT `title`), so the device heartbeat's auto-title never
+ * clobbers it; readers surface COALESCE(manual_title, title). Pass `null` (or an
+ * empty cleaned name) to clear the override and revert to the auto-title.
+ * Account-scoped (the tenant boundary); returns false if no such session.
+ * The manual_title change fires trg_session_state_update → the dashboard SSE
+ * refreshes the label live. Caller is responsible for cleaning/clamping the name.
+ */
+export async function setManualTitle(args: {
+  sessionId: string;
+  accountId: string;
+  title: string | null;
+}): Promise<boolean> {
+  const rows = await query<{ id: string }>(
+    `UPDATE sessions SET manual_title = $3
+      WHERE id = $1 AND account_id = $2
+      RETURNING id`,
+    [args.sessionId, args.accountId, args.title],
   );
   return rows.length > 0;
 }

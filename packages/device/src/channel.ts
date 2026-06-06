@@ -42,9 +42,12 @@ import {
   ChannelMethod,
   DeviceApiRoute,
   MESSAGE_USER_TOOL,
+  RENAME_SESSION_TOOL,
+  SESSION_TITLE_MAX_LEN,
   SseEvent,
   type AttentionEvent,
   type InboxItem,
+  cleanSessionTitle,
   isAfkState,
 } from '@imsg/shared';
 import {
@@ -221,7 +224,8 @@ const mcp = new Server(
       '`message_user` with expect_reply: true and the full question/plan text (all options verbatim), then STOP and ' +
       'end your turn (do not exit, do not guess, do not retry the denied tool). The user\'s reply arrives later as a ' +
       '<channel source="imsg-device"> message; treat it as authoritative and resume. message_user reaches the ' +
-      "user's phone over iMessage.",
+      "user's phone over iMessage. Use the `rename_session` tool to name this session for what you're working on " +
+      '(and update it as the focus shifts) so it is easy to identify on the dashboard.',
   },
 );
 
@@ -254,6 +258,26 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
         },
         required: ['text'],
+      },
+    },
+    {
+      name: RENAME_SESSION_TOOL,
+      description:
+        "Set this session's display name on the dashboard (and the label the user/orchestrator uses to refer to " +
+        'you). Call it to name the session for what it is working on, and update it as the focus changes — e.g. ' +
+        '"Auth refactor", then "Fixing CI". This overrides the auto-generated title; it does NOT rename anything in ' +
+        'Claude Code itself. Works whether or not AFK is on. Pass an empty name to clear it and fall back to the ' +
+        `auto title. Names are one line, trimmed to ${SESSION_TITLE_MAX_LEN} chars.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description:
+              "The session's new display name (a short label, e.g. \"Auth refactor\"). Empty clears the override.",
+          },
+        },
+        required: ['name'],
       },
     },
   ],
@@ -290,8 +314,66 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       ],
     };
   }
+  if (req.params.name === RENAME_SESSION_TOOL) {
+    const { name } = req.params.arguments as { name?: unknown };
+    const cleaned = cleanSessionTitle(typeof name === 'string' ? name : '');
+    const ok = await renameSession(cleaned);
+    if (!ok) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: "couldn't rename the session (device not paired, offline, or disabled)",
+          },
+        ],
+      };
+    }
+    return {
+      content: [
+        { type: 'text', text: cleaned ? `renamed to "${cleaned}"` : 'cleared the manual name' },
+      ],
+    };
+  }
   throw new Error(`unknown tool: ${req.params.name}`);
 });
+
+/**
+ * Set this session's manual display name → POST /api/device/session-title. Unlike
+ * a status relay this is NOT AFK-gated (a label is session metadata, like the
+ * title/cwd that ride the always-on heartbeat) — but it IS killswitch-gated, like
+ * every device→server write. An empty `title` clears the override server-side.
+ * Returns true only on a confirmed write so the tool can report failure to the
+ * agent.
+ */
+async function renameSession(title: string): Promise<boolean> {
+  await sessionReady; // rename the REAL session id (matches the tap/heartbeat row)
+  const token = loadToken();
+  if (!token) {
+    log('no_token', { hint: 'run `imsg pair <token>` first' });
+    return false;
+  }
+  if (!(await egressEnabled(token))) {
+    log('egress_disabled', {});
+    return false;
+  }
+  try {
+    const resp = await postJson(
+      deviceApiUrl(DeviceApiRoute.SESSION_TITLE),
+      JSON.stringify({ sessionId: SESSION_ID, title }),
+      { bearer: token },
+    );
+    if (resp.classification === Classification.SUCCESS) {
+      log('session_renamed', { len: title.length });
+      return true;
+    }
+    log('session_rename_failed', { status: resp.status });
+    return false;
+  } catch (err) {
+    log('session_rename_error', { error: err instanceof Error ? err.message : String(err) });
+    return false;
+  }
+}
 
 /**
  * Fire-and-forget status/result → POST /api/device/message. The server agent

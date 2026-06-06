@@ -17,11 +17,14 @@ export function DeviceCard({
   device,
   sessions,
   onToggleAfk,
+  onRenameSession,
   afkBusy,
 }: {
   device: DeviceInfo;
   sessions: SessionInfo[];
   onToggleAfk: (next: AfkState) => void;
+  /** Persist a session's manual display name (empty string clears it). */
+  onRenameSession: (sessionId: string, name: string) => void;
   afkBusy: boolean;
 }) {
   return (
@@ -67,7 +70,13 @@ export function DeviceCard({
             No live sessions on this machine.
           </div>
         ) : (
-          sessions.map((s) => <SessionCard key={s.id} session={s} />)
+          sessions.map((s) => (
+            <SessionCard
+              key={s.id}
+              session={s}
+              onRename={(name) => onRenameSession(s.id, name)}
+            />
+          ))
         )}
       </div>
     </div>

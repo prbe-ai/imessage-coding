@@ -44,7 +44,7 @@ import {
   AfkState,
   AgentKind,
   DeviceApiRoute,
-  SESSION_TITLE_MAX_LEN,
+  cleanSessionTitle,
   type ActivityBatchBody,
   type ActivityEvent,
 } from '@imsg/shared';
@@ -310,11 +310,6 @@ const TitleRank = { NONE: 0, FIRST_MESSAGE: 1, AI: 2, CUSTOM: 3 } as const;
 type TitleRank = (typeof TitleRank)[keyof typeof TitleRank];
 let titleRank: TitleRank = TitleRank.NONE;
 
-/** Normalize a title to a single trimmed line within the length cap. */
-function cleanTitle(text: string): string {
-  return text.replace(/\s+/g, ' ').trim().slice(0, SESSION_TITLE_MAX_LEN);
-}
-
 /** Atomically write `<id>.title`. Returns true only on a confirmed write — the
  *  caller must NOT advance `titleRank` on failure, or a better title we've
  *  already scanned past would never be retried. */
@@ -336,7 +331,7 @@ function writeTitle(text: string): boolean {
 function offerTitle(rank: TitleRank, rawText: string): void {
   if (rank < titleRank) return;
   if (rank === titleRank && rank !== TitleRank.CUSTOM) return;
-  const text = cleanTitle(rawText);
+  const text = cleanSessionTitle(rawText);
   if (!text) return;
   if (writeTitle(text)) {
     titleRank = rank;

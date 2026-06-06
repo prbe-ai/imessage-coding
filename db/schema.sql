@@ -173,9 +173,17 @@ CREATE TABLE IF NOT EXISTS sessions (
   device_id      UUID        NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   account_id     UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   cwd            TEXT,
-  -- Human label = the session's first user message (sanitized, truncated). Set
-  -- once, then frozen (first-writer-wins in upsertSession). NULL until observed.
+  -- AUTO label, device-derived: the session's first user message → Claude Code's
+  -- ai-title → a /rename custom-title, upgraded in place (newest-non-null wins in
+  -- upsertSession). The device heartbeat re-asserts it every ≤10s. NULL until observed.
   title          TEXT,
+  -- Manual display-name OVERRIDE, set explicitly by the AGENT (rename_session tool
+  -- → POST /api/device/session-title) or the USER (dashboard inline-edit → POST
+  -- /api/home/session-title). Readers surface COALESCE(manual_title, title), so this
+  -- wins over the auto `title`. It is a SEPARATE column on purpose: the heartbeat
+  -- re-asserts the auto `title` every ≤10s and would clobber a rename stored there;
+  -- kept here, the heartbeat never touches it. NULL = no override (use the auto title).
+  manual_title   TEXT,
   agent          TEXT        NOT NULL DEFAULT 'claude-code',
   state          TEXT        NOT NULL DEFAULT 'active'
                    CHECK (state IN ('active', 'waiting', 'idle', 'ended')),
@@ -189,6 +197,10 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_device  ON sessions(device_id);
+-- Idempotent add for already-provisioned DBs (the CREATE TABLE IF NOT EXISTS above
+-- is a no-op once the table exists). Manual rename override; see the column comment.
+-- No backfill — NULL correctly means "no override yet" (readers fall back to title).
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS manual_title TEXT;
 
 -- -----------------------------------------------------------------------------
 -- account_locks — CROSS-MACHINE per-account turn serialization (a LEASE).
@@ -456,10 +468,15 @@ DROP TRIGGER IF EXISTS trg_session_state_update ON sessions;
 CREATE TRIGGER trg_session_state_update
   AFTER UPDATE ON sessions
   FOR EACH ROW
-  -- Only on a lifecycle (state) change. afk moved to `devices` (machine-wide) and
-  -- fires `trg_device_state_update` instead; the vestigial sessions.afk column is
-  -- no longer written, so it's not watched here.
-  WHEN (OLD.state IS DISTINCT FROM NEW.state)
+  -- Fire on a lifecycle (state) change OR a manual rename (manual_title changed),
+  -- so the dashboard's SSE refreshes the session's display name live. NOT on the
+  -- per-60s touchSession (it only bumps last_event_at) nor the heartbeat's auto
+  -- `title` upgrade — those leave state + manual_title untouched, so the dashboard
+  -- isn't woken every beat. afk moved to `devices` (machine-wide) and fires
+  -- `trg_device_state_update` instead; the vestigial sessions.afk column is no
+  -- longer written, so it's not watched here.
+  WHEN (OLD.state IS DISTINCT FROM NEW.state
+        OR OLD.manual_title IS DISTINCT FROM NEW.manual_title)
   EXECUTE FUNCTION notify_session_state();
 
 -- =============================================================================

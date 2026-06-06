@@ -27,8 +27,12 @@ export async function GET(req: Request): Promise<Response> {
   // afk is machine-wide → source it from the session's device (JOIN),
   // not the now-unused sessions.afk column.
   const res = await query<SessionDbRow>(
-    `SELECT s.id, s.device_id, s.cwd, s.title, s.agent, s.last_event_at,
-            s.state, d.afk
+    // Effective label: a manual rename (manual_title) wins over the auto-title;
+    // aliased to `title` so the mapper is unchanged. Mirrors the control plane's
+    // SESSION_COLUMNS COALESCE so both read paths agree.
+    `SELECT s.id, s.device_id, s.cwd,
+            COALESCE(s.manual_title, s.title) AS title,
+            s.agent, s.last_event_at, s.state, d.afk
        FROM sessions s
        JOIN devices d ON d.id = s.device_id
       WHERE s.account_id = $1 AND s.state <> $2

@@ -28,8 +28,9 @@ export function UsageSteps() {
         </li>
         <li>
           <span className="font-medium text-on-surface">Turn on AFK mode</span> —
-          run <Code>/afk</Code> in Claude Code (or <Code>$afk</Code> in Codex).
-          You can also toggle it from your dashboard.
+          run <Code>/afk</Code> in Claude Code, or <Code>$afk</Code> in Codex (not{" "}
+          <Code>/afk</Code> — Codex has no slash commands). You can also toggle it
+          from your dashboard.
         </li>
         <li>
           <span className="font-medium text-on-surface">That&apos;s it</span> —

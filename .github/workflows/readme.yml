@@ -1,0 +1,34 @@
+name: README auto-update (AI)
+
+# A Claude agent investigates recent commits/PRs and updates README.md where it
+# matters, committing only if README.md is the sole change.
+# Logic lives in prbe-ai/readme-updater@v2 — bump that tag to get updates.
+# Requires an ANTHROPIC_API_KEY secret (repo or org level).
+
+on:
+  schedule:
+    - cron: '0 6 * * *'      # daily 06:00 UTC — adjust to taste (cron is UTC)
+  workflow_dispatch: {}        # also run on demand from the Actions tab
+
+permissions:
+  contents: write              # guard step pushes the README change
+  pull-requests: read          # agent crawls merged PRs via gh
+  issues: read                 # agent crawls referenced issues via gh
+
+concurrency:
+  group: readme-auto-update
+  cancel-in-progress: false
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # the agent needs history to investigate the window
+
+      - name: Update README
+        uses: prbe-ai/readme-updater@v2
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}

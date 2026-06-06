@@ -258,21 +258,25 @@ describe('relocateLegacyState', () => {
 describe('resolveCodexAppServerUrl', () => {
   const BAKED_WS = { codexAppServerUrl: 'ws://baked:9000' };
 
-  test('IMSG_CODEX_APPSERVER_URL env wins over baked (trailing slash stripped)', () => {
-    expect(resolveCodexAppServerUrl({ IMSG_CODEX_APPSERVER_URL: 'ws://127.0.0.1:8765/' }, BAKED_WS)).toBe(
-      'ws://127.0.0.1:8765',
-    );
+  test('IMSG_CODEX_APPSERVER_URL env wins over pid-file + baked (trailing slash stripped)', () => {
+    expect(
+      resolveCodexAppServerUrl({ IMSG_CODEX_APPSERVER_URL: 'ws://127.0.0.1:8765/' }, 'ws://file:1', BAKED_WS),
+    ).toBe('ws://127.0.0.1:8765');
   });
 
-  test('baked value used when env is unset', () => {
-    expect(resolveCodexAppServerUrl({}, BAKED_WS)).toBe('ws://baked:9000');
+  test('launcher pid-file value used when env is unset (the normal `imsg codex` path)', () => {
+    expect(resolveCodexAppServerUrl({}, 'ws://127.0.0.1:54321\n', BAKED_WS)).toBe('ws://127.0.0.1:54321');
+  });
+
+  test('baked value used when env + pid-file are unset', () => {
+    expect(resolveCodexAppServerUrl({}, undefined, BAKED_WS)).toBe('ws://baked:9000');
   });
 
   test('returns empty (feature OFF) when nothing is configured', () => {
-    expect(resolveCodexAppServerUrl({}, null)).toBe('');
+    expect(resolveCodexAppServerUrl({}, undefined, null)).toBe('');
   });
 
-  test('whitespace-only env is treated as unset', () => {
-    expect(resolveCodexAppServerUrl({ IMSG_CODEX_APPSERVER_URL: '   ' }, BAKED_WS)).toBe('ws://baked:9000');
+  test('whitespace-only candidates are treated as unset', () => {
+    expect(resolveCodexAppServerUrl({ IMSG_CODEX_APPSERVER_URL: '   ' }, '\n', BAKED_WS)).toBe('ws://baked:9000');
   });
 });

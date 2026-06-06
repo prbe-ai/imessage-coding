@@ -13,6 +13,7 @@
  * relocated on first run by migrateLegacyDeviceDir() (non-destructive copy).
  */
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { AgentKind, DeviceApiRoute, isAgentKind } from '@imsg/shared';
@@ -170,6 +171,23 @@ export function afkDirtyFile(): string {
  *  sessions. See caffeinate.ts. */
 export function caffeinatePidFile(): string {
   return join(deviceDir(), 'caffeinate.pid');
+}
+
+/** Directory of per-session Codex app-server URL files, one per app-server
+ *  PROCESS, named by the app-server's PID. The `imsg codex` launcher writes
+ *  `<apppid>` = `ws://127.0.0.1:<port>` after starting an app-server; the channel
+ *  server — a CHILD of that app-server — reads the entry for its OWN parent pid.
+ *  Per-PID so concurrent sessions (each with its own app-server + port) never
+ *  clobber each other, unlike a single shared file. (Codex spawns the plugin's MCP
+ *  server with only the manifest env, NOT the app-server's, so the URL can't ride
+ *  an inherited env var — this pid-keyed file is the per-session delivery.) */
+export function codexAppServerDir(): string {
+  return join(deviceDir(), 'codex-appserver');
+}
+
+/** Path to the app-server URL entry for `pid` (the app-server process's PID). */
+export function codexAppServerPidFile(pid: number): string {
+  return join(codexAppServerDir(), String(pid));
 }
 
 /** Cached pending-attention count for the statusline (written by channel server). */
@@ -351,31 +369,76 @@ export function deviceApiUrl(route: DeviceApiRoute): string {
 // client), so for Codex the channel server injects inbound replies via the
 // app-server's `turn/start` over a WebSocket (see codex-appserver.ts). This URL
 // names that app-server. It's set ONLY when the user launches via `imsg codex`,
-// which starts a per-session `codex app-server --listen ws://127.0.0.1:<port>` and
-// exports IMSG_CODEX_APPSERVER_URL — inherited by the MCP server the app-server
-// spawns. The URL is delivered ONLY by that env var: each session has its OWN
-// app-server on its OWN port, so a single shared file would be wrong (last-writer
-// clobbers it with another session's port). Empty = feature OFF (plain `codex`),
-// so the dropped-notification path is unchanged for non-launcher sessions.
+// which starts a per-session `codex app-server --listen ws://127.0.0.1:<port>`.
+//
+// DELIVERY: Codex spawns the plugin's MCP server with ONLY the .mcp.codex.json
+// manifest env (IMSG_AGENT_KIND), NOT the app-server's env — so the URL can't ride
+// an inherited env var (verified on 0.137.0). And a single shared file is wrong
+// under per-session ports (last-writer clobbers it). So the launcher writes a
+// PID-KEYED file (codexAppServerPidFile(<apppid>)), and the channel server reads
+// the entry for its OWN parent pid (the app-server that spawned it). Empty =
+// feature OFF (plain `codex`), so the dropped-notification path is unchanged for
+// non-launcher sessions.
 
 /**
  * Pure resolution (no I/O — unit tested). Precedence: explicit env override >
- * build-baked config. Empty / whitespace-only values are treated as unset, and a
- * trailing slash is stripped. Returns '' when none is configured — the OFF signal
- * the channel server gates on.
+ * launcher-written pid-file value > build-baked config. Empty / whitespace-only
+ * values are treated as unset, and a trailing slash is stripped. Returns '' when
+ * none is configured — the OFF signal the channel server gates on.
  */
 export function resolveCodexAppServerUrl(
   env: Record<string, string | undefined>,
+  fileValue: string | undefined,
   baked: BuildConfig | null,
 ): string {
-  const candidates = [env.IMSG_CODEX_APPSERVER_URL, baked?.codexAppServerUrl];
+  const candidates = [env.IMSG_CODEX_APPSERVER_URL, fileValue, baked?.codexAppServerUrl];
   const found = candidates.find((v) => typeof v === 'string' && v.trim().length > 0);
   return found ? found.trim().replace(/\/+$/, '') : '';
 }
 
-/** Resolve the Codex app-server WS URL, or '' if the feature is not configured. */
+/** Parent pid of `pid` via `ps -o ppid=`, or 0 if unavailable / a root. Short
+ *  timeout — ps returns in single-digit ms. */
+function parentPidOf(pid: number): number {
+  try {
+    const n = Number.parseInt(
+      execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], {
+        encoding: 'utf8',
+        timeout: 500,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim(),
+      10,
+    );
+    return Number.isInteger(n) && n > 1 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Read the launcher's app-server URL entry for OUR ancestry: try our direct
+ *  parent first (normally the app-server that spawned us), then walk up a few
+ *  levels in case an intervening process sits between — mirroring the defensive
+ *  ancestor walk in deriveCodexSessionId (codex-session.ts). Returns the first
+ *  entry found, or undefined. The common case (direct parent IS the app-server)
+ *  hits on the first try with NO `ps` call. */
+function readCodexAppServerEntry(startPid: number, maxDepth = 4): string | undefined {
+  let pid = startPid;
+  for (let depth = 0; depth < maxDepth && pid > 1; depth++) {
+    try {
+      return readFileSync(codexAppServerPidFile(pid), 'utf8');
+    } catch {
+      /* no entry for this ancestor — walk up */
+    }
+    pid = parentPidOf(pid);
+  }
+  return undefined;
+}
+
+/** Resolve the Codex app-server WS URL, or '' if the feature is not configured.
+ *  Reads the launcher's pid-keyed entry for OUR parent process (the app-server
+ *  that spawned this channel server) — that's how the per-session URL arrives. */
 export function codexAppServerUrl(): string {
-  return resolveCodexAppServerUrl(process.env, buildConfig());
+  const fileValue = readCodexAppServerEntry(process.ppid);
+  return resolveCodexAppServerUrl(process.env, fileValue, buildConfig());
 }
 
 /** Re-export so call sites use the enum, never raw path strings. */

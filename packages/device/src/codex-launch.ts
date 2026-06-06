@@ -22,10 +22,10 @@
  * Pure helpers (port/arg/url construction) are unit-tested; the process
  * orchestration is a thin, side-effecting shell around them.
  */
-import { appendFileSync, mkdirSync, openSync } from 'node:fs';
+import { appendFileSync, mkdirSync, openSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
-import { logDir } from './config.ts';
+import { codexAppServerDir, codexAppServerPidFile, logDir } from './config.ts';
 
 /**
  * The app-server port for this launch: a fixed override (IMSG_CODEX_APPSERVER_PORT,
@@ -102,16 +102,58 @@ async function isAppServerUp(port: number, timeoutMs = 1_000): Promise<boolean> 
   }
 }
 
+/** True iff `pid` is a live process (signal 0). EPERM = alive but not ours. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === 'EPERM';
+  }
+}
+
+/**
+ * Record this app-server's URL under its PID so the channel server it spawns can
+ * find it (codexAppServerUrl reads codexAppServerPidFile(process.ppid)). Codex
+ * passes the MCP server only the manifest env, not the app-server's, so this
+ * pid-keyed file — not an env var — is how the per-session URL reaches the channel
+ * server. Also prunes entries for app-servers that have since exited (dead pids).
+ */
+function recordAppServerUrl(pid: number, url: string): void {
+  try {
+    mkdirSync(codexAppServerDir(), { recursive: true });
+    writeFileSync(codexAppServerPidFile(pid), url, 'utf8');
+  } catch {
+    /* best-effort — without it the channel server just won't get inbound */
+  }
+  try {
+    for (const name of readdirSync(codexAppServerDir())) {
+      const p = Number(name);
+      if (Number.isInteger(p) && p !== pid && !pidAlive(p)) {
+        try {
+          rmSync(codexAppServerPidFile(p));
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  } catch {
+    /* dir vanished / unreadable — nothing to prune */
+  }
+}
+
 /**
  * Start this session's own `codex app-server` on `port` and return true once its
  * /readyz answers. The process is unref'd so it outlives this launcher (the TUI
- * attaches to it). IMSG_CODEX_APPSERVER_URL is set in its env so the channel MCP
- * server it spawns inherits the URL — that env is the ONLY URL channel now (no
- * shared url-file, which would be wrong with one app-server per session).
+ * attaches to it). We record the URL under the app-server's PID (recordAppServerUrl)
+ * so the channel MCP server it spawns can resolve it by its own parent pid.
  */
 async function startAppServer(port: number, url: string): Promise<boolean> {
   // With a fresh per-session port nothing should be listening; if an override port
-  // is already up (e.g. a re-run with IMSG_CODEX_APPSERVER_PORT), reuse it.
+  // is already up (e.g. a re-run with IMSG_CODEX_APPSERVER_PORT), reuse it. We
+  // don't (can't cheaply) record a URL entry here — if that server was started by a
+  // prior launcher run its entry already exists; a manually-started one should set
+  // IMSG_CODEX_APPSERVER_URL in the env instead. The override path is a dev knob.
   if (await isAppServerUp(port)) {
     note('appserver_reuse', { port });
     return true;
@@ -125,6 +167,9 @@ async function startAppServer(port: number, url: string): Promise<boolean> {
     stderr: fd,
   });
   proc.unref(); // survive this launcher exiting
+  // Record BEFORE the readiness wait: the app-server spawns the channel server only
+  // once the TUI attaches (later), so the entry is always in place first.
+  if (proc.pid) recordAppServerUrl(proc.pid, url);
   note('appserver_spawned', { port, pid: proc.pid });
 
   // Poll readiness — the app-server binds + loads config in a second or two.

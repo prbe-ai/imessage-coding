@@ -60,7 +60,7 @@ import {
   sessionTitleFile,
 } from './config.ts';
 import { deriveCodexSessionId } from './codex-session.ts';
-import { injectReply } from './codex-appserver.ts';
+import { injectReply, resolveActiveThreadId } from './codex-appserver.ts';
 import { loadToken } from './creds.ts';
 import { readHandshakeForProject } from './handshake.ts';
 import { Classification, postJson } from './httpclient.ts';
@@ -118,16 +118,19 @@ const sessionReady: Promise<void> = resolveSessionId().then((id) => {
  *   1. IMSG_SESSION_ID    — explicit override (tests / manual runs).
  *   2. CLAUDE_CODE_SESSION_ID — Claude Code native (≥2.1.160), authoritative +
  *      synchronous. Fixes same-cwd collisions: each MCP server gets its OWN id.
- *   3. (Codex only) the parent codex process's open ROLLOUT file — Codex hands
+ *   3. (Codex app-server / `imsg codex`) ASK THE APP-SERVER which thread it hosts
+ *      (thread/loaded/list). In `--remote` mode this MCP server is a child of the
+ *      shared app-server (not a per-session codex process), so the rollout walk
+ *      below is unreliable — but the app-server KNOWS its thread, and the launcher
+ *      gives each session its OWN app-server (unique port) so exactly one thread is
+ *      loaded. Authoritative; takes precedence over the rollout/handshake.
+ *   4. (Codex, plain) the parent codex process's open ROLLOUT file — Codex hands
  *      the MCP server no session id, so we read the real v7 id off our parent's
- *      rollout path (see codex-session.ts). Preferred over the handshake because
- *      it's keyed by OUR process, not the directory, so it never adopts another
- *      agent's id in a shared dir. Polled for the whole window (the rollout may
- *      not be open yet at boot).
- *   4. SessionStart handshake (project-dir-keyed) — fallback for older Claude Code
- *      (and a last resort for Codex if the rollout never appears). Can't tell apart
- *      concurrent same-dir sessions (last writer wins).
- *   5. random id — last resort (the session just won't correlate with the tap).
+ *      rollout path (see codex-session.ts). Keyed by OUR process, not the directory.
+ *   5. SessionStart handshake (project-dir-keyed) — fallback for older Claude Code
+ *      (and a last resort for Codex). Can't tell apart concurrent same-dir sessions
+ *      (last writer wins) — so it can adopt a DIFFERENT (even Claude) session's id.
+ *   6. random id — last resort (the session just won't correlate with the tap).
  *
  * Housekeeping (plugin install / marketplace validation) sessions never run the
  * background loops (see the boot gate), so their id is unused — short-circuit to a
@@ -138,6 +141,22 @@ async function resolveSessionId(): Promise<string> {
   if (eager) return eager;
   if (isPluginHousekeepingDir(PROJECT_CWD)) return randomUUID();
   const isCodex = agentKind() === AgentKind.CODEX;
+
+  // Codex hosted on an app-server (`imsg codex`): the app-server is authoritative
+  // for which thread (= session) it hosts; the parent-rollout walk below can't see
+  // it (our parent is the shared app-server). resolveActiveThreadId polls
+  // thread/loaded/list internally, so this one call covers the boot race.
+  if (isCodex) {
+    const appServer = codexAppServerUrl();
+    if (appServer) {
+      const tid = await resolveActiveThreadId(appServer);
+      if (tid) {
+        log('codex_session_from_appserver', { session: tid });
+        return tid;
+      }
+    }
+  }
+
   const deadline = Date.now() + HANDSHAKE_WAIT_MS;
   for (;;) {
     if (isCodex) {
@@ -185,7 +204,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.13' },
+  { name: 'imsg-device', version: '0.1.15' },
   {
     capabilities: {
       experimental: {

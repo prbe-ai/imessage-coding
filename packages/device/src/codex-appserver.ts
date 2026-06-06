@@ -14,9 +14,15 @@
  * user turn into a thread a first connection (the user's `--remote` TUI) owns, and
  * the owner receives the whole turn live (reasoning, tool calls, streamed reply).
  * The app-server's thread id EQUALS the Codex session id (`thread.id ===
- * thread.sessionId === rollout id`), which is exactly the SESSION_ID the channel
- * server already resolves from the parent codex rollout (codex-session.ts). So we
- * inject with `turn/start { threadId: SESSION_ID }` — no discovery needed.
+ * thread.sessionId === rollout id`), so once we know the thread id we inject with
+ * `turn/start { threadId }`.
+ *
+ * RESOLVING the thread id: in app-server mode the channel server can't reliably get
+ * its session id from the parent-process rollout walk (its parent is the shared
+ * app-server, not a per-session codex process), so {@link resolveActiveThreadId}
+ * asks the app-server itself via `thread/loaded/list` — authoritative. The launcher
+ * gives each codex session its OWN app-server (a unique port), so exactly one thread
+ * is loaded and the answer is unambiguous.
  *
  * Gated by codexAppServerUrl() (config.ts): only set when the user launches via
  * `imsg codex`, which hosts the app-server and points the TUI at it. With no URL
@@ -33,6 +39,7 @@ export const AppServerMethod = {
   INITIALIZE: 'initialize',
   INITIALIZED: 'initialized',
   TURN_START: 'turn/start',
+  THREAD_LOADED_LIST: 'thread/loaded/list',
 } as const;
 
 /** JSON-RPC version every frame carries. */
@@ -185,8 +192,81 @@ class AppServerWs {
 
 interface AppServerResponse {
   id?: number;
-  result?: { turn?: { id?: string } } & Record<string, unknown>;
+  result?: { turn?: { id?: string }; data?: unknown } & Record<string, unknown>;
   error?: { message?: string; code?: number } & Record<string, unknown>;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+export interface ResolveThreadOpts {
+  /** WS connect timeout. */
+  connectMs?: number;
+  /** Per-request response timeout. thread/loaded/list answers in ms, so keep this
+   *  tight — it caps how long a single wedged call can stall the poll. */
+  requestMs?: number;
+  /** Total wall-clock budget for the loaded-list poll (the thread may not be
+   *  loaded the instant we boot). Bounds the worst case on a hung app-server. */
+  totalMs?: number;
+  /** Delay between polls. */
+  intervalMs?: number;
+  log?: LogFn;
+}
+
+const RESOLVE_DEFAULTS = {
+  connectMs: 4_000,
+  requestMs: 2_000,
+  totalMs: 10_000,
+  intervalMs: 300,
+};
+
+/** Pick the single loaded thread id from a `thread/loaded/list` result's `data`
+ *  array, or null when it's empty or ambiguous (0 or >1). Pure (tested). With one
+ *  app-server per session exactly one thread is loaded, so a single id is the
+ *  normal, authoritative answer; 0 (not loaded yet) retries, >1 (shouldn't happen
+ *  in the per-session model) falls through to the rollout/handshake path. */
+export function singleLoadedThreadId(data: unknown): string | null {
+  if (!Array.isArray(data)) return null;
+  const ids = data.filter((x): x is string => typeof x === 'string' && x.length > 0);
+  return ids.length === 1 ? ids[0]! : null;
+}
+
+/**
+ * Ask the app-server at `url` for its single loaded thread id (the Codex session
+ * id), authoritatively — connect once, initialize, then poll `thread/loaded/list`
+ * until exactly one thread is loaded (or attempts run out). Returns the id or null.
+ * Never throws. This replaces the unreliable parent-rollout walk for app-server
+ * mode: the app-server KNOWS which thread it hosts, the OS process tree does not.
+ */
+export async function resolveActiveThreadId(url: string, opts: ResolveThreadOpts = {}): Promise<string | null> {
+  const o = { ...RESOLVE_DEFAULTS, ...opts };
+  const log: LogFn = opts.log ?? (() => {});
+  let client: AppServerWs;
+  try {
+    client = await AppServerWs.connect(url, o.connectMs);
+  } catch {
+    return null; // app-server not up yet — caller falls back / retries
+  }
+  try {
+    const init = await client.request(AppServerMethod.INITIALIZE, { clientInfo: CLIENT_INFO }, o.requestMs);
+    if (init.error) return null;
+    client.notify(AppServerMethod.INITIALIZED);
+    // Poll thread/loaded/list until one thread is loaded or the budget runs out.
+    // Bounded by wall-clock (totalMs), NOT a fixed attempt count, so a hung-but-
+    // connected app-server can't stack per-call timeouts into a multi-minute stall.
+    const deadline = Date.now() + o.totalMs;
+    do {
+      const resp = await client.request(AppServerMethod.THREAD_LOADED_LIST, {}, o.requestMs);
+      const id = singleLoadedThreadId(resp.result?.data);
+      if (id) {
+        log('codex_thread_from_appserver', { thread: id });
+        return id;
+      }
+      await sleep(o.intervalMs);
+    } while (Date.now() < deadline);
+    return null;
+  } finally {
+    client.close();
+  }
 }
 
 /**

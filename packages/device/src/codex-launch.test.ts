@@ -1,31 +1,40 @@
 /**
  * Unit tests for the `imsg codex` launcher's pure helpers (port + argv + URL
- * construction). The process orchestration (ensureAppServer/launchCodex) shells
+ * construction). The process orchestration (startAppServer/launchCodex) shells
  * out to a real `codex` and is covered by manual end-to-end runs, not here.
  */
 import { describe, expect, test } from 'bun:test';
 import {
-  DEFAULT_CODEX_APPSERVER_PORT,
   appServerReadyUrl,
   appServerSpawnArgs,
   appServerWsUrl,
+  pickFreePort,
   remoteTuiArgs,
   resolveCodexPort,
 } from './codex-launch.ts';
 
 describe('resolveCodexPort', () => {
-  test('defaults when IMSG_CODEX_APPSERVER_PORT is unset', () => {
-    expect(resolveCodexPort({})).toBe(DEFAULT_CODEX_APPSERVER_PORT);
+  test('null when IMSG_CODEX_APPSERVER_PORT is unset (→ caller picks a free port)', () => {
+    expect(resolveCodexPort({})).toBeNull();
   });
 
   test('uses a valid override', () => {
     expect(resolveCodexPort({ IMSG_CODEX_APPSERVER_PORT: '9123' })).toBe(9123);
   });
 
-  test('rejects out-of-range / garbage and falls back to default', () => {
-    expect(resolveCodexPort({ IMSG_CODEX_APPSERVER_PORT: '0' })).toBe(DEFAULT_CODEX_APPSERVER_PORT);
-    expect(resolveCodexPort({ IMSG_CODEX_APPSERVER_PORT: '70000' })).toBe(DEFAULT_CODEX_APPSERVER_PORT);
-    expect(resolveCodexPort({ IMSG_CODEX_APPSERVER_PORT: 'abc' })).toBe(DEFAULT_CODEX_APPSERVER_PORT);
+  test('rejects out-of-range / garbage → null (free port)', () => {
+    expect(resolveCodexPort({ IMSG_CODEX_APPSERVER_PORT: '0' })).toBeNull();
+    expect(resolveCodexPort({ IMSG_CODEX_APPSERVER_PORT: '70000' })).toBeNull();
+    expect(resolveCodexPort({ IMSG_CODEX_APPSERVER_PORT: 'abc' })).toBeNull();
+  });
+});
+
+describe('pickFreePort', () => {
+  test('returns a bindable loopback port in range', async () => {
+    const port = await pickFreePort();
+    expect(Number.isInteger(port)).toBe(true);
+    expect(port).toBeGreaterThan(0);
+    expect(port).toBeLessThan(65536);
   });
 });
 

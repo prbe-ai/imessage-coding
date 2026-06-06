@@ -165,6 +165,13 @@ export function afkDirtyFile(): string {
   return join(deviceDir(), 'afk.dirty');
 }
 
+/** PID of the macOS `caffeinate` keep-awake process held while AFK is ON (spawned
+ *  on AFK-on, killed on AFK-off). Machine-wide — one per device, shared across
+ *  sessions. See caffeinate.ts. */
+export function caffeinatePidFile(): string {
+  return join(deviceDir(), 'caffeinate.pid');
+}
+
 /** Cached pending-attention count for the statusline (written by channel server). */
 export function pendingStateFile(): string {
   return join(deviceDir(), 'pending.state');

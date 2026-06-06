@@ -166,6 +166,20 @@ case "$IMSG_AGENT_TARGET" in
   both)        uninstall_claude_code; uninstall_codex ;;
 esac
 
+# --- shared: release the keep-awake (caffeinate) process --------------------
+# AFK-on spawns a detached `caffeinate` tracked by $DEVICE_DIR/caffeinate.pid;
+# kill it BEFORE deleting the dir so an uninstall-while-AFK can't strand a
+# process holding the Mac awake forever. Guarded: only kill a pid that is still a
+# live caffeinate (never a recycled, unrelated pid). Best-effort.
+CAFFEINATE_PID_FILE="${DEVICE_DIR}/caffeinate.pid"
+if [ -f "$CAFFEINATE_PID_FILE" ]; then
+  CAFF_PID="$(cat "$CAFFEINATE_PID_FILE" 2>/dev/null || true)"
+  if [ -n "$CAFF_PID" ] && ps -p "$CAFF_PID" -o comm= 2>/dev/null | grep -q caffeinate; then
+    kill "$CAFF_PID" 2>/dev/null || true
+    say "released keep-awake (caffeinate pid $CAFF_PID)"
+  fi
+fi
+
 # --- shared: remove local device state (token, outbox) ----------------------
 # Both agents share ONE ~/.imsg device dir; remove it last (it is the token +
 # outbox + afk state, common to both targets).

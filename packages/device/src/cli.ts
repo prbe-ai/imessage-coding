@@ -13,6 +13,7 @@
  */
 import { hostname, platform } from 'node:os';
 import { AfkState, DeviceApiRoute, isAfkState } from '@imsg/shared';
+import { reconcileCaffeinate } from './caffeinate.ts';
 import { deviceApiUrl, deviceIdFile } from './config.ts';
 import { clearToken, ensureDeviceDir, loadToken, saveToken } from './creds.ts';
 import { Classification, parseJson, postJson } from './httpclient.ts';
@@ -133,6 +134,10 @@ export async function afk(arg: string): Promise<number> {
   // un-dirty, so a stale server push would silently revert it with no self-heal.
   writeAfkDirty(true);
   writeAfk(next);
+  // Keep the Mac awake for exactly the AFK window so a remote session can't be
+  // dropped by an idle sleep. Best-effort + macOS-only; runs before the (awaited)
+  // sync so a slow/hung POST can't delay the keep-awake taking effect.
+  reconcileCaffeinate(next);
   // The flag keeps the heartbeat re-asserting this toggle up (and blocks a stale
   // down-push from reverting it) until the cloud confirms; cleared on a confirmed sync.
   if (await syncState(next)) writeAfkDirty(false);

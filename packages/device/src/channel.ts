@@ -70,6 +70,7 @@ import { sanitizeOptional, sanitizeText } from './sanitize.ts';
 import { readAfk, readAfkDirty, writeAfk, writeAfkDirty, writePending } from './state.ts';
 import { shouldAdoptDownstreamAfk, shouldClearDirty } from './afk-sync.ts';
 import { messageUserBlockedWhenAfkOff } from './afk-gate.ts';
+import { reconcileCaffeinate } from './caffeinate.ts';
 
 // Relocate pre-0.1.7 state from ~/.claude/plugins/imsg-device → ~/.imsg (once).
 migrateLegacyDeviceDir();
@@ -586,6 +587,11 @@ async function subscribeEvents(): Promise<void> {
                 shouldAdoptDownstreamAfk({ pushedAfk: body.afk, dirty: readAfkDirty(), localAfk: readAfk() })
               ) {
                 writeAfk(body.afk);
+                // Match the keep-awake to a remote/dashboard toggle too: an AFK-on
+                // pushed to an unattended Mac is exactly when an idle sleep would
+                // drop the session. Best-effort + macOS-only; idempotent across the
+                // many sessions that receive this same push (see reconcileCaffeinate).
+                reconcileCaffeinate(body.afk);
                 log('afk_synced', { afk: body.afk });
               } else if (isAfkState(body.afk) && readAfkDirty() && body.afk === readAfk()) {
                 // The server already holds our pending toggle (this push came from the

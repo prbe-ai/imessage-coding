@@ -23,6 +23,11 @@ plane. Uses a durable outbox/backoff/creds/sanitize/killswitch design.
   There is no standing auto-approval; every tool is gated per-action. When AFK,
   `AskUserQuestion` is held with instructions to relay via the `reply` tool and
   STOP, while `ExitPlanMode` is allowed to proceed (its tools stay gated).
+- **Keep-awake while AFK** (`caffeinate.ts`) — on macOS, AFK-on spawns a detached
+  `caffeinate -i -s` (prevents idle + system sleep, lets the display sleep) so an
+  unattended Mac can't drop its network/iMessage bridge mid-session; AFK-off kills
+  it. Tracked by `caffeinate.pid`, reconciled at both AFK write sites (CLI + the
+  remote down-push), idempotent, and a no-op off macOS.
 - **CLI** (`bin/imsg.ts`) — `pair <token>`, `afk on|off|toggle`, `status`,
   `statusline`.
 
@@ -66,6 +71,7 @@ copy; the legacy dir is left intact).
 - `.token` (0600) + Keychain — the `device_token`
 - `afk.state` / `pending.state` — fast local state the hook +
   statusline read
+- `caffeinate.pid` — pid of the keep-awake process held while AFK is on (macOS)
 - `outbox.jsonl` — durable attention-event queue (exponential backoff, cap 300s)
 - `sessions/` — per-session tap state (cursor, activity outbox, title, pid)
 - `logs/` — channel + hook + per-session tap logs (token never logged)

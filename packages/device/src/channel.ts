@@ -748,6 +748,14 @@ log('connected', { device: DEVICE_ID, project: PROJECT_CWD, control: deviceApiUr
 if (isPluginHousekeepingDir(PROJECT_CWD)) {
   log('housekeeping_session_inert', { project: PROJECT_CWD });
 } else {
+  // Self-heal the keep-awake to the CURRENT AFK state on boot. reconcileCaffeinate
+  // otherwise only fires on an AFK *transition* (the imsg afk CLI or an SSE
+  // down-push), so a session that starts — or a plugin reinstalled — while AFK is
+  // ALREADY on would hold no caffeinate until the next toggle. Reconciling here
+  // makes "AFK on ⟺ Mac kept awake" hold from the first moment too. Machine-wide +
+  // idempotent, so concurrent sessions booting converge on a single caffeinate.
+  reconcileCaffeinate(readAfk());
+
   // Session id resolves async from the handshake; record it once known.
   void sessionReady.then(() => log('session_resolved', { session: SESSION_ID }));
 

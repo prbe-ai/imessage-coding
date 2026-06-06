@@ -27,7 +27,9 @@ plane. Uses a durable outbox/backoff/creds/sanitize/killswitch design.
   `caffeinate -i -s` (prevents idle + system sleep, lets the display sleep) so an
   unattended Mac can't drop its network/iMessage bridge mid-session; AFK-off kills
   it. Tracked by `caffeinate.pid`, reconciled at both AFK write sites (CLI + the
-  remote down-push), idempotent, and a no-op off macOS.
+  remote down-push) AND on channel-server startup (self-heals to the current AFK
+  state, so a session that boots — or a reinstall — while already AFK is covered),
+  idempotent, and a no-op off macOS.
 - **CLI** (`bin/imsg.ts`) — `pair <token>`, `afk on|off|toggle`, `status`,
   `statusline`.
 

@@ -35,6 +35,7 @@ import {
   TurnOutcome,
   TurnTrigger,
   cleanSessionTitle,
+  fitsVerbatim,
   isAfkState,
   isUuid,
   type AttentionEvent,
@@ -622,12 +623,14 @@ async function relayAgentMessageLocked(
     // VERBATIM relay: the agent asked for its text to reach the user UNSHAPED (e.g. a
     // plan or an exact set of options it must see word-for-word). Bypass the orchestrator
     // LLM entirely — no condensing, no paraphrase, no information loss — and send the text
-    // directly, prefixed with an [Agent: <title>] line so the user knows the source and
-    // clamped to one screenful (clampVerbatim) so a long dump can't flood the thread. We
-    // short-circuit BEFORE loading the full turn context: the only thing we need is the
-    // source session's title to attribute it. The list lookup is best-effort (an untitled
-    // fallback names the agent by short tag); never let it throw into the generic catch.
-    if (message.verbatim) {
+    // directly, prefixed with an [Agent: <title>] line so the user knows the source. Only
+    // when it already fits one screen (fitsVerbatim): an over-cap verbatim is NOT
+    // truncated — it falls through to the orchestrator below (condense:true) so the tail
+    // of a long plan is never silently chopped. We short-circuit BEFORE loading the full
+    // turn context: the only thing we need is the source session's title to attribute it.
+    // The list lookup is best-effort (an untitled fallback names the agent by short tag);
+    // never let it throw into the generic catch.
+    if (message.verbatim && fitsVerbatim(message.text)) {
       const liveSessions = await listLiveSessionsForAccount(accountId).catch(
         () => [] as SessionInfo[],
       );
@@ -667,6 +670,10 @@ async function relayAgentMessageLocked(
         sessionId: message.sessionId,
         text: message.text,
         expectsReply: message.expectsReply,
+        // We only reach here with verbatim=true when the text was too long to send
+        // as-is (the fits-verbatim branch returned early), so tell the model to
+        // condense it to fit instead of relaying in full.
+        condense: Boolean(message.verbatim),
       },
       pending,
       sessions,

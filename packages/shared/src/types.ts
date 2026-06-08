@@ -122,19 +122,15 @@ export const ATTENTION_TEXT_MAX_LEN = 4_000;
  *  text size (derived from bubble geometry: ~30 lines × ~33 chars on a standard
  *  iPhone), so a raw plan dump can't flood the thread. FAR smaller than
  *  ATTENTION_TEXT_MAX_LEN because verbatim text is shown unshaped, not just stored.
- *  Enforced device-side at egress and re-clamped server-side (defense in depth). */
+ *  The cap is a GATE, not a truncator: text over it is NOT sent verbatim — it falls
+ *  back to the orchestrator, which condenses it to fit (no silent tail-chopping). */
 export const VERBATIM_TEXT_MAX_LEN = 1_000;
 
-/** Marker appended when a verbatim message is tail-truncated, so the user can tell
- *  the agent's message was longer than what fit. */
-export const VERBATIM_TRUNCATION_MARKER = '\n…[truncated]';
-
-/** Tail-truncate verbatim text to VERBATIM_TEXT_MAX_LEN, appending a clear marker
- *  when cut. Pure and IDEMPOTENT (re-clamping already-clamped text is stable), so the
- *  device egress clamp and the server-side formatter can both apply it safely. */
-export function clampVerbatim(text: string): string {
-  if (text.length <= VERBATIM_TEXT_MAX_LEN) return text;
-  return text.slice(0, VERBATIM_TEXT_MAX_LEN).trimEnd() + VERBATIM_TRUNCATION_MARKER;
+/** Whether `text` is short enough to send verbatim (≤ one screen). When false the
+ *  caller must fall back to the orchestrator relay (which condenses to fit) rather
+ *  than truncate — so the tail of a long plan is never silently dropped. Pure. */
+export function fitsVerbatim(text: string): boolean {
+  return text.length <= VERBATIM_TEXT_MAX_LEN;
 }
 
 /** Strip control + zero-width + bidi chars from text headed straight to the user,

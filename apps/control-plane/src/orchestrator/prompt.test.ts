@@ -19,8 +19,6 @@ import {
   AttentionKind,
   MessageChannel,
   SessionState,
-  VERBATIM_TEXT_MAX_LEN,
-  VERBATIM_TRUNCATION_MARKER,
   type AttentionEvent,
   type InboundMessage,
   type SessionInfo,
@@ -89,10 +87,11 @@ function renderAgentEvent(att: AttentionEvent): string {
 
 /** Render the agent_message turn context (the status/result relay path — also the
  *  path a demoted-expect_reply question now takes, since QUESTION attentions were
- *  removed). `expectsReply` flags the question case. */
-function renderAgentMessage(text: string, expectsReply: boolean): string {
+ *  removed). `expectsReply` flags the question case; `condense` flags the verbatim-
+ *  overflow case (too long to send as-is, so the model must shorten it). */
+function renderAgentMessage(text: string, expectsReply: boolean, condense = false): string {
   const msgs = buildTurnMessages({
-    trigger: { kind: 'agent_message', sessionId: 'sess-1', text, expectsReply },
+    trigger: { kind: 'agent_message', sessionId: 'sess-1', text, expectsReply, condense },
     pending: [],
     sessions: [],
     history: [],
@@ -318,6 +317,26 @@ describe('agent_message relay — full question, preserve the asks', () => {
     expect(/substantive information/i.test(ctx)).toBe(true);
   });
 
+  test('a VERBATIM OVERFLOW relay (condense) is told to shorten to one screen, NOT relay in full', () => {
+    // Verbatim was requested but the text is too long for one screen, so the relay
+    // falls back here with condense=true: the one case the model SHOULD condense.
+    const ctx = renderAgentMessage(longQuestion, false, true);
+    expect(ctx.includes(longQuestion)).toBe(true); // still gets the full source to condense from
+    expect(/CONDENSE it to about one screen/i.test(ctx)).toBe(true);
+    expect(/do NOT just clip/i.test(ctx)).toBe(true);
+    expect(/Relay it IN FULL/.test(ctx)).toBe(false); // the in-full instruction is suppressed
+  });
+
+  test('PRECEDENCE: expect_reply wins over condense — an overflowing verbatim QUESTION surfaces its asks', () => {
+    // verbatim + expect_reply + over-cap reaches the relay with BOTH expectsReply and
+    // condense set. The question branch must win: a long question is best handled by
+    // surfacing its specific asks (itself a condensation), not the generic status condense.
+    const ctx = renderAgentMessage(longQuestion, true, true);
+    expect(/WAITING ON A REPLY/.test(ctx)).toBe(true); // question branch
+    expect(/CONDENSE it to about one screen/i.test(ctx)).toBe(false); // not the status-condense branch
+    expect(/relay EACH one/i.test(ctx)).toBe(true); // still preserves every ask
+  });
+
   test('a pathologically long relay is still bounded by ATTENTION_TEXT_MAX_LEN', () => {
     const huge = 'y'.repeat(ATTENTION_TEXT_MAX_LEN + 500);
     const ctx = renderAgentMessage(huge, true);
@@ -352,14 +371,6 @@ describe('formatVerbatimMessage — verbatim egress (LLM bypassed)', () => {
   test('an untitled source falls back to the short-tag nickname', () => {
     const out = formatVerbatimMessage({ sessionId: 'abcdef-xyz', title: null, text: 'hi' });
     expect(out).toBe('[Agent: (untitled "xyz")]\n\nhi');
-  });
-
-  test('over-cap text is tail-truncated with the marker; the body stays within the cap', () => {
-    const long = 'z'.repeat(VERBATIM_TEXT_MAX_LEN + 200);
-    const out = formatVerbatimMessage({ sessionId: 's', title: 'Plan', text: long });
-    expect(out.endsWith(VERBATIM_TRUNCATION_MARKER)).toBe(true);
-    expect(out.includes('z'.repeat(VERBATIM_TEXT_MAX_LEN))).toBe(true);
-    expect(out.includes('z'.repeat(VERBATIM_TEXT_MAX_LEN + 1))).toBe(false);
   });
 
   test('a forged multi-line title cannot break the attribution structure (collapsed to one line)', () => {

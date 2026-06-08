@@ -197,22 +197,32 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_device  ON sessions(device_id);
--- Idempotent collapse of the former two-column scheme (title + manual_title) into
--- the single `title` column above. On an already-provisioned DB that still has
--- manual_title: fold any override into title (it WAS the effective label via
--- COALESCE(manual_title, title)), then drop the column. Guarded so a fresh DB —
--- whose CREATE TABLE above never had manual_title — skips it instead of erroring on
--- the missing column. Safe to re-run (the column is gone after the first apply).
+-- Collapse of the former two-column scheme (title + manual_title) into the single
+-- `title` column above, in TWO PHASES on purpose. This DB has no auto-migration —
+-- schema.sql is applied by hand — so the destructive drop must be sequenced around
+-- the code deploy. Run the phases SEPARATELY for the live cutover; both are guarded
+-- + idempotent + safe on a fresh DB (no manual_title → no-op).
+--
+-- PHASE 1 — backfill. Safe to run ANY time, including before the new code deploys.
+-- manual_title WAS the effective label (readers used COALESCE(manual_title, title)),
+-- so folding it into title preserves every rename, and OLD code still reading
+-- COALESCE sees no change (title == manual_title now).
 DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM information_schema.columns
-    WHERE table_name = 'sessions' AND column_name = 'manual_title'
+    WHERE table_schema = 'public' AND table_name = 'sessions' AND column_name = 'manual_title'
   ) THEN
     UPDATE sessions SET title = manual_title WHERE manual_title IS NOT NULL;
-    ALTER TABLE sessions DROP COLUMN manual_title;
   END IF;
 END $$;
+
+-- PHASE 2 — drop the now-unused override column. Run this ONLY AFTER the new
+-- control-plane is deployed (it no longer selects manual_title) AND devices are on
+-- the edge-triggered plugin. Running it while an OLD server is still live would 500
+-- every session read (the old SESSION_COLUMNS still references manual_title). Keep
+-- this on its own line so the cutover can run Phase 1, deploy, THEN this. Idempotent.
+ALTER TABLE sessions DROP COLUMN IF EXISTS manual_title;
 
 -- -----------------------------------------------------------------------------
 -- account_locks — CROSS-MACHINE per-account turn serialization (a LEASE).

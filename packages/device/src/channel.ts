@@ -32,7 +32,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
@@ -780,10 +780,17 @@ function readLastSentTitle(): string | undefined {
 }
 
 /** Record the title we just shipped (call only after a confirmed send, so a failed
- *  beat re-sends next time instead of going silent). Best-effort. */
+ *  beat re-sends next time instead of going silent). Atomic tmp+rename (matching the
+ *  tap's `<id>.title` write) so a crash mid-write can't leave a truncated marker that
+ *  reads back as a "changed" title and triggers a spurious re-assert. Best-effort —
+ *  the sessions dir already exists here (we only persist after readSessionTitle read
+ *  the live title from it). */
 function writeLastSentTitle(title: string): void {
   try {
-    writeFileSync(sessionTitleSentFile(SESSION_ID), title);
+    const path = sessionTitleSentFile(SESSION_ID);
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, title, 'utf8');
+    renameSync(tmp, path);
   } catch {
     /* best-effort: a missed persist just means we re-send the same title next beat */
   }

@@ -82,17 +82,18 @@ export interface SetAfkResponse {
   updated: number;
 }
 
-/** Body of POST /api/home/session-title — set a session's manual display name
- *  (the user-side counterpart to the agent's rename_session tool). An empty/
- *  whitespace-only `title` clears the override (revert to the auto-title). */
+/** Body of POST /api/home/session-title — set a session's display name (the
+ *  user-side counterpart to the agent's rename_session tool). Writes the single
+ *  `title` column, last-writer-wins. An empty/whitespace-only `title` is rejected
+ *  (422) — a label is never blanked. */
 export interface SetSessionTitleRequest {
   sessionId: string;
   title: string;
 }
 
 export interface SetSessionTitleResponse {
-  /** The stored override after cleaning, or null when cleared. */
-  title: string | null;
+  /** The stored title after cleaning (always non-empty on success). */
+  title: string;
   /** Whether a session row actually matched (false = unknown/foreign session). */
   updated: boolean;
 }

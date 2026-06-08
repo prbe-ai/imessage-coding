@@ -34,6 +34,7 @@ import {
   ToolName,
   TurnOutcome,
   TurnTrigger,
+  cleanSessionTitle,
   isAfkState,
   isUuid,
   type AttentionEvent,
@@ -60,6 +61,7 @@ import {
   resolveAttention,
   setAttentionNotifyMessageId,
   setDevicesAfkForSessions,
+  setTitle,
   type LostDevice,
   type OnboardingLinkFailure,
   type SessionActivityLine,
@@ -750,6 +752,8 @@ function makeExecTool(ctx: DispatchCtx): ToolExecutor {
         return execGetSessionData(ctx, args);
       case ToolName.UPDATE_SESSION_STATE:
         return execUpdateSessionState(ctx, args);
+      case ToolName.RENAME_SESSION:
+        return execRenameSession(ctx, args);
       default:
         return `error: unknown tool ${name}`;
     }
@@ -1060,6 +1064,31 @@ async function execUpdateSessionState(ctx: DispatchCtx, args: Record<string, unk
   const missed = ids.length - updated.length;
   const missedNote = missed > 0 ? `; ${missed} id(s) matched no live session` : '';
   return `set afk=${args.afk} on ${updated.length} session(s) (machine-wide)${missedNote}`;
+}
+
+/**
+ * rename_session: set one session's display label (sessions.title, last-writer-
+ * wins). The user-/drift-driven counterpart to the device-side rename_session
+ * tool — NOT called every turn, only when the user asks or the model judges the
+ * label has drifted from the work. account_id is the tenant boundary; the id stays
+ * the routing key (only the label changes). An empty name is rejected, never a
+ * clear (a label is never blanked).
+ */
+async function execRenameSession(ctx: DispatchCtx, args: Record<string, unknown>): Promise<string> {
+  const sessionId = typeof args.session === 'string' ? args.session : '';
+  if (!isUuid(sessionId)) {
+    return 'error: session must be a valid session id';
+  }
+  const title = cleanSessionTitle(typeof args.title === 'string' ? args.title : '');
+  if (!title) {
+    return 'error: title must be a short, non-empty label';
+  }
+  const ok = await setTitle({ sessionId, accountId: ctx.accountId, title });
+  if (!ok) {
+    return 'error: no session with that id for this account';
+  }
+  ctx.actions.push(`renamed session ${shortTag(sessionId)} to "${title}"`);
+  return `renamed to "${title}"`;
 }
 
 /** One line per activity event for get_session_data, line-numbered for citing/re-slicing. */

@@ -34,12 +34,12 @@ import {
   SESSION_TITLE_MAX_LEN,
   SessionState,
   SseEvent,
+  cleanSessionTitle,
   isActivityBatchBody,
   isAfkState,
   isAgentKind,
   isAttentionEvent,
   isUuid,
-  manualTitleValue,
   type AttentionEvent,
 } from '@imsg/shared';
 import {
@@ -62,7 +62,7 @@ import {
   markInboxDelivered,
   resolveAttention,
   setDeviceAfk,
-  setManualTitle,
+  setTitle,
   touchSession,
   upsertSession,
 } from '../db/repo.ts';
@@ -326,13 +326,14 @@ deviceRoutes.post(DeviceApiRoute.MESSAGE, async (c) => {
 });
 
 // --- SESSION_TITLE (agent rename_session) -------------------------------------
-// The agent's `rename_session` tool POSTs here to set this session's manual
-// display name. Mirrors the dashboard inline-edit (POST /api/home/session-title):
-// both write `manual_title`, which readers surface as COALESCE(manual_title,
-// title). It is a SEPARATE column from the heartbeat's auto-title, so a rename
-// can't be clobbered by the next ≤10s beat. An empty name clears the override
-// (revert to the auto-title). NOT AFK-gated: a label is session metadata (like
-// cwd/title), not user-facing comms, so it applies at the keyboard too.
+// The agent's `rename_session` tool POSTs here to set this session's display
+// name. Mirrors the dashboard inline-edit (POST /api/home/session-title) and the
+// orchestrator's rename tool: all write the single `title` column directly
+// (last-writer-wins). The rename can't be clobbered by the next ≤10s beat because
+// the device ships its auto-title edge-triggered (only on change), never
+// re-asserted every beat. An empty name is a no-op (a label is never blanked).
+// NOT AFK-gated: a label is session metadata (like cwd/title), not user-facing
+// comms, so it applies at the keyboard too.
 deviceRoutes.post(DeviceApiRoute.SESSION_TITLE, async (c) => {
   const auth = device(c);
   const body = (await c.req.json().catch(() => ({}))) as {
@@ -342,9 +343,10 @@ deviceRoutes.post(DeviceApiRoute.SESSION_TITLE, async (c) => {
   const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
   if (!sessionId) return c.json({ error: 'missing_session_id' }, 400);
   if (!isUuid(sessionId)) return c.json({ error: 'invalid_session_id' }, 400);
-  // Clean + clamp server-side (defense-in-depth; the device cleans too). An empty
-  // result clears the override → null.
-  const title = manualTitleValue(typeof body.title === 'string' ? body.title : '');
+  // Clean + clamp server-side (defense-in-depth; the device cleans too). Empty
+  // after cleaning is a no-op — a label is never blanked.
+  const title = cleanSessionTitle(typeof body.title === 'string' ? body.title : '');
+  if (!title) return c.json({ error: 'empty_title' }, 400);
   // Scope check: the session must belong to this device/account (tenant isolation).
   const session = await getSessionForDevice({
     sessionId,
@@ -354,7 +356,7 @@ deviceRoutes.post(DeviceApiRoute.SESSION_TITLE, async (c) => {
   if (!session) return c.json({ error: 'unknown_session' }, 404);
   // Honor the write's own scope result too — closes the TOCTOU if the row is
   // reaped between the ownership read and the update.
-  const updated = await setManualTitle({ sessionId, accountId: auth.accountId, title });
+  const updated = await setTitle({ sessionId, accountId: auth.accountId, title });
   if (!updated) return c.json({ error: 'unknown_session' }, 404);
   return c.json({ title });
 });

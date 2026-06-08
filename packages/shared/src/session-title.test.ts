@@ -1,16 +1,13 @@
 /**
- * Unit tests for the session-title helpers (types.ts) — the PURE cleaning +
- * empty→clear rule shared by the tap's auto-title capture, the agent's
- * rename_session device route, and the dashboard's BFF rename route. No DB, no
- * network. The DB-backed setManualTitle / COALESCE read is covered by the deploy
- * smoke (same convention as the rest of repo.ts's SQL).
+ * Unit tests for the session-title helper (types.ts) — the PURE cleaning rule
+ * shared by the tap's auto-title capture, the agent's rename_session device route,
+ * the dashboard's BFF rename route, and the orchestrator's rename tool. No DB, no
+ * network. The DB-backed setTitle / single-column read is covered by the deploy
+ * smoke (same convention as the rest of repo.ts's SQL). Empty cleans to '' and
+ * every caller treats that as a no-op — a label is never blanked.
  */
 import { describe, expect, test } from 'bun:test';
-import {
-  SESSION_TITLE_MAX_LEN,
-  cleanSessionTitle,
-  manualTitleValue,
-} from './types.ts';
+import { SESSION_TITLE_MAX_LEN, cleanSessionTitle } from './types.ts';
 
 describe('cleanSessionTitle — single trimmed line within the cap', () => {
   test('collapses internal whitespace runs to one space', () => {
@@ -40,25 +37,5 @@ describe('cleanSessionTitle — single trimmed line within the cap', () => {
 
   test('clamp happens AFTER collapsing, so a padded short name survives', () => {
     expect(cleanSessionTitle('  Fixing CI  ')).toBe('Fixing CI');
-  });
-});
-
-describe('manualTitleValue — the empty→clear (null) rule', () => {
-  test('a real name returns the cleaned string', () => {
-    expect(manualTitleValue('  Fixing CI  ')).toBe('Fixing CI');
-  });
-
-  test('empty string clears the override (null → revert to auto-title)', () => {
-    expect(manualTitleValue('')).toBeNull();
-  });
-
-  test('whitespace-only clears the override (null)', () => {
-    expect(manualTitleValue('   \n ')).toBeNull();
-  });
-
-  test('clamps an over-long name to the cap, still non-null', () => {
-    const v = manualTitleValue('y'.repeat(SESSION_TITLE_MAX_LEN + 10));
-    expect(v).not.toBeNull();
-    expect(v?.length).toBe(SESSION_TITLE_MAX_LEN);
   });
 });

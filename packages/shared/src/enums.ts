@@ -64,11 +64,13 @@ export type AfkState = (typeof AfkState)[keyof typeof AfkState];
 export const MESSAGE_USER_TOOL = 'message_user';
 
 // -----------------------------------------------------------------------------
-// MCP tool the agent (or the user, via the remote chat) calls to set/update this
-// session's display name as work progresses. Writes a manual-override title that
-// outranks the tap's auto-generated ai-title; the heartbeat ships it like any
-// other title. Declared here so the registration (channel.ts) and any future
-// transcript matcher share one identifier.
+// MCP tool the agent calls to set/update this session's display name as work
+// progresses. Writes sessions.title directly (single column, last-writer-wins);
+// it survives the heartbeat because the device ships its auto-title edge-triggered
+// (only on change), so a steady beat never re-asserts over the rename. The same
+// 'rename_session' id is reused for the orchestrator's server-side rename tool
+// (ToolName.RENAME_SESSION). Declared here so the registration (channel.ts) and
+// any future transcript matcher share one identifier.
 // -----------------------------------------------------------------------------
 export const RENAME_SESSION_TOOL = 'rename_session';
 
@@ -107,8 +109,8 @@ export type RequestAction = (typeof RequestAction)[keyof typeof RequestAction];
 
 // -----------------------------------------------------------------------------
 // Orchestrator (assistant turn) tool surface. The model talks to the user and to
-// the coding agents through exactly these five tools — two messaging, two read,
-// one write. Reference these names in the schema (prompt.ts) and the dispatcher
+// the coding agents through exactly these six tools — two messaging, two read,
+// two write. Reference these names in the schema (prompt.ts) and the dispatcher
 // (orchestrator/index.ts); never hardcode the literal strings.
 //   - MESSAGE_USER         text the user (multiple short messages welcome; can
 //                          surface a pending request as a tap-backable message)
@@ -117,6 +119,9 @@ export type RequestAction = (typeof RequestAction)[keyof typeof RequestAction];
 //   - GET_SESSION_STATE    read: what each agent is doing + what it's blocked on
 //   - GET_SESSION_DATA     read: an agent's activity log (recent / grep / line range)
 //   - UPDATE_SESSION_STATE write: change a session setting (afk only, for now)
+//   - RENAME_SESSION       write: set a session's display label (when the user asks
+//                          or the label has drifted from the work) — shares the
+//                          `rename_session` id with the device-side MCP tool
 // -----------------------------------------------------------------------------
 export const ToolName = {
   MESSAGE_USER: 'message_user',
@@ -124,6 +129,7 @@ export const ToolName = {
   GET_SESSION_STATE: 'get_session_state',
   GET_SESSION_DATA: 'get_session_data',
   UPDATE_SESSION_STATE: 'update_session_state',
+  RENAME_SESSION: RENAME_SESSION_TOOL,
 } as const;
 export type ToolName = (typeof ToolName)[keyof typeof ToolName];
 
@@ -191,10 +197,11 @@ export const DeviceApiRoute = {
   /** Fire-and-forget agent→user message (status/result). The server agent relays
    *  it and drops it — it is NEVER an attention and has no `resolved` lifecycle. */
   MESSAGE: '/api/device/message',
-  /** Agent-set manual display name (the `rename_session` tool). Writes
-   *  sessions.manual_title (an override surfaced as COALESCE(manual_title, title));
-   *  the device heartbeat's auto-title keeps writing sessions.title untouched. An
-   *  empty name clears the override (revert to the auto-title). */
+  /** Agent-set display name (the `rename_session` tool). Writes sessions.title
+   *  directly (last-writer-wins, single column). It does NOT get clobbered by the
+   *  heartbeat because the device ships its auto-title EDGE-TRIGGERED — only when
+   *  its own title actually changes, never re-asserted every beat. An empty name
+   *  is a no-op (a label is never blank). */
   SESSION_TITLE: '/api/device/session-title',
   /** BLOCKING approve-and-resume for agents with no native verdict-push channel
    *  (Codex). A PreToolUse/PermissionRequest hook POSTs the pending destructive
@@ -219,9 +226,9 @@ export const DashboardApiRoute = {
   EVENTS: '/api/dashboard/events',
   /** Dashboard same-origin: GET → { ticket } for the EVENTS stream. */
   SSE_TICKET: '/api/home/sse-ticket',
-  /** Dashboard same-origin: POST → set a session's manual display name (the
-   *  user-side counterpart to the agent's rename_session tool). Writes
-   *  sessions.manual_title (account-scoped); an empty name clears it. */
+  /** Dashboard same-origin: POST → set a session's display name (the user-side
+   *  counterpart to the agent's rename_session tool). Writes sessions.title
+   *  (account-scoped, last-writer-wins); an empty name is a no-op. */
   SESSION_TITLE: '/api/home/session-title',
 } as const;
 export type DashboardApiRoute =

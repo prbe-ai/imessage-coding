@@ -255,6 +255,18 @@ export function sessionTitleFile(sessionId: string): string {
   return join(sessionsDir(), `${sessionId}.title`);
 }
 
+/**
+ * The last title value the heartbeat actually SENT to the control plane. The
+ * heartbeat ships the title EDGE-TRIGGERED — only when the current title differs
+ * from this marker — so a steady beat never re-asserts it and thus never clobbers
+ * a server-side rename (orchestrator / dashboard) written into the single `title`
+ * column. Persisted (not just in-memory) so a device restart doesn't re-send an
+ * unchanged auto-title over a rename. Updated only after a confirmed send.
+ */
+export function sessionTitleSentFile(sessionId: string): string {
+  return join(sessionsDir(), `${sessionId}.title.sent`);
+}
+
 /** Canonical UUID shape (CC session ids are UUIDs; sessions.id is a UUID column). */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

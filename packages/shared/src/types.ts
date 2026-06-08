@@ -117,6 +117,44 @@ export function cleanSessionTitle(text: string): string {
  *  not the display limit (the orchestrator renders a `description` in full). */
 export const ATTENTION_TEXT_MAX_LEN = 4_000;
 
+/** Max length (chars) of a VERBATIM `message_user` relay — text the user sees as-is
+ *  with the orchestrator LLM bypassed. Sized to ≈ one iPhone screenful at the default
+ *  text size (derived from bubble geometry: ~30 lines × ~33 chars on a standard
+ *  iPhone), so a raw plan dump can't flood the thread. FAR smaller than
+ *  ATTENTION_TEXT_MAX_LEN because verbatim text is shown unshaped, not just stored.
+ *  Enforced device-side at egress and re-clamped server-side (defense in depth). */
+export const VERBATIM_TEXT_MAX_LEN = 1_000;
+
+/** Marker appended when a verbatim message is tail-truncated, so the user can tell
+ *  the agent's message was longer than what fit. */
+export const VERBATIM_TRUNCATION_MARKER = '\n…[truncated]';
+
+/** Tail-truncate verbatim text to VERBATIM_TEXT_MAX_LEN, appending a clear marker
+ *  when cut. Pure and IDEMPOTENT (re-clamping already-clamped text is stable), so the
+ *  device egress clamp and the server-side formatter can both apply it safely. */
+export function clampVerbatim(text: string): string {
+  if (text.length <= VERBATIM_TEXT_MAX_LEN) return text;
+  return text.slice(0, VERBATIM_TEXT_MAX_LEN).trimEnd() + VERBATIM_TRUNCATION_MARKER;
+}
+
+/** Strip control + zero-width + bidi chars from text headed straight to the user,
+ *  WITHOUT touching structure: tab/newline/CR and quotes survive (a verbatim plan or
+ *  diff needs its line breaks and quotes), but C0/C1 controls, zero-width joiners, and
+ *  right-to-left overrides are removed so a crafted/forged message can't spoof the
+ *  `[Agent: …]` attribution or scramble the thread. Mirrors the server's
+ *  sanitizeOutbound control/bidi class, minus the `"` strip (irrelevant for text sent
+ *  to iMessage rather than embedded in a prompt). Verbatim bypasses the orchestrator
+ *  LLM, so this is the server-side scrub the device sanitizer is meant to complement.
+ *  Pure. */
+export function stripControlBidi(text: string): string {
+  // C0/C1 controls except tab/newline/CR, zero-width marks, and bidi
+  // overrides/isolates -- mirrors sanitizeOutbound's class minus the quote strip.
+  return text.replace(
+    /[\u0000-\u0008\u000B-\u000C\u000E-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g,
+    '',
+  );
+}
+
 /**
  * A paired machine, as tracked by the control plane. AFK is MACHINE-WIDE (the
  * PreToolUse hook reads one shared state file per device), so it lives here, not

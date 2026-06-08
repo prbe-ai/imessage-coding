@@ -48,6 +48,7 @@ import {
   type AttentionEvent,
   type InboxItem,
   cleanSessionTitle,
+  clampVerbatim,
   isAfkState,
 } from '@imsg/shared';
 import {
@@ -208,7 +209,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.16' },
+  { name: 'imsg-device', version: '0.1.18' },
   {
     capabilities: {
       experimental: {
@@ -225,8 +226,12 @@ const mcp = new Server(
       '`message_user` with expect_reply: true and the full question/plan text (all options verbatim), then STOP and ' +
       'end your turn (do not exit, do not guess, do not retry the denied tool). The user\'s reply arrives later as a ' +
       '<channel source="imsg-device"> message; treat it as authoritative and resume. message_user reaches the ' +
-      "user's phone over iMessage. Use the `rename_session` tool to name this session for what you're working on " +
-      '(and update it as the focus shifts) so it is easy to identify on the dashboard.',
+      "user's phone over iMessage. message_user normally goes through an orchestrator that condenses it; for the " +
+      'rare case where the user must see your EXACT words (a plan, a diff, the precise options when a hook denied ' +
+      'AskUserQuestion/ExitPlanMode), set verbatim: true to bypass that condensing — but use it sparingly and keep ' +
+      'it under ~1000 characters (it is truncated past that), never for routine status. Use the `rename_session` ' +
+      "tool to name this session for what you're working on (and update it as the focus shifts) so it is easy to " +
+      'identify on the dashboard.',
   },
 );
 
@@ -257,6 +262,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             description:
               'True if you want an answer (you will stop and wait); the orchestrator surfaces your message as a question. Omit/false for status or results.',
           },
+          verbatim: {
+            type: 'boolean',
+            description:
+              'Send `text` to the user EXACTLY as written, bypassing the orchestrator that otherwise condenses messages. Use SPARINGLY — only when the user must see your exact words and condensing would lose information: a plan, a diff, a precise list of options to choose from (e.g. after a hook denied AskUserQuestion/ExitPlanMode while AFK). Do NOT use it for routine status/results — leave those default so the orchestrator can frame them. Keep it short: it is truncated at ~1000 characters (about one phone screen), so distill to the essential content; combine with expect_reply when you also need an answer.',
+          },
         },
         required: ['text'],
       },
@@ -286,9 +296,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === MESSAGE_USER_TOOL) {
-    const { text, expect_reply } = req.params.arguments as {
+    const { text, expect_reply, verbatim } = req.params.arguments as {
       text: string;
       expect_reply?: boolean;
+      verbatim?: boolean;
     };
     // AFK-OFF SHORT-CIRCUIT: at the keyboard the server drops a non-AFK relay
     // (routes/device.ts → {relayed:false}), so relaying is a silent no-op that
@@ -300,12 +311,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       log('message_user_afk_off', {});
       return afkOff;
     }
-    const clean = sanitizeText(text);
-    // Either way we RELAY (no durable attention, no binding). `expect_reply` only
-    // TAGS the relay so the orchestrator surfaces it as a question; the agent stops
-    // and the user's reply comes back as a <channel> message, routed by the LLM.
-    await sendStatusMessage(clean, { expectsReply: Boolean(expect_reply) });
-    log(expect_reply ? 'message_user_ask' : 'message_user_status', { len: text.length });
+    // Sanitize (redact secrets) first; then, for a VERBATIM message, clamp to the
+    // one-screen cap device-side too (defense in depth — the server re-clamps). A
+    // non-verbatim relay keeps the orchestrator's framing, so no extra clamp here.
+    const sanitized = sanitizeText(text);
+    const clean = verbatim ? clampVerbatim(sanitized) : sanitized;
+    // Either way we RELAY (no durable attention, no binding). `expect_reply` only TAGS
+    // the relay so the orchestrator surfaces it as a question; `verbatim` tells the
+    // server to send `clean` to the user as-is (LLM bypassed). The user's reply (if
+    // any) comes back as a <channel> message, routed by the LLM.
+    await sendStatusMessage(clean, { expectsReply: Boolean(expect_reply), verbatim: Boolean(verbatim) });
+    log(expect_reply ? 'message_user_ask' : 'message_user_status', {
+      len: text.length,
+      verbatim: Boolean(verbatim),
+    });
     return {
       content: [
         {
@@ -388,7 +407,7 @@ async function renameSession(title: string): Promise<boolean> {
  */
 async function sendStatusMessage(
   text: string,
-  opts: { expectsReply?: boolean } = {},
+  opts: { expectsReply?: boolean; verbatim?: boolean } = {},
 ): Promise<void> {
   await sessionReady; // tag under the REAL session id so the relay attributes it
   const token = loadToken();
@@ -403,7 +422,12 @@ async function sendStatusMessage(
   try {
     const resp = await postJson(
       deviceApiUrl(DeviceApiRoute.MESSAGE),
-      JSON.stringify({ sessionId: SESSION_ID, text, expectsReply: opts.expectsReply ?? false }),
+      JSON.stringify({
+        sessionId: SESSION_ID,
+        text,
+        expectsReply: opts.expectsReply ?? false,
+        verbatim: opts.verbatim ?? false,
+      }),
       { bearer: token },
     );
     if (resp.classification === Classification.SUCCESS) log('status_sent', { len: text.length });

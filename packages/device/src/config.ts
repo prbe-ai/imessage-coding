@@ -291,18 +291,31 @@ export function agentKind(env: NodeJS.ProcessEnv = process.env): AgentKind {
 }
 
 /**
- * True iff `dir` sits inside Codex's plugin cache (`…/.codex/plugins/…`) or a
- * marketplace clone (`…/codex/marketplaces/…`) — i.e. one of Codex's OWN
- * throwaway sessions for installing/validating a plugin, which carry no user
- * turn. Both the SessionStart tap AND the long-lived MCP server's heartbeat key a
- * dashboard `sessions` row off the project dir, so each skips its work for such a
- * cwd — otherwise these register a titleless row labelled by the plugin's version
- * folder (e.g. ".../imsg-device/0.1.11"). Matches a `codex/{plugins,marketplaces}/`
- * path segment (with or without the leading dot), so an unrelated dir that merely
- * contains the word "codex" (e.g. `…/mycodex-app`) does NOT match.
+ * True iff `dir` sits inside an agent's OWN plugin-housekeeping tree — Codex's
+ * `…/.codex/{plugins,marketplaces}/…` OR Claude Code's `…/.claude/plugins/…`
+ * (cache / marketplaces / data) — i.e. a throwaway session the agent spins up to
+ * install/validate/load a plugin, which carries no user turn. Both the
+ * SessionStart tap AND the long-lived MCP server's heartbeat key a dashboard
+ * `sessions` row off the project dir, so each skips its work for such a cwd —
+ * otherwise these register a titleless row labelled by the plugin's version
+ * folder (e.g. ".../imsg-device/0.1.17"). The MCP server is launched with
+ * `--cwd ${CLAUDE_PLUGIN_ROOT}` and no CLAUDE_PROJECT_DIR during housekeeping, so
+ * PROJECT_CWD falls back to that version dir; without the Claude Code arm below,
+ * Claude Code's own plugin boots leak phantom "0.1.x" rows exactly as Codex's once did.
+ *
+ * The Codex arm allows an OPTIONAL leading dot because Codex's temp marketplace
+ * clones drop it (`…/T/tmp.X/codex/marketplaces/…`). The Claude arm REQUIRES the
+ * dot (`.claude`): Claude Code's housekeeping tree is always `~/.claude/plugins/…`,
+ * so a bare `claude/plugins` segment is far likelier a real user project (a Claude
+ * plugin checkout) than housekeeping — matching it would silently hide that
+ * session from the dashboard. So an unrelated dir that merely contains the word
+ * "codex"/"claude" (e.g. `…/mycodex-app`, `…/work/claude/plugins`) does NOT match.
  */
 export function isPluginHousekeepingDir(dir: string): boolean {
-  return /(?:^|\/)\.?codex\/(?:plugins|marketplaces)(?:\/|$)/.test(dir);
+  return (
+    /(?:^|\/)\.?codex\/(?:plugins|marketplaces)(?:\/|$)/.test(dir) ||
+    /(?:^|\/)\.claude\/plugins(?:\/|$)/.test(dir)
+  );
 }
 
 /**

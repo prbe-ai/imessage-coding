@@ -129,9 +129,22 @@ describe('agentKind', () => {
   });
 });
 
-describe('isPluginHousekeepingDir (skip Codex plugin housekeeping sessions)', () => {
+describe('isPluginHousekeepingDir (skip plugin housekeeping sessions)', () => {
   test('the plugin cache dir is housekeeping (the source of the "0.1.11" rows)', () => {
     expect(isPluginHousekeepingDir('/Users/me/.codex/plugins/cache/imsg/imsg-device/0.1.11')).toBe(true);
+  });
+
+  test('Claude Code plugin cache dir is housekeeping (the source of the "0.1.17" rows)', () => {
+    expect(isPluginHousekeepingDir('/Users/me/.claude/plugins/cache/imsg/imsg-device/0.1.17')).toBe(true);
+  });
+
+  test('a Claude Code marketplace clone is housekeeping', () => {
+    expect(isPluginHousekeepingDir('/Users/me/.claude/plugins/marketplaces/imsg/imsg-device')).toBe(true);
+  });
+
+  test('~/.claude itself and its other subdirs are NOT housekeeping', () => {
+    expect(isPluginHousekeepingDir('/Users/me/.claude')).toBe(false);
+    expect(isPluginHousekeepingDir('/Users/me/.claude/projects/foo')).toBe(false);
   });
 
   test('a marketplace clone is housekeeping', () => {
@@ -151,9 +164,18 @@ describe('isPluginHousekeepingDir (skip Codex plugin housekeeping sessions)', ()
     expect(isPluginHousekeepingDir('/Users/me/.codex/skills/foo')).toBe(false);
   });
 
-  test('a dir that merely contains the word "codex" does NOT match', () => {
+  test('a dir that merely contains the word "codex"/"claude" does NOT match', () => {
     expect(isPluginHousekeepingDir('/Users/me/projects/mycodex-app/plugins')).toBe(false);
     expect(isPluginHousekeepingDir('/Users/me/codexplugins/x')).toBe(false);
+    expect(isPluginHousekeepingDir('/Users/me/projects/myclaude-app/plugins')).toBe(false);
+    expect(isPluginHousekeepingDir('/Users/me/claudeplugins/x')).toBe(false);
+  });
+
+  test('a real project with a bare (dotless) "claude/plugins" segment is NOT housekeeping', () => {
+    // The Claude arm requires the leading dot; a Claude-plugin CHECKOUT a user
+    // works in (no `.claude` config dir) must not be silently suppressed.
+    expect(isPluginHousekeepingDir('/Users/me/projects/claude/plugins')).toBe(false);
+    expect(isPluginHousekeepingDir('/Users/me/work/claude/plugins/src')).toBe(false);
   });
 });
 

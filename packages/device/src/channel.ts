@@ -48,7 +48,6 @@ import {
   type AttentionEvent,
   type InboxItem,
   cleanSessionTitle,
-  clampVerbatim,
   isAfkState,
 } from '@imsg/shared';
 import {
@@ -209,7 +208,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.18' },
+  { name: 'imsg-device', version: '0.1.19' },
   {
     capabilities: {
       experimental: {
@@ -228,10 +227,11 @@ const mcp = new Server(
       '<channel source="imsg-device"> message; treat it as authoritative and resume. message_user reaches the ' +
       "user's phone over iMessage. message_user normally goes through an orchestrator that condenses it; for the " +
       'rare case where the user must see your EXACT words (a plan, a diff, the precise options when a hook denied ' +
-      'AskUserQuestion/ExitPlanMode), set verbatim: true to bypass that condensing — but use it sparingly and keep ' +
-      'it under ~1000 characters (it is truncated past that), never for routine status. Use the `rename_session` ' +
-      "tool to name this session for what you're working on (and update it as the focus shifts) so it is easy to " +
-      'identify on the dashboard.',
+      'AskUserQuestion/ExitPlanMode), set verbatim: true to bypass that condensing — use it sparingly (never for ' +
+      'routine status) and FIRST condense your text yourself to under ~1000 characters (about one phone screen); if ' +
+      'it is longer it is NOT sent verbatim, the orchestrator summarizes it instead, so keep it tight to preserve ' +
+      "your exact words. Use the `rename_session` tool to name this session for what you're working on (and update " +
+      'it as the focus shifts) so it is easy to identify on the dashboard.',
   },
 );
 
@@ -265,7 +265,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           verbatim: {
             type: 'boolean',
             description:
-              'Send `text` to the user EXACTLY as written, bypassing the orchestrator that otherwise condenses messages. Use SPARINGLY — only when the user must see your exact words and condensing would lose information: a plan, a diff, a precise list of options to choose from (e.g. after a hook denied AskUserQuestion/ExitPlanMode while AFK). Do NOT use it for routine status/results — leave those default so the orchestrator can frame them. Keep it short: it is truncated at ~1000 characters (about one phone screen), so distill to the essential content; combine with expect_reply when you also need an answer.',
+              'Send `text` to the user EXACTLY as written, bypassing the orchestrator that otherwise condenses messages. Use SPARINGLY — only when the user must see your exact words and condensing would lose information: a plan, a diff, a precise list of options to choose from (e.g. after a hook denied AskUserQuestion/ExitPlanMode while AFK). Do NOT use it for routine status/results — leave those default so the orchestrator can frame them. IMPORTANT: condense your text to UNDER ~1000 characters (about one phone screen) BEFORE sending — if it is longer, verbatim is NOT honored and the orchestrator summarizes it regardless, so distill to the essential exact content to keep your words intact. Combine with expect_reply when you also need an answer.',
           },
         },
         required: ['text'],
@@ -311,15 +311,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       log('message_user_afk_off', {});
       return afkOff;
     }
-    // Sanitize (redact secrets) first; then, for a VERBATIM message, clamp to the
-    // one-screen cap device-side too (defense in depth — the server re-clamps). A
-    // non-verbatim relay keeps the orchestrator's framing, so no extra clamp here.
-    const sanitized = sanitizeText(text);
-    const clean = verbatim ? clampVerbatim(sanitized) : sanitized;
+    const clean = sanitizeText(text);
     // Either way we RELAY (no durable attention, no binding). `expect_reply` only TAGS
-    // the relay so the orchestrator surfaces it as a question; `verbatim` tells the
-    // server to send `clean` to the user as-is (LLM bypassed). The user's reply (if
-    // any) comes back as a <channel> message, routed by the LLM.
+    // the relay so the orchestrator surfaces it as a question; `verbatim` asks the server
+    // to send the text to the user as-is (LLM bypassed) — but ONLY if it fits one screen;
+    // if it's too long the server condenses it via the orchestrator instead of
+    // truncating, so no device-side clamp here. The user's reply (if any) comes back as a
+    // <channel> message, routed by the LLM.
     await sendStatusMessage(clean, { expectsReply: Boolean(expect_reply), verbatim: Boolean(verbatim) });
     log(expect_reply ? 'message_user_ask' : 'message_user_status', {
       len: text.length,

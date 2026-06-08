@@ -1,39 +1,22 @@
 /**
- * Unit tests for clampVerbatim (types.ts) — the PURE one-screen cap shared by the
- * device egress clamp and the server-side verbatim formatter. A `verbatim: true`
- * message_user is sent to the user unshaped (LLM bypassed), so this is the only thing
- * keeping a long plan dump from flooding the iMessage thread. No DB, no network.
+ * Unit tests for the PURE verbatim helpers (types.ts). `fitsVerbatim` is the GATE
+ * that decides whether a `verbatim: true` message_user goes out as-is (LLM bypassed)
+ * or falls back to the orchestrator to be condensed — over-cap text is NEVER truncated.
+ * `stripControlBidi` is the server-side scrub applied to the bypassed text. No DB, no
+ * network.
  */
 import { describe, expect, test } from 'bun:test';
-import {
-  VERBATIM_TEXT_MAX_LEN,
-  VERBATIM_TRUNCATION_MARKER,
-  clampVerbatim,
-  stripControlBidi,
-} from './types.ts';
+import { VERBATIM_TEXT_MAX_LEN, fitsVerbatim, stripControlBidi } from './types.ts';
 
-describe('clampVerbatim — one-screen cap for verbatim relays', () => {
-  test('text at or under the cap is returned untouched (no marker)', () => {
-    const exact = 'a'.repeat(VERBATIM_TEXT_MAX_LEN);
-    expect(clampVerbatim(exact)).toBe(exact);
-    expect(clampVerbatim('short plan')).toBe('short plan');
+describe('fitsVerbatim — one-screen gate (no truncation, fall back to condense)', () => {
+  test('text at or under the cap fits (sent verbatim)', () => {
+    expect(fitsVerbatim('short plan')).toBe(true);
+    expect(fitsVerbatim('a'.repeat(VERBATIM_TEXT_MAX_LEN))).toBe(true);
   });
 
-  test('over-cap text is tail-truncated and gets the truncation marker', () => {
-    const long = 'b'.repeat(VERBATIM_TEXT_MAX_LEN + 250);
-    const out = clampVerbatim(long);
-    expect(out.endsWith(VERBATIM_TRUNCATION_MARKER)).toBe(true);
-    // The kept body never exceeds the cap (marker is extra signal, not content).
-    expect(out.slice(0, out.length - VERBATIM_TRUNCATION_MARKER.length).length).toBeLessThanOrEqual(
-      VERBATIM_TEXT_MAX_LEN,
-    );
-    expect(out.includes('b'.repeat(VERBATIM_TEXT_MAX_LEN + 1))).toBe(false);
-  });
-
-  test('is IDEMPOTENT — re-clamping already-clamped text is stable (device + server both apply it)', () => {
-    const long = 'c'.repeat(VERBATIM_TEXT_MAX_LEN + 500);
-    const once = clampVerbatim(long);
-    expect(clampVerbatim(once)).toBe(once);
+  test('text over the cap does NOT fit (orchestrator condenses it instead)', () => {
+    expect(fitsVerbatim('a'.repeat(VERBATIM_TEXT_MAX_LEN + 1))).toBe(false);
+    expect(fitsVerbatim('b'.repeat(VERBATIM_TEXT_MAX_LEN + 5000))).toBe(false);
   });
 });
 

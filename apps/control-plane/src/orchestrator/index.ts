@@ -72,7 +72,13 @@ import { hashToken } from '../auth/device.ts';
 import { loadEnv, LLM_MODEL_GEMINI } from '../env.ts';
 import { runAssistantTurn, type ContentPart, type ToolExecutor } from './llm.ts';
 import { fetchInboundImages } from './media.ts';
-import { assistantTools, buildTurnMessages, shortTag, type TurnMode } from './prompt.ts';
+import {
+  assistantTools,
+  buildTurnMessages,
+  formatVerbatimMessage,
+  shortTag,
+  type TurnMode,
+} from './prompt.ts';
 import {
   deterministicTarget,
   isDestructiveTool,
@@ -591,7 +597,7 @@ async function runAgentEventTurnLocked(
  * pile. Best-effort: a status update is not safety-critical.
  */
 export function relayAgentMessage(
-  message: { sessionId: string; text: string; expectsReply?: boolean },
+  message: { sessionId: string; text: string; expectsReply?: boolean; verbatim?: boolean },
   accountId: string,
   transport: Transport,
 ): Promise<TurnResult> {
@@ -601,7 +607,7 @@ export function relayAgentMessage(
 }
 
 async function relayAgentMessageLocked(
-  message: { sessionId: string; text: string; expectsReply?: boolean },
+  message: { sessionId: string; text: string; expectsReply?: boolean; verbatim?: boolean },
   accountId: string,
   transport: Transport,
 ): Promise<TurnResult> {
@@ -613,6 +619,30 @@ async function relayAgentMessageLocked(
   let toolCalls: number | undefined;
   let errMsg: string | undefined;
   try {
+    // VERBATIM relay: the agent asked for its text to reach the user UNSHAPED (e.g. a
+    // plan or an exact set of options it must see word-for-word). Bypass the orchestrator
+    // LLM entirely — no condensing, no paraphrase, no information loss — and send the text
+    // directly, prefixed with an [Agent: <title>] line so the user knows the source and
+    // clamped to one screenful (clampVerbatim) so a long dump can't flood the thread. We
+    // short-circuit BEFORE loading the full turn context: the only thing we need is the
+    // source session's title to attribute it. The list lookup is best-effort (an untitled
+    // fallback names the agent by short tag); never let it throw into the generic catch.
+    if (message.verbatim) {
+      const liveSessions = await listLiveSessionsForAccount(accountId).catch(
+        () => [] as SessionInfo[],
+      );
+      const title = liveSessions.find((s) => s.id === message.sessionId)?.title;
+      const body = formatVerbatimMessage({ sessionId: message.sessionId, title, text: message.text });
+      const id = await sendToUser(transport, accountId, body);
+      if (id) sent.count += 1;
+      classified = classifyTurnOutcome({
+        errored: false,
+        aborted: false,
+        sentCount: sent.count,
+        actionCount: 0,
+      });
+      return { handled: true, accountId, reason: 'verbatim_relay' };
+    }
     const [pending, sessions, history, profile, activity] = await Promise.all([
       listPendingAttentionForAccount(accountId),
       listLiveSessionsForAccount(accountId),

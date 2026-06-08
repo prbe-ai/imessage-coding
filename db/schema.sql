@@ -173,17 +173,17 @@ CREATE TABLE IF NOT EXISTS sessions (
   device_id      UUID        NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   account_id     UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   cwd            TEXT,
-  -- AUTO label, device-derived: the session's first user message → Claude Code's
-  -- ai-title → a /rename custom-title, upgraded in place (newest-non-null wins in
-  -- upsertSession). The device heartbeat re-asserts it every ≤10s. NULL until observed.
+  -- The session's display label — ONE column, last-writer-wins. Initially seeded
+  -- + ripened by the plug-in (first user message → Claude Code's ai-title → a
+  -- /rename custom-title), and updated by a deliberate rename from the agent
+  -- (rename_session → POST /api/device/session-title), the dashboard inline-edit
+  -- (POST /api/home/session-title), or the orchestrator's rename tool — all write
+  -- here directly. No precedence: whatever was written last is the label. The
+  -- plug-in does NOT clobber a rename because it ships its auto-title EDGE-TRIGGERED
+  -- (only when its own title changes, never re-asserted every beat); see
+  -- upsertSession's COALESCE(EXCLUDED.title, …) "absent title = keep current". NULL
+  -- until first observed (readers fall back to cwd).
   title          TEXT,
-  -- Manual display-name OVERRIDE, set explicitly by the AGENT (rename_session tool
-  -- → POST /api/device/session-title) or the USER (dashboard inline-edit → POST
-  -- /api/home/session-title). Readers surface COALESCE(manual_title, title), so this
-  -- wins over the auto `title`. It is a SEPARATE column on purpose: the heartbeat
-  -- re-asserts the auto `title` every ≤10s and would clobber a rename stored there;
-  -- kept here, the heartbeat never touches it. NULL = no override (use the auto title).
-  manual_title   TEXT,
   agent          TEXT        NOT NULL DEFAULT 'claude-code',
   state          TEXT        NOT NULL DEFAULT 'active'
                    CHECK (state IN ('active', 'waiting', 'idle', 'ended')),
@@ -197,10 +197,32 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_device  ON sessions(device_id);
--- Idempotent add for already-provisioned DBs (the CREATE TABLE IF NOT EXISTS above
--- is a no-op once the table exists). Manual rename override; see the column comment.
--- No backfill — NULL correctly means "no override yet" (readers fall back to title).
-ALTER TABLE sessions ADD COLUMN IF NOT EXISTS manual_title TEXT;
+-- Collapse of the former two-column scheme (title + manual_title) into the single
+-- `title` column above, in TWO PHASES on purpose. This DB has no auto-migration —
+-- schema.sql is applied by hand — so the destructive drop must be sequenced around
+-- the code deploy. Run the phases SEPARATELY for the live cutover; both are guarded
+-- + idempotent + safe on a fresh DB (no manual_title → no-op).
+--
+-- PHASE 1 — backfill. Safe to run ANY time, including before the new code deploys.
+-- manual_title WAS the effective label (readers used COALESCE(manual_title, title)),
+-- so folding it into title preserves every rename, and OLD code still reading
+-- COALESCE sees no change (title == manual_title now).
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'sessions' AND column_name = 'manual_title'
+  ) THEN
+    UPDATE sessions SET title = manual_title WHERE manual_title IS NOT NULL;
+  END IF;
+END $$;
+
+-- PHASE 2 — drop the now-unused override column. Run this ONLY AFTER the new
+-- control-plane is deployed (it no longer selects manual_title) AND devices are on
+-- the edge-triggered plugin. Running it while an OLD server is still live would 500
+-- every session read (the old SESSION_COLUMNS still references manual_title). Keep
+-- this on its own line so the cutover can run Phase 1, deploy, THEN this. Idempotent.
+ALTER TABLE sessions DROP COLUMN IF EXISTS manual_title;
 
 -- -----------------------------------------------------------------------------
 -- account_locks — CROSS-MACHINE per-account turn serialization (a LEASE).
@@ -468,15 +490,17 @@ DROP TRIGGER IF EXISTS trg_session_state_update ON sessions;
 CREATE TRIGGER trg_session_state_update
   AFTER UPDATE ON sessions
   FOR EACH ROW
-  -- Fire on a lifecycle (state) change OR a manual rename (manual_title changed),
-  -- so the dashboard's SSE refreshes the session's display name live. NOT on the
-  -- per-60s touchSession (it only bumps last_event_at) nor the heartbeat's auto
-  -- `title` upgrade — those leave state + manual_title untouched, so the dashboard
-  -- isn't woken every beat. afk moved to `devices` (machine-wide) and fires
+  -- Fire on a lifecycle (state) change OR a title change, so the dashboard's SSE
+  -- refreshes the session's display name live. With a single `title` column this
+  -- safely covers BOTH a deliberate rename and the plug-in's auto-title ripening —
+  -- and it does NOT storm, because the device now ships its title edge-triggered
+  -- (only on a real change), so a steady ≤10s heartbeat writes the same value, which
+  -- is `IS NOT DISTINCT` and does not fire. NOT on the per-60s touchSession (bumps
+  -- only last_event_at). afk moved to `devices` (machine-wide) and fires
   -- `trg_device_state_update` instead; the vestigial sessions.afk column is no
   -- longer written, so it's not watched here.
   WHEN (OLD.state IS DISTINCT FROM NEW.state
-        OR OLD.manual_title IS DISTINCT FROM NEW.manual_title)
+        OR OLD.title IS DISTINCT FROM NEW.title)
   EXECUTE FUNCTION notify_session_state();
 
 -- =============================================================================

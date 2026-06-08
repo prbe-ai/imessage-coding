@@ -124,6 +124,11 @@ export function systemPrompt(mode: TurnMode, profile?: UserProfile): string {
     '  When the user refers to an agent by such a tag, match it to the snapshot agent whose',
     '  id ENDS in those characters. Still prefer a real title or a what-it-is-doing summary',
     '  whenever one exists; reach for the tag only when nothing else tells them apart.',
+    '- You can RENAME a session\'s label with rename_session. Use it when the user asks ("call',
+    '  that one Billing"), OR when an agent\'s label clearly no longer matches what it is now',
+    '  doing (the label drifted from the work). This is occasional, NOT every turn — only when',
+    '  the label is genuinely stale or the user asks. It changes only the display label; the',
+    '  session id (and everything routed by it) stays the same.',
     '- You do NOT have to reply every turn. If nothing needs saying — a trivial',
     '  status, or you just quietly did the thing — take the action (or none) and end',
     '  the turn. Silence is fine. The ONE exception: if an agent is BLOCKED waiting on',
@@ -227,8 +232,8 @@ function renderUserProfile(profile: UserProfile): string {
 
 /** Tool schemas advertised to the model, scoped to the turn mode. `message_user`
  *  is always available; `message_agent`, `get_session_state`, `get_session_data`,
- *  and `update_session_state` are user-message-only (the two agent-driven triggers
- *  are notify-only — the human resolves). */
+ *  `update_session_state`, and `rename_session` are user-message-only (the two
+ *  agent-driven triggers are notify-only — the human resolves). */
 export function assistantTools(mode: TurnMode): ToolDef[] {
   const messageUser: ToolDef = {
     type: 'function',
@@ -403,6 +408,30 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
             },
           },
           required: ['session_ids', 'afk'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: ToolName.RENAME_SESSION,
+        description:
+          "Rename a coding agent's session — set the short label shown on the dashboard and " +
+          'used to refer to it (e.g. "Auth refactor"). Call this ONLY when the user asks you to ' +
+          'rename a session, OR when you notice a session\'s current label clearly no longer ' +
+          'matches what that agent is now working on (its label has drifted). Do NOT rename ' +
+          'every turn or for minor shifts — only when the label is genuinely stale or the user ' +
+          'asks. The session id never changes; this only updates the display label.',
+        parameters: {
+          type: 'object',
+          properties: {
+            session: { type: 'string', description: 'Id of the session to rename.' },
+            title: {
+              type: 'string',
+              description: 'The new short label (one line, non-empty). Empty is rejected.',
+            },
+          },
+          required: ['session', 'title'],
         },
       },
     },

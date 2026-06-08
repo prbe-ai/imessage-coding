@@ -123,11 +123,10 @@ interface MessageLogRow {
 const SESSION_FROM = 'FROM sessions s JOIN devices d ON d.id = s.device_id';
 const SESSION_COLUMNS =
   's.id, s.device_id, s.account_id, s.cwd, ' +
-  // Effective label: a manual rename (agent rename_session tool or a dashboard
-  // edit, stored in manual_title) wins over the device-derived auto-title.
-  // Aliased back to `title` so every reader (dashboard SSE, orchestrator prompt)
-  // gets the override transparently — SessionRow.title is the effective value.
-  'COALESCE(s.manual_title, s.title) AS title, ' +
+  // Single source of the display label: the plug-in's auto-title and every
+  // deliberate rename (agent / dashboard / orchestrator) all write `s.title`
+  // directly, last-writer-wins. No COALESCE override column any more.
+  's.title, ' +
   's.agent, s.state, s.last_event_at, d.afk';
 
 function toSessionInfo(r: SessionRow): SessionInfo {
@@ -544,22 +543,23 @@ export async function touchSession(args: {
 }
 
 /**
- * Set (or clear) a session's MANUAL display-name override — the explicit rename
- * from the agent's `rename_session` tool or a dashboard inline-edit. Writes
- * `manual_title` (NOT `title`), so the device heartbeat's auto-title never
- * clobbers it; readers surface COALESCE(manual_title, title). Pass `null` (or an
- * empty cleaned name) to clear the override and revert to the auto-title.
- * Account-scoped (the tenant boundary); returns false if no such session.
- * The manual_title change fires trg_session_state_update → the dashboard SSE
- * refreshes the label live. Caller is responsible for cleaning/clamping the name.
+ * Set a session's display name — a deliberate rename from the agent's
+ * `rename_session` tool, a dashboard inline-edit, or the orchestrator's rename
+ * tool. Writes the single `title` column directly (last-writer-wins). It does NOT
+ * get clobbered by the plug-in's auto-title because the device ships that
+ * edge-triggered (only on change), so a steady heartbeat never re-asserts over
+ * this write. Account-scoped (the tenant boundary); returns false if no such
+ * session. The title change fires trg_session_state_update → the dashboard SSE
+ * refreshes the label live. Caller cleans/clamps the name and guarantees it is
+ * non-empty (a label is never blanked — empty is a no-op upstream).
  */
-export async function setManualTitle(args: {
+export async function setTitle(args: {
   sessionId: string;
   accountId: string;
-  title: string | null;
+  title: string;
 }): Promise<boolean> {
   const rows = await query<{ id: string }>(
-    `UPDATE sessions SET manual_title = $3
+    `UPDATE sessions SET title = $3
       WHERE id = $1 AND account_id = $2
       RETURNING id`,
     [args.sessionId, args.accountId, args.title],

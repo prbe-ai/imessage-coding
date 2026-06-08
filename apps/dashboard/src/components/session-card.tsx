@@ -7,10 +7,10 @@
  * badge colors follow DESIGN.md: active=success, waiting=warning, idle=info,
  * ended=outline.
  *
- * The title is click-to-edit when `onRename` is provided: it writes the session's
- * manual display name (the user-side counterpart to the agent's rename_session
- * tool). Enter or blur commits; Escape cancels; an empty value clears the override
- * and reverts to the auto-title. The parent owns the optimistic update + persist.
+ * The title is click-to-edit when `onRename` is provided: it sets the session's
+ * display name (the user-side counterpart to the agent's rename_session tool).
+ * Enter or blur commits; Escape cancels; an empty value is ignored (a label is
+ * never blanked). The parent owns the optimistic update + persist.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -89,7 +89,8 @@ export function SessionCard({
   };
 
   // Single commit path (Enter + Escape both blur the input). No-op when unchanged
-  // from the current effective title, so re-saving the same name is free.
+  // from the current effective title, so re-saving the same name is free. An empty
+  // draft is treated as cancel — a label is never blanked.
   const commit = () => {
     setEditing(false);
     if (cancelRef.current) {
@@ -97,7 +98,7 @@ export function SessionCard({
       return;
     }
     const next = draft.trim();
-    if (next === (session.title ?? "")) return;
+    if (!next || next === (session.title ?? "")) return;
     onRename?.(next);
   };
 

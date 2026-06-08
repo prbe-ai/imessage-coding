@@ -32,7 +32,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
@@ -61,6 +61,7 @@ import {
   migrateLegacyDeviceDir,
   pickEagerSessionId,
   sessionTitleFile,
+  sessionTitleSentFile,
 } from './config.ts';
 import { deriveCodexSessionId } from './codex-session.ts';
 import { injectReply, resolveActiveThreadId } from './codex-appserver.ts';
@@ -265,16 +266,16 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       description:
         "Set this session's display name on the dashboard (and the label the user/orchestrator uses to refer to " +
         'you). Call it to name the session for what it is working on, and update it as the focus changes — e.g. ' +
-        '"Auth refactor", then "Fixing CI". This overrides the auto-generated title; it does NOT rename anything in ' +
-        'Claude Code itself. Works whether or not AFK is on. Pass an empty name to clear it and fall back to the ' +
-        `auto title. Names are one line, trimmed to ${SESSION_TITLE_MAX_LEN} chars.`,
+        '"Auth refactor", then "Fixing CI". This sets the session label; it does NOT rename anything in ' +
+        'Claude Code itself. Works whether or not AFK is on. A name is required (an empty name is ignored — a label ' +
+        `is never blanked). Names are one line, trimmed to ${SESSION_TITLE_MAX_LEN} chars.`,
       inputSchema: {
         type: 'object',
         properties: {
           name: {
             type: 'string',
             description:
-              "The session's new display name (a short label, e.g. \"Auth refactor\"). Empty clears the override.",
+              "The session's new display name (a short, non-empty label, e.g. \"Auth refactor\").",
           },
         },
         required: ['name'],
@@ -317,6 +318,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === RENAME_SESSION_TOOL) {
     const { name } = req.params.arguments as { name?: unknown };
     const cleaned = cleanSessionTitle(typeof name === 'string' ? name : '');
+    if (!cleaned) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: 'a non-empty session name is required' }],
+      };
+    }
     const ok = await renameSession(cleaned);
     if (!ok) {
       return {
@@ -330,19 +337,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       };
     }
     return {
-      content: [
-        { type: 'text', text: cleaned ? `renamed to "${cleaned}"` : 'cleared the manual name' },
-      ],
+      content: [{ type: 'text', text: `renamed to "${cleaned}"` }],
     };
   }
   throw new Error(`unknown tool: ${req.params.name}`);
 });
 
 /**
- * Set this session's manual display name → POST /api/device/session-title. Unlike
- * a status relay this is NOT AFK-gated (a label is session metadata, like the
+ * Set this session's display name → POST /api/device/session-title. Unlike a
+ * status relay this is NOT AFK-gated (a label is session metadata, like the
  * title/cwd that ride the always-on heartbeat) — but it IS killswitch-gated, like
- * every device→server write. An empty `title` clears the override server-side.
+ * every device→server write. The `title` is non-empty (the caller rejects empty).
  * Returns true only on a confirmed write so the tool can report failure to the
  * agent.
  */
@@ -750,13 +755,44 @@ function reconnectBackoffMs(failures: number): number {
 /** The session title captured locally by the tap daemon — Claude Code's own
  *  ai-title / a /rename custom-title, else the provisional first message — or
  *  undefined if not yet observed. Forwarded on the heartbeat as session metadata
- *  (like cwd) so it populates regardless of AFK; the server keeps the newest. */
+ *  (like cwd) so it populates regardless of AFK. */
 function readSessionTitle(): string | undefined {
   try {
     const t = readFileSync(sessionTitleFile(SESSION_ID), 'utf8').trim();
     return t || undefined;
   } catch {
     return undefined; // not captured yet — readers fall back to cwd
+  }
+}
+
+/** The last title value we actually SHIPPED on a heartbeat (persisted), or
+ *  undefined if we never have. The title rides the beat EDGE-TRIGGERED — only when
+ *  the current auto-title differs from this — so a steady beat never re-asserts it
+ *  and thus never clobbers a server-side rename (orchestrator / dashboard) in the
+ *  single `title` column. Persisted across restarts for the same reason. */
+function readLastSentTitle(): string | undefined {
+  try {
+    const t = readFileSync(sessionTitleSentFile(SESSION_ID), 'utf8').trim();
+    return t || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Record the title we just shipped (call only after a confirmed send, so a failed
+ *  beat re-sends next time instead of going silent). Atomic tmp+rename (matching the
+ *  tap's `<id>.title` write) so a crash mid-write can't leave a truncated marker that
+ *  reads back as a "changed" title and triggers a spurious re-assert. Best-effort —
+ *  the sessions dir already exists here (we only persist after readSessionTitle read
+ *  the live title from it). */
+function writeLastSentTitle(title: string): void {
+  try {
+    const path = sessionTitleSentFile(SESSION_ID);
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, title, 'utf8');
+    renameSync(tmp, path);
+  } catch {
+    /* best-effort: a missed persist just means we re-send the same title next beat */
   }
 }
 
@@ -771,6 +807,14 @@ async function heartbeatLoop(): Promise<void> {
       // value we actually asserted.
       const dirty = readAfkDirty();
       const localAfk = readAfk();
+      // Edge-triggered title: ship it ONLY when our auto-title changed since the
+      // last beat we sent it on. A steady beat sends no title → the server's
+      // COALESCE(EXCLUDED.title, …) keeps the current value, so a server-side
+      // rename (orchestrator / dashboard, written into the single `title` column)
+      // is never clobbered by re-assertion. Persisted across restarts.
+      const curTitle = readSessionTitle();
+      const titleToSend =
+        curTitle !== undefined && curTitle !== readLastSentTitle() ? curTitle : undefined;
       const body = JSON.stringify({
         sessionId: SESSION_ID,
         deviceId: DEVICE_ID,
@@ -779,12 +823,17 @@ async function heartbeatLoop(): Promise<void> {
         // CLAUDE_PROJECT_DIR (the real project dir), NOT process.cwd() — the MCP
         // server's cwd is forced to CLAUDE_PLUGIN_ROOT by .mcp.json's --cwd.
         cwd: PROJECT_CWD,
-        // Omitted (dropped by JSON.stringify) until the tap captures it.
-        title: readSessionTitle(),
+        // Only when changed (see above); omitted otherwise so it never re-asserts.
+        ...(titleToSend !== undefined ? { title: titleToSend } : {}),
         ...(dirty ? { afk: localAfk, afkDirty: true } : {}),
         at: new Date().toISOString(),
       });
       const resp = await postJson(deviceApiUrl(DeviceApiRoute.HEARTBEAT), body, { bearer: token });
+      // Record the shipped title only on a confirmed send, so a failed beat
+      // re-sends next time instead of silently dropping the change.
+      if (titleToSend !== undefined && resp.classification === Classification.SUCCESS) {
+        writeLastSentTitle(titleToSend);
+      }
       if (resp.classification === Classification.HALT) log('heartbeat_halt', { reason: '401' });
       // Clear the dirty flag once the server echoes an afk matching what we asserted
       // — the toggle has landed in the cloud (and triggered the afk-off wipe, if any).

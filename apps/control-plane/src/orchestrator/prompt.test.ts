@@ -113,9 +113,9 @@ const toolNames = (mode: 'user_message' | 'agent_event' | 'agent_message'): stri
     .join(',');
 
 describe('assistantTools — notify-only gate', () => {
-  test('user_message exposes the full tool surface (2 messaging, 2 read, 1 write)', () => {
+  test('user_message exposes the full tool surface (2 messaging, 2 read, 2 write)', () => {
     expect(toolNames('user_message')).toBe(
-      'get_session_data,get_session_state,message_agent,message_user,update_session_state',
+      'get_session_data,get_session_state,message_agent,message_user,rename_session,update_session_state',
     );
   });
 

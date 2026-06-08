@@ -263,8 +263,9 @@ export default function HomePage() {
   // ── Rename a session's display name (manual override). ────────────────
   const onRenameSession = useCallback(
     async (sessionId: string, name: string) => {
-      // Optimistic: show the new name now (empty clears → folder fallback until
-      // the SSE event reconciles to the server's auto-title). Snapshot for rollback.
+      // Optimistic: show the new name now, then let the SSE event reconcile.
+      // session-card guards empty (a label is never blanked); the `|| undefined`
+      // is just a defensive fallback. Snapshot for rollback.
       const next = name.trim() || undefined;
       let prevSessions: SessionInfo[] | null = null;
       setSessions((prev) => {

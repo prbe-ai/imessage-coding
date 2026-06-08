@@ -200,8 +200,11 @@ CREATE INDEX IF NOT EXISTS idx_sessions_device  ON sessions(device_id);
 -- Collapse of the former two-column scheme (title + manual_title) into the single
 -- `title` column above, in TWO PHASES on purpose. This DB has no auto-migration —
 -- schema.sql is applied by hand — so the destructive drop must be sequenced around
--- the code deploy. Run the phases SEPARATELY for the live cutover; both are guarded
--- + idempotent + safe on a fresh DB (no manual_title → no-op).
+-- the code deploy. PHASE 1 (backfill) is here; PHASE 2 (DROP COLUMN) is deliberately
+-- placed LOWER in this file, right after trg_session_state_update is redefined — the
+-- OLD trigger's WHEN clause referenced manual_title, so Postgres blocks the drop until
+-- that dependency is gone. Ordering it that way lets a top-to-bottom apply against an
+-- existing DB succeed. Both phases are guarded + idempotent + safe on a fresh DB.
 --
 -- PHASE 1 — backfill. Safe to run ANY time, including before the new code deploys.
 -- manual_title WAS the effective label (readers used COALESCE(manual_title, title)),
@@ -216,13 +219,9 @@ BEGIN
     UPDATE sessions SET title = manual_title WHERE manual_title IS NOT NULL;
   END IF;
 END $$;
-
--- PHASE 2 — drop the now-unused override column. Run this ONLY AFTER the new
--- control-plane is deployed (it no longer selects manual_title) AND devices are on
--- the edge-triggered plugin. Running it while an OLD server is still live would 500
--- every session read (the old SESSION_COLUMNS still references manual_title). Keep
--- this on its own line so the cutover can run Phase 1, deploy, THEN this. Idempotent.
-ALTER TABLE sessions DROP COLUMN IF EXISTS manual_title;
+-- (PHASE 2 — DROP COLUMN manual_title — lives after the trg_session_state_update
+--  redefinition below; see that block. It can't run until the trigger no longer
+--  references the column.)
 
 -- -----------------------------------------------------------------------------
 -- account_locks — CROSS-MACHINE per-account turn serialization (a LEASE).
@@ -502,6 +501,17 @@ CREATE TRIGGER trg_session_state_update
   WHEN (OLD.state IS DISTINCT FROM NEW.state
         OR OLD.title IS DISTINCT FROM NEW.title)
   EXECUTE FUNCTION notify_session_state();
+
+-- PHASE 2 of the title-column collapse (PHASE 1 backfill is up by the sessions table).
+-- Drop the now-unused manual_title override column. This MUST come after the
+-- trg_session_state_update redefinition just above: the OLD trigger's WHEN clause
+-- referenced manual_title, and Postgres blocks DROP COLUMN while a trigger depends on
+-- it — so sequencing the drop here is what lets a top-to-bottom apply against an
+-- existing DB succeed. For the LIVE cutover, still run this ONLY AFTER the new
+-- control-plane + dashboard are deployed (old reads selected manual_title) and devices
+-- are on the edge-triggered plugin. Guarded + idempotent (no-op on a fresh DB / after
+-- the first drop).
+ALTER TABLE sessions DROP COLUMN IF EXISTS manual_title;
 
 -- =============================================================================
 -- LISTEN/NOTIFY: a device's afk changed (the machine-wide toggle). Wakes

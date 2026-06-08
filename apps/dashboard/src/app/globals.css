@@ -523,28 +523,13 @@
 .signin-google-btn svg { width: 18px; height: 18px; }
 .signin-options-error { margin: 0; font-size: 13px; text-align: center; color: #ba1a1a; }
 
-/* In-app-browser handoff: shown when the visitor lands here inside an embedded
- * WebView (LinkedIn / Instagram / etc.), where Google OAuth is blocked. Steers
- * them to reopen in a real browser. */
-.signin-inapp {
-  display: flex; flex-direction: column; align-items: stretch; gap: 14px; width: 100%;
-}
-.signin-inapp-lead {
+/* In-app-browser notice: shown in place of the Google button when the visitor
+ * lands here inside an embedded WebView (LinkedIn / Instagram / etc.), where
+ * Google OAuth is blocked. Asks them to reopen the page in Chrome. */
+.signin-inapp-label {
   margin: 0; text-align: center;
   font-size: 14px; line-height: 1.5; color: var(--ink);
 }
-.signin-inapp-hint {
-  margin: 0; text-align: center;
-  font-size: 13px; line-height: 1.5; color: var(--slate);
-}
-.signin-inapp-fallback {
-  border: none; background: none; padding: 0;
-  font-family: inherit; font-size: 12.5px; color: var(--slate);
-  text-decoration: underline; text-underline-offset: 2px;
-  cursor: pointer; align-self: center;
-}
-.signin-inapp-fallback:hover:not(:disabled) { color: var(--ink); }
-.signin-inapp-fallback:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* iMessage-blue deep-link CTA — used on onboarding (start texting) and the
  * Home page (open chat). The one place this product earns the messaging-app

@@ -28,8 +28,8 @@ import { Brand } from "@/components/icons";
  * that app's in-app browser, and "Continue with Google" then dead-ends on
  * `Error 403: disallowed_useragent` (Google's "Use secure browsers" policy).
  * There is no way to bypass it — the page has to be reopened in a real browser.
- * We detect the WebView up front and show a handoff instead of a button that
- * cannot work.
+ * We detect the WebView up front and, instead of a button that cannot work,
+ * show a label asking the visitor to reopen the page in Chrome.
  *
  * Heuristics: explicit in-app-browser UA tokens, plus the well-known
  * "iOS WebView drops the Safari token" signal — SFSafariViewController and the
@@ -63,23 +63,6 @@ function isInAppBrowser(): boolean {
   return IN_APP_BROWSER_RE.test(navigator.userAgent);
 }
 
-type Platform = "ios" | "android" | "other";
-
-function detectPlatform(): Platform {
-  if (typeof navigator === "undefined") return "other";
-  const ua = navigator.userAgent || "";
-  if (/iPhone|iPad|iPod/i.test(ua)) return "ios";
-  if (/Android/i.test(ua)) return "android";
-  return "other";
-}
-
-/** Per-platform hint for escaping the in-app browser to the real one. */
-const ESCAPE_HINT: Record<Platform, string> = {
-  ios: 'Tap the ••• menu in the top corner, then "Open in Safari" (or your browser).',
-  android: 'Tap the ⋮ menu in the top corner, then "Open in browser".',
-  other: "Open this page in your default web browser to continue.",
-};
-
 const NOOP_SUBSCRIBE = () => () => {};
 
 /**
@@ -99,11 +82,9 @@ function useHasHydrated(): boolean {
 function SignInInner() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   const hydrated = useHasHydrated();
   const inAppBrowser = hydrated && isInAppBrowser();
-  const platform: Platform = hydrated ? detectPlatform() : "other";
 
   useEffect(() => {
     authClient
@@ -117,17 +98,6 @@ function SignInInner() {
         console.error("[auth/sign-in] getSession threw", err);
       });
   }, []);
-
-  async function copyLink() {
-    try {
-      await navigator.clipboard.writeText(window.location.href);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard can be blocked in some WebViews — the manual menu hint above
-      // still gets the user there, so swallow rather than surface an error.
-    }
-  }
 
   async function signInWithGoogle() {
     setLoading(true);
@@ -156,28 +126,10 @@ function SignInInner() {
             Steer your Claude Code and Codex sessions from iMessage.
           </p>
           {inAppBrowser ? (
-            <div className="signin-inapp">
-              <p className="signin-inapp-lead">
-                Google won&apos;t let you sign in from inside another app&apos;s
-                browser. Reopen this page in your browser to continue.
-              </p>
-              <p className="signin-inapp-hint">{ESCAPE_HINT[platform]}</p>
-              <button
-                type="button"
-                className="signin-google-btn"
-                onClick={copyLink}
-              >
-                {copied ? "Link copied ✓" : "Copy link"}
-              </button>
-              <button
-                type="button"
-                className="signin-inapp-fallback"
-                onClick={signInWithGoogle}
-                disabled={loading}
-              >
-                {loading ? "Redirecting…" : "Continue with Google anyway"}
-              </button>
-            </div>
+            <p className="signin-inapp-label">
+              Google doesn&apos;t allow sign-in from in-app browsers. Please open
+              this page in Chrome to sign in.
+            </p>
           ) : (
             <button
               type="button"

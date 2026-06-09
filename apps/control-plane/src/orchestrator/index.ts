@@ -870,21 +870,25 @@ async function execMessageUser(ctx: DispatchCtx, args: Record<string, unknown>):
  * "just text back and forth". A session that was waiting on a relayed question
  * simply receives the steer and treats it as the answer; there is no code-level
  * auto-binding of "this text resolves that question" (the model decides what its
- * text means, and `expect_reply` is only a hint — see prompt.ts). An `action` is the
- * one structured path: a permission verdict (allow/deny) or a plan approval.
+ * text means). `expect_reply` rides ALONG with the text: set true when it is a
+ * question the user wants answered, and the device tells the agent to reply via
+ * message_user (Claude Code: an <channel> attribute; Codex: a folded-in directive).
+ * An `action` is the one structured path: a permission verdict (allow/deny) or a
+ * plan approval.
  */
 async function execMessageAgent(ctx: DispatchCtx, args: Record<string, unknown>): Promise<string> {
   const sessionId = typeof args.session === 'string' ? args.session.trim() : '';
   if (!sessionId) return 'error: session is required';
   const text = typeof args.text === 'string' ? args.text.trim() : '';
   const action = typeof args.action === 'string' ? args.action : '';
+  const expectReply = args.expect_reply === true;
 
   if (action) return resolveSessionAction(ctx, sessionId, action);
 
   if (!text) return 'error: pass text (a message to the agent) or an action';
 
   // Tenant-scoped enqueue: only succeeds for a live session in this account.
-  const res = await enqueueReply({ sessionId, accountId: ctx.accountId, text });
+  const res = await enqueueReply({ sessionId, accountId: ctx.accountId, text, expectReply });
   if (!res) return 'error: no such live session for this account';
   const label = sessionDisplay(ctx, sessionId);
   ctx.actions.push(`messaged session ${label}`);

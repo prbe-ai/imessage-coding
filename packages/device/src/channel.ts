@@ -208,7 +208,7 @@ function readDeviceId(): string {
 // Capabilities + instructions are the EXACT spike wording (neutral, no spike
 // branding); only the channel source name changes to the productized id.
 const mcp = new Server(
-  { name: 'imsg-device', version: '0.1.19' },
+  { name: 'imsg-device', version: '0.1.20' },
   {
     capabilities: {
       experimental: {
@@ -224,7 +224,12 @@ const mcp = new Server(
       'AskUserQuestion or ExitPlanMode call, the user is away from their keyboard (AFK): follow it — call ' +
       '`message_user` with expect_reply: true and the full question/plan text (all options verbatim), then STOP and ' +
       'end your turn (do not exit, do not guess, do not retry the denied tool). The user\'s reply arrives later as a ' +
-      '<channel source="imsg-device"> message; treat it as authoritative and resume. message_user reaches the ' +
+      '<channel source="imsg-device"> message; treat it as authoritative and resume. A message forwarded FROM the ' +
+      'user tells you whether they are awaiting a reply: it arrives either as <channel source="imsg-device" ' +
+      'expect_reply="true"> (or "false") for Claude Code, or with an inline "[The user is awaiting your reply …]" ' +
+      'note for Codex. When a reply IS expected, send your answer with the `message_user` tool (the user is remote ' +
+      'over iMessage and will NOT see your terminal output); when it is not, fold the message into your work without ' +
+      "a forced reply. message_user reaches the " +
       "user's phone over iMessage. message_user normally goes through an orchestrator that condenses it; for the " +
       'rare case where the user must see your EXACT words (a plan, a diff, the precise options when a hook denied ' +
       'AskUserQuestion/ExitPlanMode), set verbatim: true to bypass that condensing — use it sparingly (never for ' +
@@ -559,6 +564,7 @@ async function applyInbox(item: InboxItem): Promise<boolean> {
         url: appServer,
         threadId: SESSION_ID, // thread.id === Codex session id
         text: item.text ?? '',
+        expectReply: Boolean(item.expectReply),
         log,
       });
       if (!res.ok) {
@@ -575,7 +581,15 @@ async function applyInbox(item: InboxItem): Promise<boolean> {
         method: ChannelMethod.CHANNEL,
         params: {
           content: item.text ?? '',
-          meta: { source_kind: 'imsg_phone', message_id: item.id, attention_id: item.attentionId },
+          // meta entries become attributes on the <channel> tag the model reads. Values
+          // must be strings; `expect_reply` (always present) tells the agent whether the
+          // user is awaiting a reply — see the server instructions.
+          meta: {
+            source_kind: 'imsg_phone',
+            message_id: item.id,
+            attention_id: item.attentionId,
+            expect_reply: String(Boolean(item.expectReply)),
+          },
         },
       });
       log('reply_pushed', { id: item.id, len: (item.text ?? '').length });

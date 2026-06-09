@@ -62,9 +62,24 @@ export interface TurnStartParams {
   input: TextUserInput[];
 }
 
-/** Build the `turn/start` params for one inbound text reply. Pure (tested). */
-export function buildTurnStartParams(threadId: string, text: string): TurnStartParams {
-  return { threadId, input: [{ type: 'text', text }] };
+/** The directive prepended to a Codex turn when the user is awaiting a reply. Codex has
+ *  no <channel> meta channel (unlike Claude Code's `expect_reply` tag attribute), so the
+ *  signal must ride INSIDE the injected text. Bracketed + first so it reads as an
+ *  out-of-band note, not part of the user's message. */
+export const CODEX_EXPECT_REPLY_DIRECTIVE =
+  '[The user is awaiting your reply — when you have an answer, send it back with the ' +
+  'message_user tool. They are remote over iMessage and will NOT see your terminal output.]';
+
+/** Build the `turn/start` params for one inbound text reply. When `expectReply` is set,
+ *  the expect-reply directive is prepended so the agent knows to answer via message_user;
+ *  otherwise the text is injected unchanged (a steer needs no note). Pure (tested). */
+export function buildTurnStartParams(
+  threadId: string,
+  text: string,
+  expectReply = false,
+): TurnStartParams {
+  const body = expectReply ? `${CODEX_EXPECT_REPLY_DIRECTIVE}\n\n${text}` : text;
+  return { threadId, input: [{ type: 'text', text: body }] };
 }
 
 type LogFn = (event: string, data: Record<string, unknown>) => void;
@@ -76,6 +91,9 @@ export interface InjectReplyOpts {
   threadId: string;
   /** The reply text to inject as a new user turn. */
   text: string;
+  /** Whether the user is awaiting a reply — prepends a directive to the injected turn so
+   *  the agent answers via message_user (Codex has no <channel> meta to carry the flag). */
+  expectReply?: boolean;
   /** WS connect timeout. */
   connectMs?: number;
   /** Per-request (initialize / turn/start) response timeout. */
@@ -307,7 +325,7 @@ export async function injectReply(opts: InjectReplyOpts): Promise<InjectResult> 
 
     const resp = await client.request(
       AppServerMethod.TURN_START,
-      buildTurnStartParams(o.threadId, o.text),
+      buildTurnStartParams(o.threadId, o.text, o.expectReply),
       o.requestMs,
     );
     if (resp.error) {

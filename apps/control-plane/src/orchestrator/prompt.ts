@@ -342,7 +342,10 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
           'Send a message to one of the coding agents, named by session. Just write ' +
           'what you want to tell it in `text` — an instruction, a steer, or the answer ' +
           'to something it asked. It is all text back and forth: the text is delivered as ' +
-          'a steer, and an agent that was waiting on a reply treats it as the answer. ONE ' +
+          'a steer, and an agent that was waiting on a reply treats it as the answer. Set ' +
+          'expect_reply: true when your text is a QUESTION the user wants answered — the agent ' +
+          'is then told the user is waiting and to send its answer back (it reaches the user as ' +
+          'a text); leave it off for a steer or instruction that needs no reply. ONE ' +
           'structured path: to resolve a PERMISSION it is blocked on (Bash, network, ' +
           'deletion, a file edit), pass action (allow / deny, or approve for a plan) ' +
           'instead of text (you decide the verdict; weigh a tap-back as the signal — ' +
@@ -355,6 +358,13 @@ export function assistantTools(mode: TurnMode): ToolDef[] {
               type: 'string',
               description:
                 'Free text to send to the agent (a steer, or the answer to its question/plan).',
+            },
+            expect_reply: {
+              type: 'boolean',
+              description:
+                'Set true when the text is a question the user wants answered: the agent is told ' +
+                'the user is awaiting a reply and to send it back with its message_user tool. ' +
+                'Omit/false for a steer or instruction that needs no explicit reply.',
             },
             action: {
               type: 'string',

@@ -6,7 +6,12 @@
  * pure decision: the turn/start payload shape.
  */
 import { describe, expect, test } from 'bun:test';
-import { buildTurnStartParams, singleLoadedThreadId, AppServerMethod } from './codex-appserver.ts';
+import {
+  buildTurnStartParams,
+  singleLoadedThreadId,
+  AppServerMethod,
+  CODEX_EXPECT_REPLY_DIRECTIVE,
+} from './codex-appserver.ts';
 
 describe('buildTurnStartParams', () => {
   test('wraps the text as a single text UserInput under the thread id', () => {
@@ -19,6 +24,23 @@ describe('buildTurnStartParams', () => {
   test('preserves the text verbatim (no trimming / mutation)', () => {
     const text = '  multi\nline  reply  ';
     expect(buildTurnStartParams('t', text).input[0]!.text).toBe(text);
+  });
+
+  test('no expect-reply directive for a plain steer (expectReply omitted/false)', () => {
+    expect(buildTurnStartParams('t', 'just do it').input[0]!.text).toBe('just do it');
+    expect(buildTurnStartParams('t', 'just do it', false).input[0]!.text).toBe('just do it');
+  });
+
+  test('prepends the expect-reply directive (text preserved after it) when expectReply', () => {
+    const text = 'what is the migration status?';
+    const out = buildTurnStartParams('t', text, true).input[0]!.text;
+    expect(out).toBe(`${CODEX_EXPECT_REPLY_DIRECTIVE}\n\n${text}`);
+    expect(out.startsWith(CODEX_EXPECT_REPLY_DIRECTIVE)).toBe(true);
+    expect(out.endsWith(text)).toBe(true);
+  });
+
+  test('the directive names the message_user tool so the agent knows how to reply', () => {
+    expect(CODEX_EXPECT_REPLY_DIRECTIVE).toContain('message_user');
   });
 });
 

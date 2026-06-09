@@ -132,6 +132,19 @@ describe('assistantTools — notify-only gate', () => {
   test('agent_message (the status-relay split) is ALSO notify-only', () => {
     expect(toolNames('agent_message')).toBe('message_user');
   });
+
+  test('message_agent exposes an expect_reply boolean param (user→agent reply hint)', () => {
+    const messageAgent = assistantTools('user_message').find(
+      (t) => t.function.name === 'message_agent',
+    );
+    const props = messageAgent?.function.parameters.properties as
+      | Record<string, { type?: string; description?: string }>
+      | undefined;
+    expect(props?.expect_reply?.type).toBe('boolean');
+    // The description must steer the model to set it for questions and reference the
+    // agent's reply tool, so the surfaced flag is actually actionable.
+    expect((props?.expect_reply?.description ?? '').includes('message_user')).toBe(true);
+  });
 });
 
 describe('buildTurnMessages — coalesced user burst rendering', () => {

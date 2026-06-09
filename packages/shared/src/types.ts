@@ -64,6 +64,14 @@ export interface InboxItem {
   kind: 'reply' | 'verdict';
   /** reply: the text to inject. */
   text?: string;
+  /**
+   * reply: whether the user is AWAITING an answer (true) or this is a steer/FYI
+   * (false/absent). The device surfaces it to the agent so it knows whether to
+   * explicitly reply via message_user — Claude Code as an `expect_reply` attribute on
+   * the <channel> tag, Codex as a directive folded into the injected turn. Unused for
+   * a verdict.
+   */
+  expectReply?: boolean;
   /** verdict: the Channels request_id of the permission prompt to release. */
   requestId?: string;
   /** verdict: the permission decision. */

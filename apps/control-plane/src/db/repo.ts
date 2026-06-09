@@ -103,6 +103,7 @@ interface InboxRow {
   id: string;
   kind: string;
   text: string | null;
+  expect_reply: boolean;
   request_id: string | null;
   behavior: string | null;
   attention_id: string | null;
@@ -181,6 +182,7 @@ function toAttentionEvent(r: AttentionRow): AttentionEvent {
 function toInboxItem(r: InboxRow): InboxItem {
   const item: InboxItem = { id: r.id, kind: r.kind as InboxItem['kind'] };
   if (r.text !== null) item.text = r.text;
+  if (r.expect_reply) item.expectReply = true;
   if (r.request_id !== null) item.requestId = r.request_id;
   if (r.behavior !== null) item.behavior = r.behavior as DecisionBehavior;
   if (r.attention_id !== null) item.attentionId = r.attention_id;
@@ -1337,7 +1339,7 @@ export async function listUndeliveredInbox(args: {
   accountId: string;
 }): Promise<InboxItem[]> {
   const rows = await query<InboxRow>(
-    `SELECT si.id, si.kind, si.text, si.request_id, si.behavior, si.attention_id
+    `SELECT si.id, si.kind, si.text, si.expect_reply, si.request_id, si.behavior, si.attention_id
        FROM session_inbox si
        JOIN sessions s ON s.id = si.session_id
       WHERE si.session_id = $1
@@ -1559,14 +1561,17 @@ export async function enqueueReply(args: {
   sessionId: string;
   accountId: string;
   text: string;
+  /** True when the user is awaiting an answer (the agent is told to reply via
+   *  message_user); false/omitted for a steer or instruction. Defaults false. */
+  expectReply?: boolean;
 }): Promise<{ id: string } | undefined> {
   const rows = await query<{ id: string }>(
-    `INSERT INTO session_inbox (session_id, account_id, kind, text)
-       SELECT s.id, s.account_id, 'reply', $3
+    `INSERT INTO session_inbox (session_id, account_id, kind, text, expect_reply)
+       SELECT s.id, s.account_id, 'reply', $3, $4
          FROM sessions s
         WHERE s.id = $1 AND s.account_id = $2 AND s.state <> 'ended'
      RETURNING id`,
-    [args.sessionId, args.accountId, args.text],
+    [args.sessionId, args.accountId, args.text, args.expectReply ?? false],
   );
   return rows[0];
 }

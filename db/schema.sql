@@ -303,6 +303,11 @@ CREATE TABLE IF NOT EXISTS session_inbox (
   kind          TEXT        NOT NULL CHECK (kind IN ('reply', 'verdict')),
   -- reply: the text to inject. verdict: NULL.
   text          TEXT,
+  -- reply: whether the user is AWAITING an answer (true) or this is a steer/FYI
+  -- (false). The device surfaces it to the agent so it knows whether to explicitly
+  -- reply — Claude Code as an `expect_reply` attribute on the <channel> tag, Codex as
+  -- a directive folded into the injected turn. verdict: unused (stays false).
+  expect_reply  BOOLEAN     NOT NULL DEFAULT false,
   -- verdict: the permission prompt to release + the decision. reply: both NULL.
   request_id    TEXT,
   behavior      TEXT        CHECK (behavior IN ('allow', 'deny')),

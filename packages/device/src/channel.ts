@@ -301,11 +301,34 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === MESSAGE_USER_TOOL) {
-    const { text, expect_reply, verbatim } = req.params.arguments as {
-      text: string;
-      expect_reply?: boolean;
-      verbatim?: boolean;
+    // Read defensively. If a call arrives without a usable `text` (missing key,
+    // wrong type, or a non-object/`undefined` arguments payload), every later
+    // `text.length` would throw uncaught and surface as an opaque MCP -32603
+    // ("undefined is not an object (evaluating 'text.length')") — fooling the
+    // agent into retrying the same malformed call forever. Mirror the
+    // rename_session handler's typeof guard and fail with a clear tool error.
+    const args = (req.params.arguments ?? {}) as {
+      text?: unknown;
+      expect_reply?: unknown;
+      verbatim?: unknown;
     };
+    const text = typeof args.text === 'string' ? args.text : '';
+    const expect_reply = Boolean(args.expect_reply);
+    const verbatim = Boolean(args.verbatim);
+    if (!text.trim()) {
+      log('message_user_no_text', {});
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text:
+              'message_user requires a non-empty `text` string — nothing was sent. ' +
+              'Retry with your message in the `text` argument.',
+          },
+        ],
+      };
+    }
     // AFK-OFF SHORT-CIRCUIT: at the keyboard the server drops a non-AFK relay
     // (routes/device.ts → {relayed:false}), so relaying is a silent no-op that
     // fools the agent into thinking it notified the user. Fail loudly instead and
@@ -323,10 +346,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     // if it's too long the server condenses it via the orchestrator instead of
     // truncating, so no device-side clamp here. The user's reply (if any) comes back as a
     // <channel> message, routed by the LLM.
-    await sendStatusMessage(clean, { expectsReply: Boolean(expect_reply), verbatim: Boolean(verbatim) });
+    await sendStatusMessage(clean, { expectsReply: expect_reply, verbatim });
     log(expect_reply ? 'message_user_ask' : 'message_user_status', {
       len: text.length,
-      verbatim: Boolean(verbatim),
+      verbatim,
     });
     return {
       content: [

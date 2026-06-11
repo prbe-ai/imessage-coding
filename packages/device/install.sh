@@ -445,11 +445,38 @@ install_for_claude_code() {
   # The AFK permission relay only activates with --dangerously-load-development-
   # channels (CC-only; NOT used for Codex). Marker-wrapped + revertable.
   CHANNEL_REF="plugin:${PLUGIN_NAME}@${MARKETPLACE_NAME}"
-  CLAUDE_ALIAS="alias claude='claude --dangerously-load-development-channels ${CHANNEL_REF}'"
+  # Wrap `claude` as a shell FUNCTION (not a bare alias) so the dev-channels flag
+  # rides ONLY on actual Claude SESSION launches (interactive / -p), and management
+  # subcommands run the unmodified binary. Why this matters:
+  # --dangerously-load-development-channels is VARIADIC — prepending it to e.g.
+  # `claude mcp add-json google-drive '{...}'` made the flag swallow mcp/add-json/
+  # google-drive/{...} as channel entries and fail the plugin:/server: tag check.
+  # Routing known subcommands to the plain binary avoids feeding them the flag at
+  # all; the `=value` form in the session branch is belt-and-suspenders so any
+  # unrecognized first arg still parses. `command claude` runs the real binary from
+  # PATH, so the function never recurses into itself. Built as a multi-line single-
+  # quoted string (NOT a heredoc-in-$()) because the installer runs under macOS
+  # /bin/sh = bash 3.2, which mis-parses `case`/`;;` inside a heredoc nested in a
+  # command substitution. CHANNEL_REF is spliced in via a brief '"..."' break.
+  # The leading `unalias`/`unset -f` are MANDATORY: a prior install left a live
+  # `alias claude=...`, and defining `claude()` while that alias is active is a
+  # PARSE ERROR in both zsh (`defining function based on alias`) and bash — which
+  # would abort the rc and leave the old broken alias in place. Clearing first makes
+  # `source ~/.zshrc` (re-run/upgrade path) safe, not just a fresh terminal.
+  CLAUDE_ALIAS='unalias claude 2>/dev/null
+unset -f claude 2>/dev/null
+claude() {
+  case "${1:-}" in
+    agents|auth|auto-mode|config|doctor|install|mcp|migrate-installer|plugin|plugins|project|setup-token|ultrareview|update|upgrade)
+      command claude "$@" ;;
+    *)
+      command claude --dangerously-load-development-channels='"${CHANNEL_REF}"' "$@" ;;
+  esac
+}'
   RC_BLOCK_ID="imsg-device channels alias"
 
   ALIASED="$(add_shell_alias "$RC_BLOCK_ID" "$CLAUDE_ALIAS")"
-  say "aliased 'claude' to load the channel (--dangerously-load-development-channels ${CHANNEL_REF}) in:${ALIASED}"
+  say "wrapped 'claude' to load the channel on session launch (subcommands use the plain binary) in:${ALIASED}"
   say "  open a NEW terminal (or run: source ~/.zshrc) for it to take effect"
   say "done (Claude Code). Open a NEW terminal so the alias loads, then start Claude Code."
 }

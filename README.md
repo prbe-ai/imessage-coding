@@ -1,12 +1,113 @@
 # imessage-coding
 
-Drive and steer Claude Code coding sessions from your phone over iMessage.
+**Drive and steer your AI coding agent from your phone — over iMessage.**
 
-When you walk away from your keyboard (AFK), permission prompts, questions, and
-plans are relayed to your phone as iMessages. You reply in natural language; the
-cloud control plane resolves your intent into a decision and feeds it back into
-the waiting Claude Code session. Destructive approvals are
-**deterministic-only** and **fail-closed** — never inferred by the LLM.
+`imessage-coding` is an open-source, self-hostable bridge that lets you control
+[Claude Code](https://www.anthropic.com/claude-code) and
+[OpenAI Codex](https://openai.com/codex/) coding sessions from your phone. When
+you walk away from your keyboard (**AFK**), the permission prompts, questions,
+and plans your agent would normally block on are relayed to you as **iMessages**.
+You reply in plain English; a cloud control plane turns your intent into a
+decision and feeds it back into the waiting session — so your agent keeps making
+progress while you're at lunch, on a walk, or away from your desk.
+
+Destructive approvals are **described by code, never by the LLM**, and the
+device only ever relays a verdict it was explicitly handed.
+
+<p>
+  <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg">
+  <img alt="Built with Bun" src="https://img.shields.io/badge/Built%20with-Bun-000000?logo=bun&logoColor=white">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white">
+  <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-cc785c">
+  <img alt="OpenAI Codex" src="https://img.shields.io/badge/OpenAI%20Codex-supported-412991">
+  <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg">
+</p>
+
+> **In one line:** remote control and steering for Claude Code & Codex over
+> iMessage/SMS — approve permission prompts, answer questions, and redirect
+> agentic coding runs from anywhere, without a laptop.
+
+---
+
+## Table of contents
+
+- [Why imessage-coding?](#why-imessage-coding)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Monorepo layout](#monorepo-layout-bun-workspaces)
+- [Toolchain](#toolchain)
+- [Configuration](#configuration)
+- [Local development](#local-development)
+- [Deployment](#deployment)
+- [Safety model](#safety-model)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Why imessage-coding?
+
+Agentic coding tools are great until they stop and wait for you. A long Claude
+Code or Codex run pauses on every permission prompt (run this command? edit this
+file? exit plan mode?), every clarifying question, and every plan that needs a
+go-ahead. If you step away, the run stalls until you're back at the keyboard.
+
+`imessage-coding` closes that gap. It turns each of those blocking moments into a
+text message you can answer from your phone:
+
+- **Stay in flow while you're away.** Approve, deny, answer, or steer by text —
+  no SSH, no laptop, no VNC.
+- **Works with the agents you already use.** Installs as a plugin into Claude
+  Code (via its native Channels contract) and Codex (via its local app-server).
+- **Safe by construction.** The control plane is the trust boundary; destructive
+  prompts are described by deterministic code, and the approval path fails
+  closed.
+- **Self-hostable and open source (MIT).** Bring your own iMessage/SMS provider,
+  database, and LLM key. Nothing is locked to a vendor.
+
+## Features
+
+- 📱 **Remote control over iMessage/SMS** — permission prompts, `AskUserQuestion`
+  prompts, and `ExitPlanMode` plans are relayed to your phone the moment your
+  session goes AFK.
+- 🤖 **Claude Code *and* OpenAI Codex** — one plugin, two agents. Claude Code is
+  driven through its built-in Channels contract; Codex (which has no equivalent)
+  is hosted on its own app-server with replies injected over a WebSocket.
+- 💬 **Natural-language replies** — say "yes, but skip the migration" and the
+  orchestrator resolves your intent into a concrete `allow` / `deny` / answer.
+- 🔒 **Deterministic safety gate** — destructive tools (Bash, network, unknown
+  tools) are classified and described by code, never by the LLM, and unknown
+  tools fail closed.
+- 👍 **Tap-back binding** — a 👍/👎 tap-back on the exact notification binds to
+  that request deterministically; the orchestrator refuses to guess when more
+  than one request is pending.
+- 🔋 **Keep-awake while AFK** — on macOS, an AFK session spawns `caffeinate` so an
+  unattended Mac can't sleep and drop its iMessage bridge mid-run.
+- 📤 **Durable outbox** — attention events survive restarts via an on-disk queue
+  with exponential backoff; secrets are sanitized before anything leaves the
+  device.
+- 🧰 **Self-hostable stack** — Bun + TypeScript monorepo: Hono control plane
+  (Fly.io), Next.js dashboard (Vercel), Neon Postgres, and a private LiteLLM
+  proxy.
+
+## How it works
+
+You install a Claude Code / Codex **plugin** on your dev machine and pair it to a
+**cloud control plane** with a one-time token. From then on:
+
+**The core loop (AFK approval):** Claude Code opens a permission prompt → the
+device hook/channel relays it to the control plane as an `attention_event` →
+when the session is AFK, the orchestrator texts you → you reply → the
+orchestrator resolves a `decision` → a Postgres `NOTIFY` wakes the device's
+long-poll on `GET /api/device/decisions` → the device relays the verdict back to
+Claude Code on the Channels permission notification (matched by `request_id`).
+
+Codex works the same way from your side, but under the hood the plugin hosts
+Codex's own local app-server and injects each inbound reply as an app-server
+`turn/start` over a WebSocket — Codex has no Channels contract, so the plugin
+recreates the same push/relay behavior itself.
 
 ## Architecture
 
@@ -37,11 +138,12 @@ the waiting Claude Code session. Destructive approvals are
            │                  ▼
   ┌────────┴───────┐   ┌──────────────────────────────────────────┐
   │   AgentPhone    │   │   packages/device (@imsg/device)          │
-  │ iMessage / SMS  │   │   Claude Code plugin on the dev's machine │
+  │ iMessage / SMS  │   │   Claude Code + Codex plugin (dev machine)│
   │   provider      │   │  • channel MCP server (permission relay + │
   └────────┬───────┘   │    `reply` chat bridge)                   │
            │            │  • PreToolUse/PermissionRequest hooks     │
-        📱 phone        │  • imsg CLI (pair · afk · status)         │
+        📱 phone        │  • Codex app-server host (WebSocket relay) │
+                        │  • imsg CLI (pair · afk · codex · status) │
                         │  • durable outbox + killswitch + sanitize │
                         └──────────────────────────────────────────┘
 
@@ -54,12 +156,33 @@ a private **LiteLLM proxy** (`apps/litellm`, deployed as its own Fly app and rea
 over flycast at `http://imsg-litellm.flycast/v1`), which fronts Gemini (and
 optionally Cerebras). The deterministic safety gate never depends on the LLM.
 
-**The core loop (AFK approval):** Claude Code opens a permission prompt → the
-device hook/channel relays it to the control plane as an `attention_event` →
-when the session is AFK, the orchestrator texts the user → the user replies →
-the orchestrator resolves a `decision` → a Postgres `NOTIFY` wakes the device's
-long-poll on `GET /api/device/decisions` → the device relays the verdict back to
-Claude Code on the Channels permission notification (matched by `request_id`).
+## Quick start
+
+You need three things deployed (or pointed at): a **control plane**, a
+**dashboard**, and a **device plugin** on your dev machine. The fastest path
+once the control plane and dashboard are live:
+
+1. Sign in to the dashboard with Google and complete the onboarding wizard.
+2. On the **Integrations** page, copy the install one-liner (it embeds a
+   single-use pairing token plus the two URLs the installer can't infer):
+
+   ```sh
+   curl -fsSL <dashboard-origin>/install.sh \
+     | IMSG_INSTALL_BASE=<dashboard-origin> \
+       IMSG_CONTROL_PLANE_URL=<control-plane> \
+       TOKEN=<pairing-token> sh
+   ```
+
+3. Turn on AFK relay and start coding:
+
+   ```sh
+   imsg afk on        # route prompts to your phone
+   imsg status
+   # ...then run Claude Code as usual, or `imsg codex` for Codex
+   ```
+
+To stand the whole stack up yourself, see [Deployment](#deployment). For local
+hacking, see [Local development](#local-development).
 
 ## Monorepo layout (Bun workspaces)
 
@@ -72,7 +195,7 @@ apps/
 packages/
   shared/          # @imsg/shared — the contract: enums + types every package imports
   transport/       # @imsg/transport — Transport PORT + AgentPhone impl
-  device/          # @imsg/device — Claude Code plugin (channel MCP + hooks + CLI)
+  device/          # @imsg/device — Claude Code + Codex plugin (channel MCP + hooks + CLI)
 db/
   schema.sql       # Neon Postgres schema (incl. LISTEN/NOTIFY on session_inbox)
 ```
@@ -81,7 +204,7 @@ db/
 | -------------------- | --------------------- | ------------------------------------------------- |
 | `packages/shared`    | `@imsg/shared`        | Enums, const-objects, shared types (no deps)      |
 | `packages/transport` | `@imsg/transport`     | Swappable messaging transport (AgentPhone impl)   |
-| `packages/device`    | `@imsg/device`        | Claude Code device plugin + `imsg` CLI            |
+| `packages/device`    | `@imsg/device`        | Claude Code + Codex device plugin + `imsg` CLI    |
 | `apps/control-plane` | `@imsg/control-plane` | Stateless app tier; all state in Neon             |
 | `apps/dashboard`     | `@imsg/dashboard`     | Web UI (Better Auth, Google SSO)                  |
 
@@ -98,7 +221,7 @@ image with our model config and deploys independently (see Deployment).
   step); consumers import them directly. The dashboard transpiles `@imsg/shared`
   via `next.config.ts` `transpilePackages`.
 
-## Environment
+## Configuration
 
 Each app has its own gitignored env file with a tracked `*.example` template:
 
@@ -154,7 +277,7 @@ bun run dev          # next dev  → http://localhost:3000
 bun run auth:migrate
 ```
 
-**Device plugin** (on the machine where you use Claude Code):
+**Device plugin** (on the machine where you use Claude Code / Codex):
 
 ```sh
 # Easiest: copy the exact one-liner from the dashboard's Integrations page. It
@@ -172,7 +295,9 @@ bun run bin/imsg.ts status
 The plugin's MCP server is started by Claude Code via `.mcp.json`; the
 PreToolUse/PermissionRequest hooks are wired via `hooks/hooks.json`. `install.sh`
 stages the plugin as a local marketplace, rewrites `bun` to an absolute path,
-chains the status line, pre-allows the `reply` tool, and pairs the device.
+chains the status line, pre-allows the `reply` tool, pairs the device, and aliases
+`codex` to `imsg codex` (so Codex can receive inbound replies too). See
+[`packages/device/README.md`](packages/device/README.md) for the device internals.
 
 ## Deployment
 
@@ -275,3 +400,22 @@ Because the model has the final say, a destructive approval is ultimately a
 judgement over the inbound reply and session context. Treat lower-trust channels
 accordingly — SMS sender numbers are spoofable, iMessage identities are not — and
 keep the deterministic tap-back binding in the loop for destructive actions.
+
+## Contributing
+
+Contributions are welcome! This is a Bun + TypeScript monorepo:
+
+```sh
+bun install
+bun run typecheck && bun run lint && bun test
+```
+
+Please run `typecheck`, `lint`, and `test` before opening a pull request, keep
+changes scoped, and follow the existing conventions (enums in `@imsg/shared`,
+strict TypeScript, no hardcoded strings where an enum fits). See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for details and
+[`SECURITY.md`](SECURITY.md) to report a vulnerability privately.
+
+## License
+
+[MIT](LICENSE) © 2026 Probe

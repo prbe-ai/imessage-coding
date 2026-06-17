@@ -1,9 +1,14 @@
 # @imsg/device
 
-The productized Claude Code channel plugin for **imessage-coding**. Drive Claude
-Code from iMessage: while you're away from the keyboard (AFK), permission
+The Claude Code & OpenAI Codex device plugin for **imessage-coding**. Drive your
+coding agent from iMessage: while you're away from the keyboard (AFK), permission
 prompts, questions, and plans are relayed to your phone — you approve, deny,
 answer, or steer by text. Destructive operations stay **fail-closed**.
+
+Claude Code is driven through its built-in **Channels** contract; Codex has no
+equivalent, so the plugin hosts Codex's own local **app-server** and injects each
+inbound reply over a WebSocket (`imsg codex`). Either way, the experience from
+your phone is identical.
 
 Productized from the validated Phase-0 spike (`plugins/imsg-spike`); the
 localhost `:8799` control surface is replaced by calls to the cloud control

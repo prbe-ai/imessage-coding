@@ -1,4 +1,4 @@
-# imessage-coding
+# iMessage for Claude Code / Codex
 
 **Drive and steer your AI coding agent from your phone — over iMessage.**
 

@@ -43,9 +43,6 @@ set -euo pipefail
 REQUIRED_SECRETS=(
   DATABASE_URL
   DEVICE_TOKEN_PEPPER
-  AGENTPHONE_API_KEY
-  AGENTPHONE_AGENT_ID
-  AGENTPHONE_WEBHOOK_SECRET
   LLM_API_KEY
   WEBHOOK_BASE_URL
 )
@@ -58,6 +55,12 @@ REQUIRED_SECRETS=(
 OPTIONAL_SECRETS=(
   LLM_API_BASE
   SSE_TICKET_SECRET
+  # AgentPhone (legacy provider). Optional since the deployment moved to Sendblue;
+  # synced only if still present in .env.control. Safe to drop from .env once the
+  # AgentPhone account is cancelled.
+  AGENTPHONE_API_KEY
+  AGENTPHONE_AGENT_ID
+  AGENTPHONE_WEBHOOK_SECRET
   # Messaging-provider switch + Sendblue transport. Optional so the default
   # AgentPhone deployment (no Sendblue creds, MESSAGING_PROVIDER commented) still
   # syncs. Cutover = uncomment MESSAGING_PROVIDER=sendblue in .env.control and

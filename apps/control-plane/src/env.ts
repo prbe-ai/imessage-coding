@@ -91,15 +91,15 @@ function resolveLlmModel(): string {
 }
 
 /**
- * Pick the active messaging provider. `MESSAGING_PROVIDER=sendblue` selects
- * Sendblue; anything else (including unset) keeps the AgentPhone default, so an
- * unconfigured or typo'd value can never silently drop us onto a half-configured
- * provider.
+ * Pick the active messaging provider. Sendblue is the DEFAULT (the live
+ * provider); `MESSAGING_PROVIDER=agentphone` opts into the legacy AgentPhone
+ * transport. Any other/unset value resolves to Sendblue, so a typo can never
+ * silently drop us onto the decommissioned provider (whose inbound route is gone).
  */
 function resolveMessagingProvider(): MessagingProvider {
-  return read('MESSAGING_PROVIDER')?.toLowerCase() === MessagingProvider.SENDBLUE
-    ? MessagingProvider.SENDBLUE
-    : MessagingProvider.AGENTPHONE;
+  return read('MESSAGING_PROVIDER')?.toLowerCase() === MessagingProvider.AGENTPHONE
+    ? MessagingProvider.AGENTPHONE
+    : MessagingProvider.SENDBLUE;
 }
 
 const DEFAULT_PORT = 8080;

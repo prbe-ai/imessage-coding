@@ -7,7 +7,6 @@
  */
 import { Hono } from 'hono';
 import { healthRoute } from './routes/health.ts';
-import { webhookRoute } from './routes/webhook.ts';
 import { webhookSendblueRoute } from './routes/webhook-sendblue.ts';
 import { deviceRoutes } from './routes/device.ts';
 import { dashboardRoutes } from './routes/dashboard.ts';
@@ -16,7 +15,6 @@ export function createApp(): Hono {
   const app = new Hono();
 
   app.route('/', healthRoute);
-  app.route('/', webhookRoute);
   app.route('/', webhookSendblueRoute);
   app.route('/', deviceRoutes);
   app.route('/', dashboardRoutes);

@@ -58,6 +58,18 @@ REQUIRED_SECRETS=(
 OPTIONAL_SECRETS=(
   LLM_API_BASE
   SSE_TICKET_SECRET
+  # Messaging-provider switch + Sendblue transport. Optional so the default
+  # AgentPhone deployment (no Sendblue creds, MESSAGING_PROVIDER commented) still
+  # syncs. Cutover = uncomment MESSAGING_PROVIDER=sendblue in .env.control and
+  # re-run --apply; these push, and getTransport() flips to Sendblue. Pushing the
+  # SENDBLUE_* creds while MESSAGING_PROVIDER stays unset is a safe no-op (dormant
+  # until the provider is actually flipped).
+  MESSAGING_PROVIDER
+  SENDBLUE_API_KEY_ID
+  SENDBLUE_API_SECRET
+  SENDBLUE_FROM_NUMBER
+  SENDBLUE_API_BASE
+  SENDBLUE_WEBHOOK_SECRET
 )
 
 say()  { printf '[sync-fly-secrets] %s\n' "$*"; }

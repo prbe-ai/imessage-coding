@@ -38,11 +38,21 @@ export async function GET(req: Request): Promise<Response> {
     [ctx.accountId],
   );
 
+  // Whether this (pending) account already submitted the invite-gate form —
+  // lets the wizard show the waitlist page instead of the input on a revisit.
+  const acct = await query<{ requested: boolean }>(
+    `SELECT requested_phone IS NOT NULL AS requested
+       FROM accounts WHERE id = $1`,
+    [ctx.accountId],
+  );
+
   const row = res.rows[0];
   const body: OnboardingStatusResponse = {
     matched: Boolean(row),
     phoneNumber: row?.phone_number ?? null,
     verified: Boolean(row?.verified_at),
+    accessStatus: ctx.accessStatus,
+    accessRequested: Boolean(acct.rows[0]?.requested),
   };
   return NextResponse.json(body, { status: 200 });
 }

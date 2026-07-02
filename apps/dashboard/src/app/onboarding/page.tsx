@@ -23,17 +23,20 @@
  * >=128-bit, short-TTL, and bound to the Better Auth session id.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Check,
   ChevronDown,
+  Clock,
   Copy,
   MessageSquare,
   PhoneCall,
   Terminal,
 } from "lucide-react";
 import { toast } from "sonner";
+
+import { AccessStatus } from "@imsg/shared";
 
 import { useSession } from "@/lib/idp/better-auth-client";
 import { AccountMenu } from "@/components/account-menu";
@@ -48,6 +51,7 @@ import {
   startOnboarding,
   getOnboardingStatus,
   confirmNumber,
+  requestAccess,
 } from "@/lib/api/onboarding";
 import { onboardingBody, smsDeepLink } from "@/lib/deep-link";
 import { extractError } from "@/lib/utils";
@@ -55,7 +59,15 @@ import { extractError } from "@/lib/utils";
 /** How often to poll for an inbound match once the deep link is shown. */
 const STATUS_POLL_INTERVAL_MS = 2500;
 
-type Step = "boot" | "link" | "confirm" | "install" | "done" | "error";
+type Step =
+  | "boot"
+  | "gate"
+  | "requested"
+  | "link"
+  | "confirm"
+  | "install"
+  | "done"
+  | "error";
 
 export default function OnboardingPage() {
   const router = useRouter();
@@ -68,6 +80,9 @@ export default function OnboardingPage() {
   const [phoneNumber, setPhoneNumber] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // Invite gate (pending accounts): the phone the user submits for review.
+  const [gatePhone, setGatePhone] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   // Whether the agent number was just copied (drives the ✓ affordance).
   const [copied, setCopied] = useState(false);
   // "Not on a Mac?" disclosure — collapsed until the user opens it.
@@ -100,6 +115,14 @@ export default function OnboardingPage() {
         if (ac.signal.aborted) return;
         if (status.verified) {
           router.replace("/home");
+          return;
+        }
+        // Invite gate: a pending account can't self-onboard yet (Sendblue's
+        // free tier caps verified contacts). Show the phone-input gate, or the
+        // waitlist page if they've already submitted — never mint a token or
+        // require an agent number for them.
+        if (status.accessStatus !== AccessStatus.APPROVED) {
+          setStep(status.accessRequested ? "requested" : "gate");
           return;
         }
         if (status.matched && status.phoneNumber) {
@@ -183,6 +206,30 @@ export default function OnboardingPage() {
     }
   }, [confirming]);
 
+  // ── Invite gate: submit the requested phone for operator review. ──────
+  const onRequestAccess = useCallback(
+    async (e: FormEvent) => {
+      e.preventDefault();
+      if (submitting) return;
+      setSubmitting(true);
+      setErrorMsg(null);
+      try {
+        await requestAccess(gatePhone);
+        setStep("requested");
+      } catch (err) {
+        setErrorMsg(
+          extractError(
+            err,
+            "We couldn't submit that — check the number and try again.",
+          ),
+        );
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [gatePhone, submitting],
+  );
+
   // Copy the agent number for people who can't open Messages on this device —
   // e.g. they're on a non-Mac and will text from a phone instead.
   const copyNumber = useCallback(async (text: string) => {
@@ -236,6 +283,69 @@ export default function OnboardingPage() {
         }
       >
         <p className="onb-signup-error">{errorMsg}</p>
+      </OnboardingShell>
+    );
+  }
+
+  // ── Step: invite gate — collect the phone for operator review. ────────
+  if (step === "gate") {
+    return (
+      <OnboardingShell
+        stepKey="onb-gate"
+        rightTop={userBadge}
+        leftVisual={
+          <StepVisual icon={<MessageSquare />} title={`Hey ${firstName} 👋`} />
+        }
+        footer={
+          <button
+            type="submit"
+            form="onb-gate-form"
+            className="onb-btn onb-btn-primary"
+            disabled={submitting}
+          >
+            {submitting ? "Sending…" : "Request access"}
+            <span style={{ marginLeft: 2 }}>→</span>
+          </button>
+        }
+      >
+        <p className="onb-confirm-body">
+          imessage-coding lets you steer Claude Code and Codex from iMessage. Drop
+          your number and I&apos;ll reach out to get you set up.
+        </p>
+        <form id="onb-gate-form" className="onb-form" onSubmit={onRequestAccess}>
+          <div className="onb-field">
+            <input
+              type="tel"
+              inputMode="tel"
+              autoComplete="tel"
+              placeholder="+1 555 123 4567"
+              value={gatePhone}
+              onChange={(e) => setGatePhone(e.target.value)}
+              disabled={submitting}
+              aria-label="Your phone number"
+              required
+            />
+          </div>
+        </form>
+        {errorMsg && <p className="onb-signup-error">{errorMsg}</p>}
+      </OnboardingShell>
+    );
+  }
+
+  // ── Step: waitlist — request received, operator will follow up. ───────
+  if (step === "requested") {
+    return (
+      <OnboardingShell
+        stepKey="onb-requested"
+        rightTop={userBadge}
+        leftVisual={<StepVisual icon={<Clock />} title="You're on the list" />}
+      >
+        <p className="onb-confirm-body">
+          Thanks! Space is limited and it&apos;s a bit costly to keep this
+          running for free, so I&apos;m onboarding people by hand right now.
+          I&apos;ll reach out to {userEmail ?? "your email"} as soon as
+          there&apos;s room — hang tight.
+        </p>
       </OnboardingShell>
     );
   }

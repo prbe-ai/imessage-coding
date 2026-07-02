@@ -311,6 +311,24 @@ export const MessageChannel = {
 } as const;
 export type MessageChannel = (typeof MessageChannel)[keyof typeof MessageChannel];
 
+/** The messaging provider the control plane sends + receives through. Selected
+ *  deployment-wide via the `MESSAGING_PROVIDER` env (default AgentPhone). */
+export const MessagingProvider = {
+  AGENTPHONE: 'agentphone',
+  SENDBLUE: 'sendblue',
+} as const;
+export type MessagingProvider =
+  (typeof MessagingProvider)[keyof typeof MessagingProvider];
+
+/** Whether an account may self-onboard yet. New signups start `pending` (the
+ *  invite gate: we email an operator and hold the user on a waitlist page);
+ *  an operator flips it to `approved` once there's a Sendblue contact slot. */
+export const AccessStatus = {
+  PENDING: 'pending',
+  APPROVED: 'approved',
+} as const;
+export type AccessStatus = (typeof AccessStatus)[keyof typeof AccessStatus];
+
 /** Direction of a logged message relative to the agent. */
 export const MessageDirection = {
   INBOUND: 'inbound',

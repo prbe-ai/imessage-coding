@@ -11,6 +11,8 @@
 
 import "server-only";
 
+import { AccessStatus } from "@imsg/shared";
+
 import { getAuth } from "@/lib/idp/auth";
 import { query } from "@/lib/db";
 import { ensureAgentNumberForAccount } from "@/lib/agent-number";
@@ -27,11 +29,15 @@ export interface SessionUser {
 interface AccountRow {
   id: string;
   email: string;
+  /** Invite-gate state: 'pending' (waitlist) or 'approved' (may self-onboard). */
+  accessStatus: AccessStatus;
 }
 
 export interface AccountContext extends SessionUser {
   /** Product `accounts.id` — the tenant boundary every query scopes to. */
   accountId: string;
+  /** Invite-gate state — the onboarding wizard branches on this. */
+  accessStatus: AccessStatus;
 }
 
 /** Read the Better Auth session for this request, or null when unauthenticated. */
@@ -51,10 +57,15 @@ export async function getSessionUser(req: Request): Promise<SessionUser | null> 
  * is UNIQUE, so the upsert is idempotent and concurrency-safe.
  */
 export async function ensureAccount(email: string): Promise<AccountRow> {
-  const res = await query<AccountRow & { agent_number_id: string | null }>(
+  const res = await query<{
+    id: string;
+    email: string;
+    agent_number_id: string | null;
+    access_status: AccessStatus;
+  }>(
     `INSERT INTO accounts (email) VALUES ($1)
        ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
-     RETURNING id, email, agent_number_id`,
+     RETURNING id, email, agent_number_id, access_status`,
     [email],
   );
   // ON CONFLICT ... DO UPDATE always returns the row (existing or new).
@@ -72,7 +83,7 @@ export async function ensureAccount(email: string): Promise<AccountRow> {
     });
   }
 
-  return { id: row.id, email: row.email };
+  return { id: row.id, email: row.email, accessStatus: row.access_status };
 }
 
 /**
@@ -85,5 +96,5 @@ export async function requireAccount(
   const user = await getSessionUser(req);
   if (!user) return null;
   const account = await ensureAccount(user.email);
-  return { ...user, accountId: account.id };
+  return { ...user, accountId: account.id, accessStatus: account.accessStatus };
 }

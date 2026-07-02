@@ -7,6 +7,8 @@ import { apiGet, apiPost } from "@/lib/api/client";
 import type {
   OnboardingStartResponse,
   OnboardingStatusResponse,
+  RequestAccessRequest,
+  RequestAccessResponse,
 } from "@/lib/api/contracts";
 
 /** Mint a single-use, session-bound onboarding token for the deep link. */
@@ -30,6 +32,19 @@ export function confirmNumber(
   return apiPost<OnboardingStatusResponse>(
     "/api/onboarding/confirm",
     {},
+    signal,
+  );
+}
+
+/** Submit the invite-gate form: the phone the user wants, for operator review. */
+export function requestAccess(
+  phone: string,
+  signal?: AbortSignal,
+): Promise<RequestAccessResponse> {
+  const body: RequestAccessRequest = { phone };
+  return apiPost<RequestAccessResponse>(
+    "/api/onboarding/request-access",
+    body,
     signal,
   );
 }

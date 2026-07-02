@@ -14,3 +14,8 @@ export {
   DEFAULT_API_BASE as AGENTPHONE_DEFAULT_API_BASE,
   type AgentPhoneConfig,
 } from './agentphone.ts';
+export {
+  SendblueTransport,
+  SENDBLUE_DEFAULT_API_BASE,
+  type SendblueConfig,
+} from './sendblue.ts';

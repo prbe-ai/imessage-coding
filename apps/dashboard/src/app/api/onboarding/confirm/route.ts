@@ -45,10 +45,15 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
+  // Confirm is only reachable for an approved, self-onboarding account; the
+  // gate fields are carried for contract completeness (the client ignores them
+  // here — it advances on `verified`).
   const body: OnboardingStatusResponse = {
     matched: true,
     phoneNumber: row.phone_number,
     verified: Boolean(row.verified_at),
+    accessStatus: ctx.accessStatus,
+    accessRequested: false,
   };
   return NextResponse.json(body, { status: 200 });
 }

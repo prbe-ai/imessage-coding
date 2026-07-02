@@ -4,7 +4,7 @@
  * browser code and the route handler can't drift on field names.
  */
 
-import type { AfkState, DeviceInfo, SessionInfo } from "@imsg/shared";
+import type { AccessStatus, AfkState, DeviceInfo, SessionInfo } from "@imsg/shared";
 
 // ── Onboarding ──────────────────────────────────────────────────────────
 
@@ -28,6 +28,24 @@ export interface OnboardingStatusResponse {
   phoneNumber: string | null;
   /** Whether the number is fully verified (conversation.verified_at set). */
   verified: boolean;
+  /** Invite-gate state — `pending` accounts see the waitlist page instead of
+   *  self-onboarding; `approved` accounts get the normal deep-link flow. */
+  accessStatus: AccessStatus;
+  /** Whether a `pending` account has already submitted the access-request form
+   *  (drives waitlist page vs the phone-input gate on a revisit). */
+  accessRequested: boolean;
+}
+
+/** Body of POST /api/onboarding/request-access — a `pending` user's phone,
+ *  captured on the invite-gate page so an operator can add them to Sendblue. */
+export interface RequestAccessRequest {
+  /** The phone number the user wants to use (E.164, e.g. +15551234567). */
+  phone: string;
+}
+
+export interface RequestAccessResponse {
+  /** Always true once the request is recorded (email is best-effort). */
+  ok: boolean;
 }
 
 // ── Home ────────────────────────────────────────────────────────────────

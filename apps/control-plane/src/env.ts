@@ -6,6 +6,8 @@
  * values fail LOUD at boot rather than silently at request time.
  */
 
+import { MessagingProvider } from '@imsg/shared';
+
 /** All control-plane configuration, derived once from process.env. */
 export interface ControlPlaneEnv {
   /** Neon Postgres connection string. */
@@ -27,11 +29,24 @@ export interface ControlPlaneEnv {
    */
   sseTicketSecret: string | undefined;
 
+  /** Which messaging provider is active deployment-wide (default AgentPhone). */
+  messagingProvider: MessagingProvider;
+
   /** AgentPhone transport config (also read by @imsg/transport from env). */
   agentPhone: {
     apiKey: string | undefined;
     apiBase: string | undefined;
     agentId: string | undefined;
+    webhookSecret: string | undefined;
+  };
+
+  /** Sendblue transport config (also read by @imsg/transport from env). Only
+   *  used when `messagingProvider === MessagingProvider.SENDBLUE`. */
+  sendblue: {
+    apiKeyId: string | undefined;
+    apiSecret: string | undefined;
+    fromNumber: string | undefined;
+    apiBase: string | undefined;
     webhookSecret: string | undefined;
   };
 
@@ -75,6 +90,18 @@ function resolveLlmModel(): string {
   return DEFAULT_LLM_MODEL;
 }
 
+/**
+ * Pick the active messaging provider. `MESSAGING_PROVIDER=sendblue` selects
+ * Sendblue; anything else (including unset) keeps the AgentPhone default, so an
+ * unconfigured or typo'd value can never silently drop us onto a half-configured
+ * provider.
+ */
+function resolveMessagingProvider(): MessagingProvider {
+  return read('MESSAGING_PROVIDER')?.toLowerCase() === MessagingProvider.SENDBLUE
+    ? MessagingProvider.SENDBLUE
+    : MessagingProvider.AGENTPHONE;
+}
+
 const DEFAULT_PORT = 8080;
 // Local-dev default: a LiteLLM proxy on localhost. A forgotten override fails as
 // "proxy not running" (connection refused) rather than silently 404-ing a gemini
@@ -111,11 +138,19 @@ export function loadEnv(): ControlPlaneEnv {
     // misconfiguration, so we fail closed at boot.
     deviceTokenPepper: require_('DEVICE_TOKEN_PEPPER'),
     sseTicketSecret: read('SSE_TICKET_SECRET'),
+    messagingProvider: resolveMessagingProvider(),
     agentPhone: {
       apiKey: read('AGENTPHONE_API_KEY'),
       apiBase: read('AGENTPHONE_API_BASE'),
       agentId: read('AGENTPHONE_AGENT_ID'),
       webhookSecret: read('AGENTPHONE_WEBHOOK_SECRET'),
+    },
+    sendblue: {
+      apiKeyId: read('SENDBLUE_API_KEY_ID'),
+      apiSecret: read('SENDBLUE_API_SECRET'),
+      fromNumber: read('SENDBLUE_FROM_NUMBER'),
+      apiBase: read('SENDBLUE_API_BASE'),
+      webhookSecret: read('SENDBLUE_WEBHOOK_SECRET'),
     },
     llm: {
       apiKey: read('LLM_API_KEY'),

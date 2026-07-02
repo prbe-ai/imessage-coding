@@ -51,6 +51,31 @@ CREATE TABLE IF NOT EXISTS agent_numbers (
 ALTER TABLE accounts
   ADD COLUMN IF NOT EXISTS agent_number_id UUID REFERENCES agent_numbers(id);
 
+-- Invite gate (Sendblue's free tier caps verified contacts, so new signups are
+-- curated). New accounts default to 'pending' and see a waitlist page instead of
+-- self-onboarding; an operator flips this to 'approved' once there's a Sendblue
+-- contact slot. `requested_phone` is the number the user submitted on the gate
+-- page (what the operator adds to Sendblue). See @imsg/shared AccessStatus.
+ALTER TABLE accounts
+  ADD COLUMN IF NOT EXISTS access_status  TEXT        NOT NULL DEFAULT 'pending';
+ALTER TABLE accounts
+  ADD COLUMN IF NOT EXISTS requested_phone TEXT;
+ALTER TABLE accounts
+  ADD COLUMN IF NOT EXISTS requested_at    TIMESTAMPTZ;
+
+-- Backfill: every account that has already onboarded (a verified conversation or
+-- a paired device) is grandfathered to 'approved'. Idempotent and upgrade-only —
+-- it never downgrades a manually-approved-but-not-yet-onboarded account, and
+-- brand-new signups (no conversation/device) correctly stay 'pending'.
+UPDATE accounts a
+   SET access_status = 'approved'
+ WHERE a.access_status <> 'approved'
+   AND (
+     EXISTS (SELECT 1 FROM conversations c
+              WHERE c.account_id = a.id AND c.verified_at IS NOT NULL)
+     OR EXISTS (SELECT 1 FROM devices d WHERE d.account_id = a.id)
+   );
+
 -- -----------------------------------------------------------------------------
 -- devices — a paired machine running the Claude Code plugin.
 -- device_token_hash is a peppered hash; the raw token is returned to the

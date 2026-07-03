@@ -125,25 +125,27 @@ recreates the same push/relay behavior itself.
    ┌────────────────────┴───────────┐      ┌───────────┴───────────────────────┐
    │   apps/control-plane (Fly)      │      │   apps/dashboard (Vercel)          │
    │   Hono on Bun — stateless       │      │   Next.js 16 — Better Auth (Google)│
-   │  • POST /api/agentphone/webhook │      │  • Google SSO + onboarding wizard  │
-   │    (raw-body HMAC verify)       │      │  • Home: sessions, AFK toggle      │
-   │  • orchestrator (LLM intent +   │      │  • Integrations: mint pairing token│
-   │    deterministic safety gate)   │      │  • same-origin /api/* BFF          │
-   │  • device API (Bearer token):   │      └────────────────────────────────────┘
+   │  • POST /api/sendblue/webhook   │      │  • Google SSO + invite-gated       │
+   │    (URL-path secret auth)       │      │    onboarding wizard               │
+   │  • getTransport() (Sendblue or  │      │  • Home: sessions, AFK toggle      │
+   │    AgentPhone via MESSAGING_*)  │      │  • Integrations: mint pairing token│
+   │  • orchestrator (LLM intent +   │      │  • same-origin /api/* BFF          │
+   │    deterministic safety gate)   │      └────────────────────────────────────┘
+   │  • device API (Bearer token):   │
    │    pair·attention·decisions     │
    │    ·heartbeat·state             │
    └───────▲─────────────────┬───────┘
-           │ AgentPhone       │ device API (Bearer device_token,
-           │ send/webhook     │ long-poll decisions)
-           │                  ▼
+           │ Sendblue/       │ device API (Bearer device_token,
+           │ AgentPhone      │ long-poll decisions)
+           │ send/webhook    │
   ┌────────┴───────┐   ┌──────────────────────────────────────────┐
-  │   AgentPhone    │   │   packages/device (@imsg/device)          │
-  │ iMessage / SMS  │   │   Claude Code + Codex plugin (dev machine)│
-  │   provider      │   │  • channel MCP server (permission relay + │
-  └────────┬───────┘   │    `reply` chat bridge)                   │
-           │            │  • PreToolUse/PermissionRequest hooks     │
-        📱 phone        │  • Codex app-server host (WebSocket relay) │
-                        │  • imsg CLI (pair · afk · codex · status) │
+  │  Sendblue or    │   │   packages/device (@imsg/device)          │
+  │  AgentPhone     │   │   Claude Code + Codex plugin (dev machine)│
+  │ iMessage / SMS  │   │  • channel MCP server (permission relay + │
+  │   provider      │   │    `reply` chat bridge)                   │
+  └────────┬───────┘   │  • PreToolUse/PermissionRequest hooks     │
+           │            │  • Codex app-server host (WebSocket relay) │
+        📱 phone        │  • imsg CLI (pair · afk · codex · status) │
                         │  • durable outbox + killswitch + sanitize │
                         └──────────────────────────────────────────┘
 
@@ -203,10 +205,10 @@ db/
 | Package              | Name                  | Role                                              |
 | -------------------- | --------------------- | ------------------------------------------------- |
 | `packages/shared`    | `@imsg/shared`        | Enums, const-objects, shared types (no deps)      |
-| `packages/transport` | `@imsg/transport`     | Swappable messaging transport (AgentPhone impl)   |
+| `packages/transport` | `@imsg/transport`     | Swappable messaging transport (Sendblue + AgentPhone) |
 | `packages/device`    | `@imsg/device`        | Claude Code + Codex device plugin + `imsg` CLI    |
 | `apps/control-plane` | `@imsg/control-plane` | Stateless app tier; all state in Neon             |
-| `apps/dashboard`     | `@imsg/dashboard`     | Web UI (Better Auth, Google SSO)                  |
+| `apps/dashboard`     | `@imsg/dashboard`     | Web UI (Better Auth, Google SSO, invite-gated)   |
 
 `apps/litellm` is **not** a Bun workspace package — it has no `package.json`, just a
 `Dockerfile`, `config.yaml`, and `fly.toml`. It packages the upstream LiteLLM proxy
@@ -236,9 +238,16 @@ Each `*.example` is the full contract for its app — every variable, who reads 
 and which ones are shared. The load-bearing shared secret is
 **`DEVICE_TOKEN_PEPPER`**: it MUST be byte-identical in `.env.control` and
 `.env.dashboard` (token hashes won't match otherwise, and pairing silently breaks);
-`SSE_TICKET_SECRET` and `DATABASE_URL` are likewise shared between those two. You
-create the **AgentPhone API key + agent**, the **Google OAuth client**, a Neon
-database, and a **Gemini API key** (for the LiteLLM proxy).
+`SSE_TICKET_SECRET` and `DATABASE_URL` are likewise shared between those two.
+
+**Messaging provider** (`MESSAGING_PROVIDER`): Choose the SMS/iMessage transport:
+- `sendblue` (default) — Sendblue API. Requires `SENDBLUE_API_KEY_ID`,
+  `SENDBLUE_API_SECRET`, `SENDBLUE_WEBHOOK_SECRET`.
+- `agentphone` — AgentPhone API (legacy). Requires `AGENTPHONE_API_KEY`,
+  `AGENTPHONE_AGENT_ID`, `AGENTPHONE_WEBHOOK_SECRET`.
+
+You also need the **Google OAuth client**, a **Neon database**, a **Gemini API key**
+(for the LiteLLM proxy), and credentials for your chosen messaging provider.
 
 The control-plane and litellm Fly apps each ship a `scripts/sync-fly-secrets.sh`
 that pushes their `.env.*` into `fly secrets` for the matching app.
@@ -346,7 +355,9 @@ Deploy this *before* the control plane — the control plane calls it over flyca
   ```
 
   (`LLM_API_BASE` is baked into `fly.toml` as the flycast proxy URL — don't set it
-  as a secret.) Point the AgentPhone webhook at `https://<host>/api/agentphone/webhook`.
+  as a secret.) Point your messaging provider webhook at:
+  - **Sendblue** (default): `https://<host>/api/sendblue/webhook/<SENDBLUE_WEBHOOK_SECRET>`
+  - **AgentPhone** (legacy, opt-in): N/A — AgentPhone uses server-side polling
 - `GET /healthz` (liveness) and `GET /readyz` (DB reachability) are available
   for Fly health checks.
 
@@ -359,12 +370,14 @@ Deploy this *before* the control plane — the control plane calls it over flyca
   `SSE_TICKET_SECRET` (same value as the control plane), `WEBHOOK_BASE_URL`,
   `NEXT_PUBLIC_APP_URL`.
 - The Google OAuth redirect URI is `${BETTER_AUTH_URL}/api/idp/callback/google`.
-- Seed the agent-number pool before onboarding works — `/api/onboarding/start`
-  fails closed (`no_agent_number_provisioned`) on an empty pool:
+- New accounts must request access during onboarding (invite-gated flow);
+  operator approval via email sets `access_status` to `approved`. Seed
+  agent-number pool and configure `RESEND_API_KEY` for operator notification:
 
   ```sh
   cd apps/dashboard
-  bun run scripts/seed-agent-numbers.ts   # pulls the active number from AgentPhone
+  bun run scripts/seed-agent-numbers.ts
+  # Set RESEND_API_KEY in env vars to enable operator email notifications
   ```
 
 - `next.config.ts` also emits a `standalone` build, so the dashboard can

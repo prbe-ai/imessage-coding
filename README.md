@@ -125,23 +125,25 @@ recreates the same push/relay behavior itself.
    ┌────────────────────┴───────────┐      ┌───────────┴───────────────────────┐
    │   apps/control-plane (Fly)      │      │   apps/dashboard (Vercel)          │
    │   Hono on Bun — stateless       │      │   Next.js 16 — Better Auth (Google)│
-   │  • POST /api/sendblue/webhook   │      │  • Google SSO + invite-gated       │
+   │  • POST /api/sendblue/webhook   │      │  • Google SSO + access-request     │
    │    (URL-path secret auth)       │      │    onboarding wizard               │
-   │  • getTransport() (Sendblue or  │      │  • Home: sessions, AFK toggle      │
-   │    AgentPhone via MESSAGING_*)  │      │  • Integrations: mint pairing token│
+   │  • getTransport() (Sendblue;    │      │  • Home: sessions, AFK toggle      │
+   │    AgentPhone opt-in)           │      │  • Integrations: mint pairing token│
    │  • orchestrator (LLM intent +   │      │  • same-origin /api/* BFF          │
    │    deterministic safety gate)   │      └────────────────────────────────────┘
    │  • device API (Bearer token):   │
    │    pair·attention·decisions     │
    │    ·heartbeat·state             │
    └───────▲─────────────────┬───────┘
-           │ Sendblue/       │ device API (Bearer device_token,
-           │ AgentPhone      │ long-poll decisions)
+           │ Sendblue        │ device API (Bearer device_token,
+           │ (AgentPhone     │ long-poll decisions)
+           │  opt-in)        │
            │ send/webhook    │
   ┌────────┴───────┐   ┌──────────────────────────────────────────┐
-  │  Sendblue or    │   │   packages/device (@imsg/device)          │
-  │  AgentPhone     │   │   Claude Code + Codex plugin (dev machine)│
-  │ iMessage / SMS  │   │  • channel MCP server (permission relay + │
+  │  Sendblue       │   │   packages/device (@imsg/device)          │
+  │ iMessage / SMS  │   │   Claude Code + Codex plugin (dev machine)│
+  │ (AgentPhone     │   │  • channel MCP server (permission relay + │
+  │  opt-in)        │
   │   provider      │   │    `reply` chat bridge)                   │
   └────────┬───────┘   │  • PreToolUse/PermissionRequest hooks     │
            │            │  • Codex app-server host (WebSocket relay) │
@@ -243,7 +245,7 @@ and which ones are shared. The load-bearing shared secret is
 **Messaging provider** (`MESSAGING_PROVIDER`): Choose the SMS/iMessage transport:
 - `sendblue` (default) — Sendblue API. Requires `SENDBLUE_API_KEY_ID`,
   `SENDBLUE_API_SECRET`, `SENDBLUE_WEBHOOK_SECRET`.
-- `agentphone` — AgentPhone API (legacy). Requires `AGENTPHONE_API_KEY`,
+- `agentphone` (opt-in only) — AgentPhone API (legacy). Requires `AGENTPHONE_API_KEY`,
   `AGENTPHONE_AGENT_ID`, `AGENTPHONE_WEBHOOK_SECRET`.
 
 You also need the **Google OAuth client**, a **Neon database**, a **Gemini API key**
@@ -357,7 +359,7 @@ Deploy this *before* the control plane — the control plane calls it over flyca
   (`LLM_API_BASE` is baked into `fly.toml` as the flycast proxy URL — don't set it
   as a secret.) Point your messaging provider webhook at:
   - **Sendblue** (default): `https://<host>/api/sendblue/webhook/<SENDBLUE_WEBHOOK_SECRET>`
-  - **AgentPhone** (legacy, opt-in): N/A — AgentPhone uses server-side polling
+  - **AgentPhone** (opt-in only): N/A — AgentPhone uses server-side polling
 - `GET /healthz` (liveness) and `GET /readyz` (DB reachability) are available
   for Fly health checks.
 
@@ -370,9 +372,9 @@ Deploy this *before* the control plane — the control plane calls it over flyca
   `SSE_TICKET_SECRET` (same value as the control plane), `WEBHOOK_BASE_URL`,
   `NEXT_PUBLIC_APP_URL`.
 - The Google OAuth redirect URI is `${BETTER_AUTH_URL}/api/idp/callback/google`.
-- New accounts must request access during onboarding (invite-gated flow);
-  operator approval via email sets `access_status` to `approved`. Seed
-  agent-number pool and configure `RESEND_API_KEY` for operator notification:
+- Signups go through an access-request flow: new accounts submit their phone number,
+  and operator approval via email (Resend) sets `access_status` to `approved`. Seed
+  agent-number pool and configure `RESEND_API_KEY` for operator notifications:
 
   ```sh
   cd apps/dashboard

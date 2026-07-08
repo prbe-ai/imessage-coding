@@ -192,13 +192,13 @@ hacking, see [Local development](#local-development).
 
 ```
 apps/
-  control-plane/   # Hono on Bun — agentphone webhook, orchestrator, device API
+  control-plane/   # Hono on Bun — sendblue webhook, orchestrator, device API
   dashboard/       # Next.js 16 — onboarding, sessions, AFK, integrations
   litellm/         # LiteLLM proxy (deploy-only: upstream image + config.yaml) —
                    #   the assistant's LLM gateway, reached over private Fly flycast
 packages/
   shared/          # @imsg/shared — the contract: enums + types every package imports
-  transport/       # @imsg/transport — Transport PORT + AgentPhone impl
+  transport/       # @imsg/transport — Transport PORT (Sendblue + AgentPhone opt-in)
   device/          # @imsg/device — Claude Code + Codex plugin (channel MCP + hooks + CLI)
 db/
   schema.sql       # Neon Postgres schema (incl. LISTEN/NOTIFY on session_inbox)

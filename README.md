@@ -128,7 +128,7 @@ recreates the same push/relay behavior itself.
    │  • POST /api/sendblue/webhook   │      │  • Google SSO + access-request     │
    │    (URL-path secret auth)       │      │    onboarding wizard               │
    │  • getTransport() (Sendblue;    │      │  • Home: sessions, AFK toggle      │
-   │    AgentPhone opt-in)           │      │  • Integrations: mint pairing token│
+   │    AgentPhone opt-in, legacy)   │      │  • Integrations: mint pairing token│
    │  • orchestrator (LLM intent +   │      │  • same-origin /api/* BFF          │
    │    deterministic safety gate)   │      └────────────────────────────────────┘
    │  • device API (Bearer token):   │
@@ -136,14 +136,13 @@ recreates the same push/relay behavior itself.
    │    ·heartbeat·state             │
    └───────▲─────────────────┬───────┘
            │ Sendblue        │ device API (Bearer device_token,
-           │ (AgentPhone     │ long-poll decisions)
-           │  opt-in)        │
+           │ (default)       │ long-poll decisions)
            │ send/webhook    │
   ┌────────┴───────┐   ┌──────────────────────────────────────────┐
   │  Sendblue       │   │   packages/device (@imsg/device)          │
   │ iMessage / SMS  │   │   Claude Code + Codex plugin (dev machine)│
-  │ (AgentPhone     │   │  • channel MCP server (permission relay + │
-  │  opt-in)        │
+  │ (primary        │   │  • channel MCP server (permission relay + │
+  │  transport)     │
   │   provider      │   │    `reply` chat bridge)                   │
   └────────┬───────┘   │  • PreToolUse/PermissionRequest hooks     │
            │            │  • Codex app-server host (WebSocket relay) │
@@ -207,7 +206,7 @@ db/
 | Package              | Name                  | Role                                              |
 | -------------------- | --------------------- | ------------------------------------------------- |
 | `packages/shared`    | `@imsg/shared`        | Enums, const-objects, shared types (no deps)      |
-| `packages/transport` | `@imsg/transport`     | Swappable messaging transport (Sendblue + AgentPhone) |
+| `packages/transport` | `@imsg/transport`     | Swappable messaging transport (Sendblue default, AgentPhone opt-in) |
 | `packages/device`    | `@imsg/device`        | Claude Code + Codex device plugin + `imsg` CLI    |
 | `apps/control-plane` | `@imsg/control-plane` | Stateless app tier; all state in Neon             |
 | `apps/dashboard`     | `@imsg/dashboard`     | Web UI (Better Auth, Google SSO, invite-gated)   |
@@ -237,15 +236,15 @@ cp .env.litellm.example   .env.litellm     # apps/litellm proxy
 ```
 
 Each `*.example` is the full contract for its app — every variable, who reads it,
-and which ones are shared. The load-bearing shared secret is
-**`DEVICE_TOKEN_PEPPER`**: it MUST be byte-identical in `.env.control` and
-`.env.dashboard` (token hashes won't match otherwise, and pairing silently breaks);
-`SSE_TICKET_SECRET` and `DATABASE_URL` are likewise shared between those two.
+and which ones are shared. The load-bearing shared secrets are
+**`DEVICE_TOKEN_PEPPER`** (must be byte-identical in `.env.control` and
+`.env.dashboard` — token hashes won't match otherwise, silently breaking pairing),
+`SSE_TICKET_SECRET`, and `DATABASE_URL` (all likewise shared between those two).
 
 **Messaging provider** (`MESSAGING_PROVIDER`): Choose the SMS/iMessage transport:
 - `sendblue` (default) — Sendblue API. Requires `SENDBLUE_API_KEY_ID`,
   `SENDBLUE_API_SECRET`, `SENDBLUE_WEBHOOK_SECRET`.
-- `agentphone` (opt-in only) — AgentPhone API (legacy). Requires `AGENTPHONE_API_KEY`,
+- `agentphone` (opt-in only, legacy) — AgentPhone API. Requires `AGENTPHONE_API_KEY`,
   `AGENTPHONE_AGENT_ID`, `AGENTPHONE_WEBHOOK_SECRET`.
 
 You also need the **Google OAuth client**, a **Neon database**, a **Gemini API key**

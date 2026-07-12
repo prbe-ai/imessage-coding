@@ -206,7 +206,7 @@ db/
 | Package              | Name                  | Role                                              |
 | -------------------- | --------------------- | ------------------------------------------------- |
 | `packages/shared`    | `@imsg/shared`        | Enums, const-objects, shared types (no deps)      |
-| `packages/transport` | `@imsg/transport`     | Swappable messaging transport (Sendblue default, AgentPhone opt-in) |
+| `packages/transport` | `@imsg/transport`     | Swappable messaging transport (Sendblue primary; AgentPhone legacy) |
 | `packages/device`    | `@imsg/device`        | Claude Code + Codex device plugin + `imsg` CLI    |
 | `apps/control-plane` | `@imsg/control-plane` | Stateless app tier; all state in Neon             |
 | `apps/dashboard`     | `@imsg/dashboard`     | Web UI (Better Auth, Google SSO, invite-gated)   |
@@ -244,8 +244,9 @@ and which ones are shared. The load-bearing shared secrets are
 **Messaging provider** (`MESSAGING_PROVIDER`): Choose the SMS/iMessage transport:
 - `sendblue` (default) — Sendblue API. Requires `SENDBLUE_API_KEY_ID`,
   `SENDBLUE_API_SECRET`, `SENDBLUE_WEBHOOK_SECRET`.
-- `agentphone` (opt-in only, legacy) — AgentPhone API. Requires `AGENTPHONE_API_KEY`,
-  `AGENTPHONE_AGENT_ID`, `AGENTPHONE_WEBHOOK_SECRET`.
+- `agentphone` (legacy, opt-in only) — AgentPhone API. Requires `AGENTPHONE_API_KEY`,
+  `AGENTPHONE_AGENT_ID`, `AGENTPHONE_WEBHOOK_SECRET`. This provider is no longer
+  maintained; Sendblue is the recommended transport.
 
 You also need the **Google OAuth client**, a **Neon database**, a **Gemini API key**
 (for the LiteLLM proxy), and credentials for your chosen messaging provider.

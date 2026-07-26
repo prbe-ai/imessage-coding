@@ -165,8 +165,12 @@ You need three things deployed (or pointed at): a **control plane**, a
 **dashboard**, and a **device plugin** on your dev machine. The fastest path
 once the control plane and dashboard are live:
 
-1. Sign in to the dashboard with Google and complete the onboarding wizard.
-2. On the **Integrations** page, copy the install one-liner (it embeds a
+1. Sign in to the dashboard with Google.
+2. Submit your phone number for operator review and wait for approval (access is
+   gated by free-tier SMS provider limits).
+3. Once approved, complete the onboarding wizard and link your phone number via
+   iMessage.
+4. On the **Integrations** page, copy the install one-liner (it embeds a
    single-use pairing token plus the two URLs the installer can't infer):
 
    ```sh
@@ -176,7 +180,7 @@ once the control plane and dashboard are live:
        TOKEN=<pairing-token> sh
    ```
 
-3. Turn on AFK relay and start coding:
+5. Turn on AFK relay and start coding:
 
    ```sh
    imsg afk on        # route prompts to your phone
@@ -370,18 +374,19 @@ Deploy this *before* the control plane — the control plane calls it over flyca
   `GOOGLE_CLIENT_SECRET`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`,
   `CONTROL_PLANE_URL`, `DEVICE_TOKEN_PEPPER` (same value as the control plane),
   `SSE_TICKET_SECRET` (same value as the control plane), `WEBHOOK_BASE_URL`,
-  `NEXT_PUBLIC_APP_URL`.
+  `NEXT_PUBLIC_APP_URL`, and `RESEND_API_KEY` (for operator email notifications).
 - The Google OAuth redirect URI is `${BETTER_AUTH_URL}/api/idp/callback/google`.
-- Signups go through an access-request flow: new accounts submit their phone number,
-  and operator approval via email (Resend) sets `access_status` to `approved`. Seed
-  agent-number pool and configure `RESEND_API_KEY` for operator notifications:
+- **Invite-gated signup:** New accounts submit their phone number and wait for
+  operator approval (access is limited by SMS provider free tiers). Seed the
+  agent-number pool:
 
   ```sh
   cd apps/dashboard
   bun run scripts/seed-agent-numbers.ts
-  # Set RESEND_API_KEY in env vars to enable operator email notifications
   ```
 
+  Operator approval emails (sent via Resend) set `access_status` to `approved`,
+  after which users can link their phone and proceed to pairing.
 - `next.config.ts` also emits a `standalone` build, so the dashboard can
   alternatively run as a Docker image if you don't use Vercel.
 

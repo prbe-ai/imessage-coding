@@ -166,10 +166,10 @@ You need three things deployed (or pointed at): a **control plane**, a
 once the control plane and dashboard are live:
 
 1. Sign in to the dashboard with Google.
-2. Submit your phone number for operator review and wait for approval (access is
-   gated by free-tier SMS provider limits).
+2. Submit your phone number and wait for operator approval (access is gated by
+   SMS provider free-tier limits; new signups are invite-only until approved).
 3. Once approved, complete the onboarding wizard and link your phone number via
-   iMessage.
+   iMessage or SMS.
 4. On the **Integrations** page, copy the install one-liner (it embeds a
    single-use pairing token plus the two URLs the installer can't infer):
 
@@ -248,9 +248,10 @@ and which ones are shared. The load-bearing shared secrets are
 **Messaging provider** (`MESSAGING_PROVIDER`): Choose the SMS/iMessage transport:
 - `sendblue` (default) — Sendblue API. Requires `SENDBLUE_API_KEY_ID`,
   `SENDBLUE_API_SECRET`, `SENDBLUE_WEBHOOK_SECRET`.
-- `agentphone` (legacy, opt-in only) — AgentPhone API. Requires `AGENTPHONE_API_KEY`,
+- `agentphone` (legacy opt-in only) — AgentPhone API. Requires `AGENTPHONE_API_KEY`,
   `AGENTPHONE_AGENT_ID`, `AGENTPHONE_WEBHOOK_SECRET`. This provider is no longer
-  maintained; Sendblue is the recommended transport.
+  actively maintained and has been retired from production; Sendblue is the
+  recommended transport.
 
 You also need the **Google OAuth client**, a **Neon database**, a **Gemini API key**
 (for the LiteLLM proxy), and credentials for your chosen messaging provider.
@@ -361,9 +362,8 @@ Deploy this *before* the control plane — the control plane calls it over flyca
   ```
 
   (`LLM_API_BASE` is baked into `fly.toml` as the flycast proxy URL — don't set it
-  as a secret.) Point your messaging provider webhook at:
-  - **Sendblue** (default): `https://<host>/api/sendblue/webhook/<SENDBLUE_WEBHOOK_SECRET>`
-  - **AgentPhone** (opt-in only): N/A — AgentPhone uses server-side polling
+  as a secret.) If using Sendblue (the default), point your webhook at:
+  - `https://<host>/api/sendblue/webhook/<SENDBLUE_WEBHOOK_SECRET>`
 - `GET /healthz` (liveness) and `GET /readyz` (DB reachability) are available
   for Fly health checks.
 
@@ -374,19 +374,19 @@ Deploy this *before* the control plane — the control plane calls it over flyca
   `GOOGLE_CLIENT_SECRET`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`,
   `CONTROL_PLANE_URL`, `DEVICE_TOKEN_PEPPER` (same value as the control plane),
   `SSE_TICKET_SECRET` (same value as the control plane), `WEBHOOK_BASE_URL`,
-  `NEXT_PUBLIC_APP_URL`, and `RESEND_API_KEY` (for operator email notifications).
+  `NEXT_PUBLIC_APP_URL`, `RESEND_API_KEY`, and `RESEND_FROM` (for operator email
+  notifications on new access requests).
 - The Google OAuth redirect URI is `${BETTER_AUTH_URL}/api/idp/callback/google`.
-- **Invite-gated signup:** New accounts submit their phone number and wait for
-  operator approval (access is limited by SMS provider free tiers). Seed the
+- **Invite-gated signup:** New accounts submit their phone number to a waitlist
+  (access is limited by SMS provider free-tier quota). Operator approval emails
+  (sent via Resend to a configured mailbox) set `access_status` to `approved`,
+  after which users can link their phone and proceed to pairing. Seed the
   agent-number pool:
 
   ```sh
   cd apps/dashboard
   bun run scripts/seed-agent-numbers.ts
   ```
-
-  Operator approval emails (sent via Resend) set `access_status` to `approved`,
-  after which users can link their phone and proceed to pairing.
 - `next.config.ts` also emits a `standalone` build, so the dashboard can
   alternatively run as a Docker image if you don't use Vercel.
 

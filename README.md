@@ -245,13 +245,13 @@ and which ones are shared. The load-bearing shared secrets are
 `.env.dashboard` — token hashes won't match otherwise, silently breaking pairing),
 `SSE_TICKET_SECRET`, and `DATABASE_URL` (all likewise shared between those two).
 
-**Messaging provider** (`MESSAGING_PROVIDER`): Choose the SMS/iMessage transport:
+**Messaging provider** (`MESSAGING_PROVIDER`): The system now defaults to Sendblue; AgentPhone is retired from production and available as a legacy opt-in only.
 - `sendblue` (default) — Sendblue API. Requires `SENDBLUE_API_KEY_ID`,
-  `SENDBLUE_API_SECRET`, `SENDBLUE_WEBHOOK_SECRET`.
+  `SENDBLUE_API_SECRET`, `SENDBLUE_WEBHOOK_SECRET`. This is the primary
+  transport going forward.
 - `agentphone` (legacy opt-in only) — AgentPhone API. Requires `AGENTPHONE_API_KEY`,
   `AGENTPHONE_AGENT_ID`, `AGENTPHONE_WEBHOOK_SECRET`. This provider is no longer
-  actively maintained and has been retired from production; Sendblue is the
-  recommended transport.
+  actively maintained; set `MESSAGING_PROVIDER=agentphone` only if explicitly needed.
 
 You also need the **Google OAuth client**, a **Neon database**, a **Gemini API key**
 (for the LiteLLM proxy), and credentials for your chosen messaging provider.

@@ -240,10 +240,10 @@ cp .env.litellm.example   .env.litellm     # apps/litellm proxy
 ```
 
 Each `*.example` is the full contract for its app — every variable, who reads it,
-and which ones are shared. The load-bearing shared secrets are
-**`DEVICE_TOKEN_PEPPER`** (must be byte-identical in `.env.control` and
-`.env.dashboard` — token hashes won't match otherwise, silently breaking pairing),
-`SSE_TICKET_SECRET`, and `DATABASE_URL` (all likewise shared between those two).
+and which ones are shared. The load-bearing shared secret is
+**`DEVICE_TOKEN_PEPPER`**: it MUST be byte-identical in `.env.control` and
+`.env.dashboard` (token hashes won't match otherwise, and pairing silently breaks);
+`SSE_TICKET_SECRET` and `DATABASE_URL` are likewise shared between those two.
 
 **Messaging provider** (`MESSAGING_PROVIDER`): The system now defaults to Sendblue; AgentPhone is retired from production and available as a legacy opt-in only.
 - `sendblue` (default) — Sendblue API. Requires `SENDBLUE_API_KEY_ID`,
